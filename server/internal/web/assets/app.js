@@ -164,6 +164,10 @@ const state = {
   dirty: false,
 };
 
+/** The row being dragged, if any. Declared up here with the rest of the
+ *  in-flight state because viewIsBusy has to consult it. */
+let dragID = null;
+
 async function loadState({ keepView = false } = {}) {
   try {
     state.data = await api('/state');
@@ -192,8 +196,32 @@ const FIELD_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA']);
  *  focused, or text they typed and haven't saved yet. */
 function viewIsBusy() {
   if (state.dirty) return true;
+  // A drag that outlives a tick would have its rows swapped mid-flight, and
+  // the drop would land on an element that no longer exists.
+  if (dragID) return true;
   const el = document.activeElement;
-  return !!el && FIELD_TAGS.has(el.tagName) && $('#view').contains(el);
+  if (el && FIELD_TAGS.has(el.tagName) && $('#view').contains(el)) return true;
+  // Text selected in the view is usually the payload preview on its way to
+  // somebody's clipboard; repainting deselects it.
+  const selection = window.getSelection();
+  return (
+    !!selection &&
+    !selection.isCollapsed &&
+    !!selection.anchorNode &&
+    $('#view').contains(selection.anchorNode)
+  );
+}
+
+/** Fill in a field on the user's behalf.
+ *
+ *  Assigning `.value` fires no `input` event, so anything that writes a field
+ *  for somebody — an interval preset, a picked search result — has to declare
+ *  it here. Otherwise the poll sees a view nobody has touched, repaints it,
+ *  and their choice silently reverts to whatever is saved. */
+function setField(el, value) {
+  if (!el) return;
+  el.value = value;
+  state.dirty = true;
 }
 
 /** The background poll.
@@ -1076,7 +1104,7 @@ $('#view').addEventListener('click', async (event) => {
 
   const match = event.target.closest('[data-symbol]');
   if (match) {
-    $('#add-symbol').value = match.dataset.symbol;
+    setField($('#add-symbol'), match.dataset.symbol);
     $('#matches').innerHTML = '';
     return;
   }
@@ -1105,7 +1133,7 @@ $('#view').addEventListener('click', async (event) => {
   if (preset) {
     const input = $('#refreshSeconds');
     if (input) {
-      input.value = preset.dataset.preset;
+      setField(input, preset.dataset.preset);
       for (const chip of $$('[data-preset]')) {
         chip.classList.toggle('btn--active', chip === preset);
         chip.classList.toggle('btn--outline', chip === preset);
@@ -1151,7 +1179,6 @@ $('#refresh-now').addEventListener('click', () => {
 });
 
 /* Drag-and-drop reordering (pointer devices; the ↑↓ buttons cover touch). */
-let dragID = null;
 
 $('#view').addEventListener('dragstart', (event) => {
   const row = event.target.closest('.quote');
@@ -1183,6 +1210,9 @@ $('#view').addEventListener('drop', (event) => {
   const ids = orderedIDs();
   const from = ids.indexOf(dragID);
   const to = ids.indexOf(row.dataset.id);
+  // The drag is over either way, and a dragID left set would hold the poll off
+  // the view for good if `dragend` never arrived.
+  dragID = null;
   if (from < 0 || to < 0 || from === to) return;
   ids.splice(to, 0, ids.splice(from, 1)[0]);
   act(() => post('/tickers/reorder', { ids }));
