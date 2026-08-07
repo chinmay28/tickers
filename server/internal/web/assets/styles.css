@@ -322,9 +322,9 @@ svg {
   border: 1px solid var(--border-strong);
   color: var(--muted);
 }
-.chip--placeholder {
-  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
-  color: var(--warn);
+.chip--pinned {
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+  color: var(--primary);
 }
 .chip--off {
   border-color: var(--border);

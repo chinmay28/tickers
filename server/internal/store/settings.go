@@ -21,6 +21,7 @@ const (
 	SettingQuoteBaseURL     = "quote_base_url"
 	SettingQuoteTimeout     = "quote_timeout_seconds"
 	SettingQuoteUserAgent   = "quote_user_agent"
+	SettingPinnedSymbols    = "pinned_symbols"
 	SettingSeeded           = "seeded"
 )
 
@@ -34,6 +35,11 @@ const (
 	// A user agent long enough to be a paste accident rather than a browser
 	// string; the field is free text otherwise.
 	MaxUserAgentLen = 512
+	// MaxPinnedSymbols bounds the pinned list. Pinning is a way to keep a
+	// handful of symbols above the fold; pinning everything pins nothing, and
+	// the cap is what stops a paste from turning the setting into a second
+	// watchlist.
+	MaxPinnedSymbols = 50
 )
 
 // Config is the tunable behaviour of the refresh loop and the quote source, as
@@ -56,14 +62,31 @@ type Config struct {
 	// target, and being able to change it without a redeploy is the difference
 	// between a five-second fix and a rebuild.
 	QuoteUserAgent string `json:"quoteUserAgent"`
+
+	// PinnedSymbols are the symbols that sort above everything else on the
+	// watchlist. It is a set, not an ordering — the watchlist's own order still
+	// decides the sequence within the pinned group, so pinning never takes
+	// drag-to-reorder away from a row.
+	//
+	// It holds *symbols* rather than ticker IDs on purpose: it survives
+	// removing and re-adding a symbol, and it is something a person can read
+	// and edit in a text field.
+	//
+	// A pinned symbol that isn't on the watchlist is simply inert, so deleting
+	// a ticker never has to reach into settings to keep them consistent.
+	PinnedSymbols []string `json:"pinnedSymbols"`
 }
 
 // DefaultConfig is what a fresh install runs with: a five-minute poll (the
 // cadence the original script's cron entry used), publishing every cycle,
 // three days of history behind the sparklines, and the provider's own
 // defaults for everything about the upstream connection.
+// The pinned list defaults to empty rather than to SeedSymbols: an empty
+// stored value has to mean "nothing is pinned", or unpinning everything would
+// read back as the shipped defaults on the next load. Fresh installs get their
+// seeded symbols pinned by seed(); existing ones by migration 002.
 func DefaultConfig() Config {
-	return Config{RefreshSeconds: 300, PublishOnRefresh: true, HistoryHours: 72}
+	return Config{RefreshSeconds: 300, PublishOnRefresh: true, HistoryHours: 72, PinnedSymbols: []string{}}
 }
 
 // QuoteTimeout is QuoteTimeoutSeconds as a duration; zero means "the
@@ -124,7 +147,40 @@ func (s *Store) Config() (Config, error) {
 	} else {
 		cfg.QuoteUserAgent = v
 	}
+	if v, err := s.Setting(SettingPinnedSymbols); err != nil {
+		return cfg, err
+	} else {
+		cfg.PinnedSymbols = ParsePinnedSymbols(v)
+	}
 	return cfg, nil
+}
+
+// PinnedSymbols reads just the pinned list. The ticker queries need it on
+// every read to order their results, and going through Config() for it would
+// mean six extra lookups per watchlist render.
+func (s *Store) PinnedSymbols() ([]string, error) {
+	v, err := s.Setting(SettingPinnedSymbols)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePinnedSymbols(v), nil
+}
+
+// ParsePinnedSymbols turns the stored comma-separated list into normalised
+// symbols. Blanks and duplicates are dropped, so a value hand-edited in the
+// database ("vti, , VTI") still reads back as something the watchlist can use.
+func ParsePinnedSymbols(raw string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		sym := NormalizeSymbol(part)
+		if sym == "" || seen[sym] {
+			continue
+		}
+		seen[sym] = true
+		out = append(out, sym)
+	}
+	return out
 }
 
 // ConfigPatch is a partial configuration update; a nil field is left alone.
@@ -132,12 +188,13 @@ func (s *Store) Config() (Config, error) {
 // here (it means "go back to the default"), so it has to be distinguishable
 // from "not mentioned".
 type ConfigPatch struct {
-	RefreshSeconds      *int    `json:"refreshSeconds"`
-	PublishOnRefresh    *bool   `json:"publishOnRefresh"`
-	HistoryHours        *int    `json:"historyHours"`
-	QuoteBaseURL        *string `json:"quoteBaseUrl"`
-	QuoteTimeoutSeconds *int    `json:"quoteTimeoutSeconds"`
-	QuoteUserAgent      *string `json:"quoteUserAgent"`
+	RefreshSeconds      *int      `json:"refreshSeconds"`
+	PublishOnRefresh    *bool     `json:"publishOnRefresh"`
+	HistoryHours        *int      `json:"historyHours"`
+	QuoteBaseURL        *string   `json:"quoteBaseUrl"`
+	QuoteTimeoutSeconds *int      `json:"quoteTimeoutSeconds"`
+	QuoteUserAgent      *string   `json:"quoteUserAgent"`
+	PinnedSymbols       *[]string `json:"pinnedSymbols"`
 }
 
 // UpdateConfig validates and persists a patch, returning the config as it now
@@ -191,6 +248,16 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		}
 		cfg.QuoteUserAgent = v
 	}
+	if patch.PinnedSymbols != nil {
+		// Each entry is itself split on commas, so a client that sends the raw
+		// text of the settings field as one string gets the same result as one
+		// that sends a proper list.
+		pinned := ParsePinnedSymbols(strings.Join(*patch.PinnedSymbols, ","))
+		if len(pinned) > MaxPinnedSymbols {
+			return cfg, fmt.Errorf("pinnedSymbols must be a list of at most %d symbols", MaxPinnedSymbols)
+		}
+		cfg.PinnedSymbols = pinned
+	}
 
 	if err := s.SetSettings(map[string]string{
 		SettingRefreshSeconds:   strconv.Itoa(cfg.RefreshSeconds),
@@ -199,6 +266,7 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		SettingQuoteBaseURL:     cfg.QuoteBaseURL,
 		SettingQuoteTimeout:     strconv.Itoa(cfg.QuoteTimeoutSeconds),
 		SettingQuoteUserAgent:   cfg.QuoteUserAgent,
+		SettingPinnedSymbols:    strings.Join(cfg.PinnedSymbols, ","),
 	}); err != nil {
 		return cfg, err
 	}

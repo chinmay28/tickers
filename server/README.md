@@ -97,11 +97,11 @@ What each suite is responsible for:
 
 | Package | Pins |
 |---|---|
-| `store` | migrations apply once and never re-seed; symbol normalisation; placeholder promotion; history excludes failures; sink validation |
+| `store` | migrations apply once and never re-seed; symbol normalisation; origin promotion; pinned symbols sorting to the top and surviving a round trip; history excludes failures; sink validation |
 | `quotes` | the chart-response parse, including the trailing-null series and the meta fallback; per-symbol failure isolation; the settings-precedence merge and reconfiguration while a fetch is in flight |
 | `publish` | **the legacy payload, byte for byte**, and the PUT→POST fallback |
 | `engine` | cycle counts, publish gating, snapshot ordering, cycle serialisation, pushing stored quote settings into the provider |
-| `api` | status codes, the `/api/state` shape, placeholder replacement end to end, quote-source settings round-tripping and validation, static-asset and deep-link serving |
+| `api` | status codes, the `/api/state` shape, replacing a symbol end to end, pinning from Settings ordering the watchlist and the payload, quote-source settings round-tripping and validation, static-asset and deep-link serving |
 
 `internal/publish/publish_test.go` is the compatibility specification: if a
 change would alter what an existing consumer receives, it fails there first.

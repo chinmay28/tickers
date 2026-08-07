@@ -2,6 +2,9 @@ package store
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,9 +45,148 @@ func TestOpenAppliesMigrationsAndSeeds(t *testing.T) {
 		if ticker.Symbol != SeedSymbols[i] {
 			t.Errorf("ticker %d is %s, want %s (seed order is the payload order)", i, ticker.Symbol, SeedSymbols[i])
 		}
-		if !ticker.Placeholder() {
-			t.Errorf("seeded %s should be a placeholder", ticker.Symbol)
+		if !ticker.Pinned {
+			t.Errorf("seeded %s should be pinned", ticker.Symbol)
 		}
+	}
+
+	cfg, err := st.Config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if !slices.Equal(cfg.PinnedSymbols, SeedSymbols) {
+		t.Errorf("pinned list is %v, want the seeded symbols %v", cfg.PinnedSymbols, SeedSymbols)
+	}
+}
+
+func TestPinnedTickersSortToTheTop(t *testing.T) {
+	st := newTestStore(t)
+
+	// Nothing pinned: the list is exactly `position` order.
+	if _, err := st.UpdateConfig(ConfigPatch{PinnedSymbols: &[]string{}}); err != nil {
+		t.Fatalf("unpin everything: %v", err)
+	}
+	unpinned, _ := st.Tickers()
+	for i, ticker := range unpinned {
+		if ticker.Symbol != SeedSymbols[i] {
+			t.Fatalf("with nothing pinned, ticker %d is %s, want %s", i, ticker.Symbol, SeedSymbols[i])
+		}
+		if ticker.Pinned {
+			t.Errorf("%s is flagged pinned after the list was cleared", ticker.Symbol)
+		}
+	}
+
+	// Pinning lifts rows to the front. The pinned list is a set, so the
+	// watchlist's own order still decides the sequence within each group —
+	// BTC-USD is last on the watchlist and stays behind P once both are up top.
+	pins := []string{"BTC-USD", "P"}
+	if _, err := st.UpdateConfig(ConfigPatch{PinnedSymbols: &pins}); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	got, err := st.Tickers()
+	if err != nil {
+		t.Fatalf("tickers: %v", err)
+	}
+	if got[0].Symbol != "P" || got[1].Symbol != "BTC-USD" {
+		t.Fatalf("pinned rows are %s,%s; want P,BTC-USD", got[0].Symbol, got[1].Symbol)
+	}
+	if !got[0].Pinned || !got[1].Pinned || got[2].Pinned {
+		t.Error("Pinned was not stamped to match the configured list")
+	}
+	var rest []string
+	for _, ticker := range got[2:] {
+		rest = append(rest, ticker.Symbol)
+	}
+	if want := []string{"VTI", "GLD", "ORCL", "STRC", "IBIT"}; !slices.Equal(rest, want) {
+		t.Errorf("unpinned tail is %v, want %v — relative order was not preserved", rest, want)
+	}
+
+	// The refresh loop and the payload see the same order.
+	enabled, err := st.EnabledTickers()
+	if err != nil {
+		t.Fatalf("enabled tickers: %v", err)
+	}
+	if enabled[0].Symbol != "P" {
+		t.Errorf("enabled list starts with %s, want the pinned P", enabled[0].Symbol)
+	}
+
+	// A single lookup carries the same flag as the list does.
+	if one, err := st.Ticker(got[0].ID); err != nil || !one.Pinned {
+		t.Errorf("Ticker(%s).Pinned = %v (err %v), want true", got[0].Symbol, one.Pinned, err)
+	}
+}
+
+func TestPinnedSymbolsNormalizeAndAreBounded(t *testing.T) {
+	st := newTestStore(t)
+
+	messy := []string{" vti ", "", "gld,ibit", "VTI"}
+	cfg, err := st.UpdateConfig(ConfigPatch{PinnedSymbols: &messy})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	want := []string{"VTI", "GLD", "IBIT"}
+	if !slices.Equal(cfg.PinnedSymbols, want) {
+		t.Fatalf("pinned = %v, want %v (upper-cased, comma-split, deduped, blanks dropped)", cfg.PinnedSymbols, want)
+	}
+	if again, _ := st.Config(); !slices.Equal(again.PinnedSymbols, want) {
+		t.Errorf("pinned list did not persist: %v", again.PinnedSymbols)
+	}
+
+	// Clearing must stay cleared rather than reading back as the seeded default.
+	if _, err := st.UpdateConfig(ConfigPatch{PinnedSymbols: &[]string{}}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if again, _ := st.Config(); len(again.PinnedSymbols) != 0 {
+		t.Errorf("cleared pinned list came back as %v", again.PinnedSymbols)
+	}
+
+	tooMany := make([]string, MaxPinnedSymbols+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("SYM%d", i)
+	}
+	if _, err := st.UpdateConfig(ConfigPatch{PinnedSymbols: &tooMany}); err == nil {
+		t.Error("a pinned list over the cap was accepted")
+	}
+	if again, _ := st.Config(); len(again.PinnedSymbols) != 0 {
+		t.Errorf("a rejected pin list still wrote %v", again.PinnedSymbols)
+	}
+}
+
+func TestMigrationPinsAnExistingInstallsSeededSymbols(t *testing.T) {
+	path := t.TempDir() + "/legacy.sqlite"
+
+	// Stand up a pre-pinning database: schema at 001, seeded, no pinned key.
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := st.db.Exec(`DELETE FROM settings WHERE key = ?`, SettingPinnedSymbols); err != nil {
+		t.Fatalf("clear pinned key: %v", err)
+	}
+	if _, err := st.db.Exec(`DELETE FROM schema_migrations WHERE id = '002_pin_seeded_symbols'`); err != nil {
+		t.Fatalf("rewind migration: %v", err)
+	}
+	// One symbol was replaced by the user, so it must not come back pinned.
+	replaced := mustTicker(t, st, "STRC")
+	symbol := "AAPL"
+	if _, err := st.UpdateTicker(replaced.ID, TickerPatch{Symbol: &symbol}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	st.Close()
+
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer upgraded.Close()
+
+	cfg, err := upgraded.Config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	want := []string{"VTI", "GLD", "P", "ORCL", "IBIT", "BTC-USD"}
+	if !slices.Equal(cfg.PinnedSymbols, want) {
+		t.Fatalf("migrated pinned list is %v, want %v", cfg.PinnedSymbols, want)
 	}
 }
 
@@ -108,62 +250,69 @@ func TestCreateTickerNormalizesAndRejectsDuplicates(t *testing.T) {
 	}
 }
 
-func TestUpdateTickerPromotesPlaceholderAndDropsStaleQuote(t *testing.T) {
+func TestUpdateTickerPromotesOriginAndDropsStaleQuote(t *testing.T) {
 	st := newTestStore(t)
-	placeholder := mustTicker(t, st, "P")
+	seeded := mustTicker(t, st, "P")
 
 	price := 42.5
 	if err := st.SaveQuote(Quote{
-		TickerID: placeholder.ID, Symbol: "P", Price: &price,
+		TickerID: seeded.ID, Symbol: "P", Price: &price,
 		Status: StatusOK, FetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("save quote: %v", err)
 	}
 
 	symbol := "MSFT"
-	updated, err := st.UpdateTicker(placeholder.ID, TickerPatch{Symbol: &symbol})
+	updated, err := st.UpdateTicker(seeded.ID, TickerPatch{Symbol: &symbol})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if updated.Symbol != "MSFT" {
 		t.Errorf("symbol %q, want MSFT", updated.Symbol)
 	}
-	if updated.Placeholder() {
-		t.Error("a replaced placeholder should no longer be one")
+	if updated.Origin != OriginUser {
+		t.Errorf("origin %q after a replacement, want %q", updated.Origin, OriginUser)
+	}
+	// Pins are keyed by symbol, so retyping a pinned row's symbol unpins it.
+	if updated.Pinned {
+		t.Error("the new symbol isn't on the pinned list, so the row must not be pinned")
 	}
 
 	quotes, err := st.Quotes()
 	if err != nil {
 		t.Fatalf("quotes: %v", err)
 	}
-	if _, ok := quotes[placeholder.ID]; ok {
+	if _, ok := quotes[seeded.ID]; ok {
 		t.Error("the old symbol's quote survived the replacement")
 	}
 }
 
 func TestUpdateTickerLabelOnlyKeepsQuoteAndOrigin(t *testing.T) {
 	st := newTestStore(t)
-	placeholder := mustTicker(t, st, "GLD")
+	seeded := mustTicker(t, st, "GLD")
 
 	price := 200.0
 	if err := st.SaveQuote(Quote{
-		TickerID: placeholder.ID, Symbol: "GLD", Price: &price,
+		TickerID: seeded.ID, Symbol: "GLD", Price: &price,
 		Status: StatusOK, FetchedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("save quote: %v", err)
 	}
 
 	label := "Shiny"
-	updated, err := st.UpdateTicker(placeholder.ID, TickerPatch{Label: &label})
+	updated, err := st.UpdateTicker(seeded.ID, TickerPatch{Label: &label})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if !updated.Placeholder() {
-		t.Error("relabelling shouldn't promote a placeholder — only replacing its symbol does")
+	if updated.Origin != OriginSeed {
+		t.Error("relabelling shouldn't promote the origin — only replacing the symbol does")
+	}
+	if !updated.Pinned {
+		t.Error("relabelling dropped the pin; only a symbol change should")
 	}
 
 	quotes, _ := st.Quotes()
-	if _, ok := quotes[placeholder.ID]; !ok {
+	if _, ok := quotes[seeded.ID]; !ok {
 		t.Error("relabelling dropped the quote; only a symbol change should")
 	}
 }
@@ -300,8 +449,11 @@ func TestSinkValidation(t *testing.T) {
 func TestConfigRoundTripAndFloor(t *testing.T) {
 	st := newTestStore(t)
 
-	if cfg, _ := st.Config(); cfg != DefaultConfig() {
-		t.Fatalf("fresh config is %+v, want the default %+v", cfg, DefaultConfig())
+	// A fresh store has the seeded symbols pinned; everything else is default.
+	fresh := DefaultConfig()
+	fresh.PinnedSymbols = SeedSymbols
+	if cfg, _ := st.Config(); !reflect.DeepEqual(cfg, fresh) {
+		t.Fatalf("fresh config is %+v, want %+v", cfg, fresh)
 	}
 
 	tooFast := 5
@@ -321,7 +473,7 @@ func TestConfigRoundTripAndFloor(t *testing.T) {
 	if cfg.HistoryHours != DefaultConfig().HistoryHours {
 		t.Error("an untouched field changed")
 	}
-	if again, _ := st.Config(); again != cfg {
+	if again, _ := st.Config(); !reflect.DeepEqual(again, cfg) {
 		t.Fatalf("config did not persist: %+v vs %+v", again, cfg)
 	}
 }
@@ -437,7 +589,7 @@ func TestQuoteSourceSettingsRoundTripAndValidate(t *testing.T) {
 	if cfg.QuoteTimeout() != 30*time.Second {
 		t.Errorf("QuoteTimeout() = %v, want 30s", cfg.QuoteTimeout())
 	}
-	if again, _ := st.Config(); again != cfg {
+	if again, _ := st.Config(); !reflect.DeepEqual(again, cfg) {
 		t.Fatalf("quote settings did not persist: %+v vs %+v", again, cfg)
 	}
 

@@ -207,10 +207,9 @@ func (s *Server) providerView() *providerView {
 // join two collections on every repaint.
 type tickerView struct {
 	store.Ticker
-	Placeholder bool         `json:"placeholder"`
-	Quote       *store.Quote `json:"quote"`
-	Change      *float64     `json:"change"`
-	ChangePct   *float64     `json:"changePercent"`
+	Quote     *store.Quote `json:"quote"`
+	Change    *float64     `json:"change"`
+	ChangePct *float64     `json:"changePercent"`
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +251,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			"minRefreshSeconds": store.MinRefreshSeconds,
 			"minQuoteTimeout":   store.MinQuoteTimeout,
 			"maxQuoteTimeout":   store.MaxQuoteTimeout,
+			"maxPinnedSymbols":  store.MaxPinnedSymbols,
 			"formats":           []string{store.FormatMinion, store.FormatDetailed},
 			"seedSymbols":       store.SeedSymbols,
 		},
@@ -270,7 +270,7 @@ func (s *Server) tickerViews() ([]tickerView, error) {
 
 	views := make([]tickerView, 0, len(tickers))
 	for _, t := range tickers {
-		v := tickerView{Ticker: t, Placeholder: t.Placeholder()}
+		v := tickerView{Ticker: t}
 		if q, ok := quotes[t.ID]; ok {
 			quote := q
 			v.Quote = &quote
@@ -350,7 +350,7 @@ func (s *Server) handleUpdateTicker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A changed symbol dropped its stale quote (see store.UpdateTicker), so
-	// refill it now — otherwise a replaced placeholder shows a blank row.
+	// refill it now — otherwise the row sits blank until the next poll.
 	if body.Symbol != nil {
 		if _, err := s.engine.RunCycle(r.Context(), store.TriggerManual); err != nil {
 			s.log.Warn("refresh after replacing ticker failed", "symbol", t.Symbol, "error", err)
@@ -521,6 +521,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"minRefreshSeconds": store.MinRefreshSeconds,
 		"minQuoteTimeout":   store.MinQuoteTimeout,
 		"maxQuoteTimeout":   store.MaxQuoteTimeout,
+		"maxPinnedSymbols":  store.MaxPinnedSymbols,
 	})
 }
 

@@ -2,9 +2,10 @@ package store
 
 import "time"
 
-// Origin values for a Ticker. The distinction is only ever cosmetic — the
-// refresh loop treats both identically — but it's what lets the web client say
-// "this one came with the box, replace it" about a row nobody chose.
+// Origin values for a Ticker. It records where a row came from — the shipped
+// watchlist or a person — and nothing reads it at runtime; it is provenance
+// for whoever opens the database, and what migration 002 used to work out
+// which symbols to pin on an existing install.
 const (
 	OriginSeed = "seed"
 	OriginUser = "user"
@@ -26,11 +27,13 @@ type Ticker struct {
 	Origin    string    `json:"origin"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
-}
 
-// Placeholder reports whether this row is one of the seeded defaults the user
-// hasn't touched yet.
-func (t Ticker) Placeholder() bool { return t.Origin == OriginSeed }
+	// Pinned is derived, not stored: it says whether this row's symbol is on
+	// the pinned list in Settings. Every query that returns a Ticker stamps it,
+	// so the client never has to join the watchlist against the settings to
+	// know which rows carry the chip.
+	Pinned bool `json:"pinned"`
+}
 
 // Quote is the most recent reading for a ticker. A failed fetch is still a
 // quote — status "error" with the reason — because "we tried and it didn't

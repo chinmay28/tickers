@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -156,8 +157,8 @@ func TestStateBundlesEverythingTheClientNeeds(t *testing.T) {
 	if first["symbol"] != "VTI" {
 		t.Fatalf("first ticker is %v, want VTI", first["symbol"])
 	}
-	if first["placeholder"] != true {
-		t.Error("seeded tickers must be flagged as placeholders so the UI can offer Replace")
+	if first["pinned"] != true {
+		t.Error("seeded tickers must be flagged as pinned so the UI can chip them")
 	}
 	// The change is computed server-side so the client doesn't re-derive it.
 	if change, ok := first["change"].(float64); !ok || change != 2 {
@@ -227,7 +228,7 @@ func TestCreateTickerRejectsDuplicatesAndBlanks(t *testing.T) {
 	}
 }
 
-func TestReplacePlaceholderClearsTheFlagAndRepricesIt(t *testing.T) {
+func TestReplacingASymbolUnpinsItAndRepricesIt(t *testing.T) {
 	h := newHarness(t, stubProvider{prices: map[string]float64{"P": 30, "MSFT": 420}})
 	if _, err := h.engine.RunCycle(context.Background(), store.TriggerManual); err != nil {
 		t.Fatalf("cycle: %v", err)
@@ -242,7 +243,7 @@ func TestReplacePlaceholderClearsTheFlagAndRepricesIt(t *testing.T) {
 		}
 	}
 	if id == "" {
-		t.Fatal("placeholder P is missing")
+		t.Fatal("seeded P is missing")
 	}
 
 	rec, body := h.do(t, http.MethodPatch, "/api/tickers/"+id, map[string]any{"symbol": "msft"})
@@ -260,8 +261,9 @@ func TestReplacePlaceholderClearsTheFlagAndRepricesIt(t *testing.T) {
 		if view["id"] != id {
 			continue
 		}
-		if view["placeholder"] != false {
-			t.Error("a replaced placeholder is still flagged as one")
+		// Pins are keyed by symbol, so the replacement is not on the list.
+		if view["pinned"] != false {
+			t.Error("a replaced symbol is still flagged as pinned")
 		}
 		// The old price must be gone and the new one already in place.
 		quote, ok := view["quote"].(map[string]any)
@@ -398,6 +400,67 @@ func TestSettingsRoundTripAndFloor(t *testing.T) {
 	}
 	if body["minRefreshSeconds"] != float64(store.MinRefreshSeconds) {
 		t.Errorf("minRefreshSeconds = %v", body["minRefreshSeconds"])
+	}
+}
+
+func TestPinnedSymbolsAreConfiguredInSettingsAndSortTheWatchlist(t *testing.T) {
+	h := newHarness(t, stubProvider{})
+
+	// Out of the box the seeded symbols are the pinned list.
+	_, body := h.do(t, http.MethodGet, "/api/settings", nil)
+	pinned := body["settings"].(map[string]any)["pinnedSymbols"].([]any)
+	if len(pinned) != len(store.SeedSymbols) || pinned[0] != store.SeedSymbols[0] {
+		t.Fatalf("pinnedSymbols = %v, want the seeded symbols", pinned)
+	}
+
+	// Pin one symbol from the back of the watchlist; it must come out first.
+	last := store.SeedSymbols[len(store.SeedSymbols)-1]
+	rec, body := h.do(t, http.MethodPatch, "/api/settings", map[string]any{
+		"pinnedSymbols": []string{strings.ToLower(last)},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch returned %d: %v", rec.Code, body)
+	}
+	if got := body["settings"].(map[string]any)["pinnedSymbols"].([]any); len(got) != 1 || got[0] != last {
+		t.Fatalf("pinnedSymbols = %v, want the normalised [%s]", got, last)
+	}
+
+	_, state := h.do(t, http.MethodGet, "/api/state", nil)
+	views := state["tickers"].([]any)
+	first := views[0].(map[string]any)
+	if first["symbol"] != last || first["pinned"] != true {
+		t.Fatalf("watchlist starts with %v (pinned %v), want the pinned %s", first["symbol"], first["pinned"], last)
+	}
+	// Everything else keeps the watchlist's own order behind it.
+	for i, want := range store.SeedSymbols[:len(store.SeedSymbols)-1] {
+		view := views[i+1].(map[string]any)
+		if view["symbol"] != want {
+			t.Fatalf("unpinned row %d is %v, want %s", i, view["symbol"], want)
+		}
+		if view["pinned"] != false {
+			t.Errorf("%v is flagged pinned but is not on the list", view["symbol"])
+		}
+	}
+
+	// The published payload is built from the same order.
+	if rec, _ := h.do(t, http.MethodPost, "/api/refresh", nil); rec.Code != http.StatusOK {
+		t.Fatalf("refresh returned %d", rec.Code)
+	}
+	snap, err := h.engine.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snap.Quotes[0].Symbol != last {
+		t.Errorf("payload starts with %s, want the pinned %s", snap.Quotes[0].Symbol, last)
+	}
+
+	// Over the cap is the caller's mistake, not a 500.
+	tooMany := make([]string, store.MaxPinnedSymbols+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("SYM%d", i)
+	}
+	if rec, _ := h.do(t, http.MethodPatch, "/api/settings", map[string]any{"pinnedSymbols": tooMany}); rec.Code != http.StatusBadRequest {
+		t.Errorf("an over-long pinned list returned %d, want 400", rec.Code)
 	}
 }
 

@@ -86,4 +86,23 @@ CREATE TABLE settings (
 );
 `,
 	},
+	{
+		// Pinning replaced the old "placeholder" chip: the seeded symbols used
+		// to be flagged by `origin = 'seed'`, and are now the default contents
+		// of the pinned list in Settings. This carries an existing install over
+		// — whatever of the shipped watchlist it still has, in its current
+		// order, becomes its initial pinned list.
+		//
+		// INSERT OR IGNORE, so an install that somehow already has the key
+		// keeps it. The HAVING clause is what stops a watchlist with no seeded
+		// rows left from writing a NULL: the aggregate always produces one row,
+		// and this drops it when there was nothing to concatenate.
+		ID: "002_pin_seeded_symbols",
+		SQL: `
+INSERT OR IGNORE INTO settings (key, value)
+SELECT 'pinned_symbols', group_concat(symbol, ',')
+  FROM (SELECT symbol FROM tickers WHERE origin = 'seed' ORDER BY position, symbol)
+HAVING count(*) > 0;
+`,
+	},
 }

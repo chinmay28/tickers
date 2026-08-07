@@ -93,15 +93,35 @@ schema_migrations(id PK, applied_at)
 
 A few decisions worth naming:
 
-**`origin` is what makes placeholders work.** A fresh install seeds the seven
-symbols from the script with `origin = 'seed'`. That is purely cosmetic to the
-refresh loop, but it is what lets the UI put a `placeholder` chip and a
-**Replace** button on a row nobody chose. Changing a row's symbol promotes it to
-`origin = 'user'`, and the chip goes away for good.
+**Pinned symbols live in `settings`, not on the ticker row.** The pinned list
+is one comma-separated `settings` value holding *symbols*, and every query that
+returns a ticker stamps a derived `Pinned` flag onto it. Keying on symbols
+rather than ticker IDs is what makes the setting survive removing and re-adding
+a row, and what makes it something a person can read and edit in a text field.
+
+It is a **set, not an ordering**: the sort that lifts pinned rows is stable and
+keys on nothing but pinned-ness, so `position` still decides the sequence
+*within* each group. Pinning a row therefore never takes drag-to-reorder away
+from it, and unpinning drops it straight back into the slot it would otherwise
+have had. Ordering the pinned group by the settings list instead would have
+made dragging a pinned row do nothing — with the shipped watchlist pinned by
+default, that is every row on a fresh install.
+
+**`origin` is provenance now, nothing more.** A fresh install seeds the seven
+symbols from the script with `origin = 'seed'`, and changing a row's symbol
+promotes it to `origin = 'user'`. Nothing reads it at runtime — it is there for
+whoever opens the database, and it is what migration `002` used to work out
+which symbols to pin on an install that predates pinning. It used to drive a
+`placeholder` chip and a **Replace** button; that chip is now the `pinned` one,
+and what it reflects is a setting rather than where the row came from.
 
 **Seeding is keyed off a settings flag, not "is the table empty".** Otherwise
 deleting every ticker would resurrect the author's watchlist on the next
-restart — the opposite of what someone who just cleared the list wants.
+restart — the opposite of what someone who just cleared the list wants. The
+same reasoning sets the *default* pinned list from `seed()` rather than from
+`DefaultConfig()`: an unset key and an empty one have to mean different things,
+or unpinning everything would read back as the shipped defaults on the next
+load.
 
 **A failed read is still a quote.** `status = 'error'` with the reason, rather
 than no row. "We tried and it didn't work" is information the UI must show, and

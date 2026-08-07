@@ -68,6 +68,16 @@ function ago(iso) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+/** Split a hand-typed symbol list ("vti, gld btc-usd") into normalised
+ *  symbols. The server normalises again on the way in; doing it here too is
+ *  what makes the settings field show back what you meant to type. */
+function symbolList(raw) {
+  return String(raw ?? '')
+    .split(/[,\s]+/)
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+}
+
 function clock(iso) {
   if (!iso) return '—';
   const date = new Date(iso);
@@ -267,7 +277,7 @@ function renderFooter(data) {
 /* ---------------------------- Watchlist ---------------------------- */
 
 function renderWatchlist(data) {
-  const placeholders = data.tickers.filter((t) => t.placeholder).length;
+  const pinned = data.tickers.filter((t) => t.pinned).length;
 
   return `
     <div class="page-head">
@@ -276,11 +286,11 @@ function renderWatchlist(data) {
         <p>
           Every enabled symbol is fetched on the schedule and published to your
           destinations. ${
-            placeholders
-              ? `<strong>${placeholders}</strong> ${
-                  placeholders === 1 ? 'symbol is' : 'symbols are'
-                } still the shipped placeholder — replace them with your own.`
-              : ''
+            pinned
+              ? `<strong>${pinned}</strong> ${
+                  pinned === 1 ? 'symbol is' : 'symbols are'
+                } pinned to the top — edit the list in <a href="#/settings">Settings</a>.`
+              : 'Nothing is pinned; <a href="#/settings">Settings</a> is where you choose what stays on top.'
           }
         </p>
       </div>
@@ -313,7 +323,7 @@ function renderWatchlist(data) {
         <h2 class="card__title">${data.tickers.length} ${
           data.tickers.length === 1 ? 'symbol' : 'symbols'
         }</h2>
-        <span class="field__hint">Drag to reorder — the order is the payload's order.</span>
+        <span class="field__hint">Drag to reorder — the order is the payload's order. Pinned symbols stay on top.</span>
       </div>
       <div class="card__body">
         ${
@@ -359,7 +369,7 @@ function renderQuote(t) {
         <span class="quote__symbol">${esc(t.symbol)}</span>
         ${t.label ? `<span class="quote__name">${esc(t.label)}</span>` : ''}
         ${!t.label && q?.shortName ? `<span class="quote__name">${esc(q.shortName)}</span>` : ''}
-        ${t.placeholder ? `<span class="chip chip--placeholder">placeholder</span>` : ''}
+        ${t.pinned ? `<span class="chip chip--pinned">pinned</span>` : ''}
         ${t.enabled ? '' : `<span class="chip chip--off">paused</span>`}
       </div>
 
@@ -370,8 +380,9 @@ function renderQuote(t) {
       ${failed ? `<div class="quote__error">${esc(q.error)}</div>` : ''}
 
       <div class="quote__actions">
-        <button class="btn btn--sm btn--outline" data-action="edit" data-id="${esc(t.id)}">
-          ${t.placeholder ? 'Replace' : 'Edit'}
+        <button class="btn btn--sm btn--outline" data-action="edit" data-id="${esc(t.id)}">Edit</button>
+        <button class="btn btn--sm btn--ghost" data-action="pin" data-id="${esc(t.id)}">
+          ${t.pinned ? 'Unpin' : 'Pin'}
         </button>
         <button class="btn btn--sm btn--ghost" data-action="toggle" data-id="${esc(t.id)}">
           ${t.enabled ? 'Pause' : 'Resume'}
@@ -667,6 +678,7 @@ function renderSettings(data) {
   const min = data.meta.minRefreshSeconds ?? 30;
   const minTimeout = data.meta.minQuoteTimeout ?? 5;
   const maxTimeout = data.meta.maxQuoteTimeout ?? 120;
+  const maxPinned = data.meta.maxPinnedSymbols ?? 50;
   const provider = data.provider;
   const runtime = data.runtime ?? {};
 
@@ -711,6 +723,26 @@ function renderSettings(data) {
               Publish after every refresh
             </label>
             <span class="field__hint">Off means quotes are still stored, but only sent when you press Publish now.</span>
+          </div>
+        </div>
+
+        <h3 class="card__subtitle">Pinned tickers</h3>
+        <p class="field__hint" style="margin:0 0 0.7rem">
+          Symbols listed here sort above everything else on the watchlist. It is
+          a set, not an order — the watchlist's own order still decides the
+          sequence within the pinned group, so drag-to-reorder keeps working.
+          A symbol that isn't on the watchlist is simply ignored.
+        </p>
+        <div class="form-grid">
+          <div class="field">
+            <label class="field__label" for="pinnedSymbols">Pinned symbols</label>
+            <input class="input input--mono" id="pinnedSymbols" name="pinnedSymbols"
+                   value="${esc((s.pinnedSymbols ?? []).join(', '))}"
+                   placeholder="VTI, BTC-USD" />
+            <span class="field__hint">
+              Comma-separated, up to ${maxPinned}. Leave empty to pin nothing —
+              the <strong>Pin</strong> button on each row edits this same list.
+            </span>
           </div>
         </div>
 
@@ -773,7 +805,7 @@ function renderSettings(data) {
                      <tr><th>User agent in use</th><td class="wrap"><code>${esc(provider.userAgent)}</code></td></tr>`
                   : `<tr><th>Quote provider</th><td>${esc(data.engine.provider)}</td></tr>`
               }
-              <tr><th>Seeded placeholders</th><td class="wrap"><code>${esc((data.meta.seedSymbols ?? []).join(', '))}</code></td></tr>
+              <tr><th>Seeded symbols</th><td class="wrap"><code>${esc((data.meta.seedSymbols ?? []).join(', '))}</code></td></tr>
               <tr><th>Upgrades</th><td class="wrap">Re-run <code>scripts/quickstart.sh</code>. It snapshots the database, swaps code in, and rolls back if the new version fails its health check.</td></tr>
             </tbody>
           </table>
@@ -819,6 +851,19 @@ $('#view').addEventListener('click', (event) => {
     case 'toggle': {
       const t = state.data.tickers.find((x) => x.id === id);
       act(() => patch(`/tickers/${id}`, { enabled: !t.enabled }));
+      break;
+    }
+    // Pinning is a settings edit, not a ticker edit — this button is a
+    // shortcut into the same list the Settings page shows as text.
+    case 'pin': {
+      const t = state.data.tickers.find((x) => x.id === id);
+      const current = state.data.settings.pinnedSymbols ?? [];
+      const next = t.pinned
+        ? current.filter((sym) => sym !== t.symbol)
+        : [...current, t.symbol];
+      act(() => patch('/settings', { pinnedSymbols: next }), {
+        success: `${t.pinned ? 'Unpinned' : 'Pinned'} ${t.symbol}`,
+      });
       break;
     }
     case 'up':
@@ -935,6 +980,9 @@ $('#view').addEventListener('submit', (event) => {
       refreshSeconds: Number(values.refreshSeconds),
       historyHours: Number(values.historyHours),
       publishOnRefresh: form.elements.publishOnRefresh.checked,
+      // An emptied field means "pin nothing", so it has to reach the server as
+      // an empty list rather than being dropped from the payload.
+      pinnedSymbols: symbolList(values.pinnedSymbols),
     };
     // The quote-source fields only exist for a configurable provider. Send
     // them as strings so a cleared box reaches the server as "" — which is
