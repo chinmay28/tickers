@@ -157,11 +157,19 @@ const state = {
   editingSinks: new Set(),
   /** Sparkline points by ticker ID, fetched lazily per row. */
   history: new Map(),
+  /** Symbol-search results, held here rather than poked straight into the DOM
+   *  so a redraw doesn't throw them away between the search and the tap. */
+  matches: null,
   runs: [],
   busy: false,
+  /** An inline, non-`act` request is in flight (a button showing "Testing…"),
+   *  so a background redraw would undo its state mid-flight. */
+  inlineBusy: false,
+  /** A background redraw was skipped and is owed once the field is released. */
+  renderPending: false,
 };
 
-async function loadState() {
+async function loadState(opts) {
   try {
     state.data = await api('/state');
     if (!state.connected) {
@@ -174,11 +182,11 @@ async function loadState() {
     console.warn('state fetch failed', err);
   }
   $('#offline-banner').hidden = state.connected;
-  render();
+  render(opts);
 }
 
 /** Reload everything the current view needs, then redraw. */
-async function refreshView() {
+async function refreshView(opts) {
   if (route() === 'activity') {
     try {
       state.runs = (await api('/runs?limit=40'))?.runs ?? [];
@@ -186,7 +194,7 @@ async function refreshView() {
       state.runs = [];
     }
   }
-  await loadState();
+  await loadState(opts);
 }
 
 /** Wrap an action so the UI can't fire two overlapping mutations, and so
@@ -197,11 +205,128 @@ async function act(fn, { success } = {}) {
   try {
     await fn();
     if (success) toast(success, 'ok');
-    await refreshView();
+    // The user asked for this one, so it redraws even if a field still has
+    // focus — the draft and the caret are put back afterwards.
+    await refreshView({ force: true });
   } catch (err) {
     toast(err.message || String(err), 'error');
   } finally {
     state.busy = false;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Form drafts
+ *
+ * The routed view is redrawn wholesale, and the 10s poll means that happens
+ * under a user who is halfway through typing an endpoint into a form. Two
+ * guards, because either alone leaves a hole:
+ *
+ *   1. A redraw nobody asked for waits while a field has focus. Nothing is
+ *      rebuilt under the cursor, so the caret, the selection and — on iOS,
+ *      where a re-created input closes it — the keyboard all survive.
+ *   2. Every value the user types is stashed by (form, field) name, and put
+ *      back after any redraw that does happen. Redraws the user *did* ask for
+ *      (saving a ticker, adding a destination) still land immediately, and
+ *      they no longer empty the other forms on the page.
+ *
+ * A draft only exists once the user has typed into that field, so restoring
+ * one can never shadow a fresh server value with a stale rendered one.
+ * ------------------------------------------------------------------ */
+
+/** Draft values by form key: { [fieldName]: string | boolean }. */
+const drafts = new Map();
+
+/** A form's identity across redraws. The element is thrown away every time,
+ *  but the key is stable — that is what lets a draft find its way home. */
+function formKey(form) {
+  return form?.dataset?.formKey || form?.id || '';
+}
+
+function isField(el) {
+  return (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement
+  );
+}
+
+/** True while the user is in a field in the routed view. */
+function isTyping() {
+  const el = document.activeElement;
+  return isField(el) && $('#view').contains(el);
+}
+
+function readForm(form) {
+  const values = {};
+  for (const el of form.elements) {
+    if (!el.name || !isField(el)) continue;
+    values[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  return values;
+}
+
+function saveDraft(form) {
+  const key = formKey(form);
+  if (key) drafts.set(key, readForm(form));
+}
+
+function clearDraft(key) {
+  drafts.delete(key);
+}
+
+/** The draft value for one field, for render code that has to agree with what
+ *  the user typed (the interval presets highlight from this, not from the
+ *  saved setting). */
+function draftValue(key, name) {
+  const values = drafts.get(key);
+  return values && name in values ? values[name] : undefined;
+}
+
+function findForm(key) {
+  return $$('form', $('#view')).find((form) => formKey(form) === key) ?? null;
+}
+
+/** Put every stashed value back into the freshly rendered forms. */
+function restoreDrafts() {
+  for (const form of $$('form', $('#view'))) {
+    const values = drafts.get(formKey(form));
+    if (!values) continue;
+    for (const el of form.elements) {
+      if (!el.name || !isField(el) || !(el.name in values)) continue;
+      if (el.type === 'checkbox') el.checked = values[el.name];
+      else el.value = values[el.name];
+    }
+  }
+}
+
+/** Note where the cursor is, in terms that survive the elements being
+ *  re-created: (form key, field name) rather than the node itself. */
+function captureFocus() {
+  const el = document.activeElement;
+  if (!isField(el) || !$('#view').contains(el)) return null;
+  const snap = { key: formKey(el.form), name: el.name, id: el.id, start: null, end: null };
+  try {
+    snap.start = el.selectionStart;
+    snap.end = el.selectionEnd;
+  } catch {
+    // number and url inputs don't expose a selection in every browser.
+  }
+  return snap;
+}
+
+function restoreFocus(snap) {
+  if (!snap) return;
+  const view = $('#view');
+  let el = snap.id ? view.querySelector(`#${CSS.escape(snap.id)}`) : null;
+  if (!el && snap.name) el = findForm(snap.key)?.elements?.[snap.name] ?? null;
+  if (!isField(el)) return;
+  el.focus({ preventScroll: true });
+  if (snap.start === null) return;
+  try {
+    el.setSelectionRange(snap.start, snap.end);
+  } catch {
+    // Same inputs as above; the focus is the part that mattered.
   }
 }
 
@@ -227,7 +352,15 @@ function syncNav() {
  * Render
  * ------------------------------------------------------------------ */
 
-function render() {
+/** Redraw the routed view.
+ *
+ *  `force` marks a redraw the user asked for — a save, a route change, a
+ *  search result. Without it the redraw is a background one (the poll), and it
+ *  is deferred rather than performed while a field has focus; `renderPending`
+ *  remembers that it is owed, and the focusout handler pays it back. The
+ *  header, footer and offline banner live outside #view and update either way,
+ *  so a deferred redraw never means stale status. */
+function render({ force = false } = {}) {
   syncNav();
   const view = $('#view');
   const data = state.data;
@@ -244,6 +377,15 @@ function render() {
   }
 
   $('#app-version').textContent = data.version;
+  renderFooter(data);
+
+  if (!force && (isTyping() || state.inlineBusy)) {
+    state.renderPending = true;
+    return;
+  }
+  state.renderPending = false;
+
+  const focus = captureFocus();
 
   switch (route()) {
     case 'publishing':
@@ -260,7 +402,8 @@ function render() {
       drawSparklines();
   }
 
-  renderFooter(data);
+  restoreDrafts();
+  restoreFocus(focus);
 }
 
 function renderFooter(data) {
@@ -301,7 +444,7 @@ function renderWatchlist(data) {
         <h2 class="card__title">Add a ticker</h2>
       </div>
       <div class="card__body">
-        <form class="add-row" id="add-form" autocomplete="off">
+        <form class="add-row" id="add-form" data-form-key="add-form" autocomplete="off">
           <div class="field">
             <label class="field__label" for="add-symbol">Symbol</label>
             <input class="input input--mono" id="add-symbol" name="symbol"
@@ -314,7 +457,7 @@ function renderWatchlist(data) {
           <button class="btn btn--primary" type="submit">Add</button>
           <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
         </form>
-        <div class="matches" id="matches"></div>
+        <div class="matches" id="matches">${renderMatches()}</div>
       </div>
     </div>
 
@@ -334,6 +477,29 @@ function renderWatchlist(data) {
       </div>
     </div>
   `;
+}
+
+/** The "Search by name" results. Rendered from state rather than written
+ *  straight into #matches, so the next redraw doesn't take the list away
+ *  from under a finger reaching for one of the rows. */
+function renderMatches() {
+  const m = state.matches;
+  if (!m) return '';
+  if (m.status === 'loading') return '<span class="field__hint">Searching…</span>';
+  if (m.status === 'error') {
+    return `<span class="field__hint">Search failed: ${esc(m.message)}</span>`;
+  }
+  if (!m.items.length) {
+    return '<span class="field__hint">No matches. Type the exact symbol instead.</span>';
+  }
+  return m.items
+    .map(
+      (m2) => `<button class="match" type="button" data-symbol="${esc(m2.symbol)}">
+          <span class="match__symbol">${esc(m2.symbol)}</span>
+          <span class="match__meta">${esc(m2.name)} · ${esc(m2.exchange)} · ${esc(m2.type)}</span>
+        </button>`,
+    )
+    .join('');
 }
 
 function renderQuote(t) {
@@ -394,7 +560,7 @@ function renderQuote(t) {
 
       ${
         editing
-          ? `<form class="quote__edit" data-edit="${esc(t.id)}" autocomplete="off">
+          ? `<form class="quote__edit" data-edit="${esc(t.id)}" data-form-key="ticker:${esc(t.id)}" autocomplete="off">
               <div class="field">
                 <label class="field__label">Symbol</label>
                 <input class="input input--mono" name="symbol" value="${esc(t.symbol)}" required />
@@ -539,7 +705,8 @@ function sinkForm(s, data) {
   const formats = data.meta.formats ?? ['minion', 'detailed'];
   const id = s?.id ?? 'new';
   return `
-    <form class="card" style="margin-top:0.7rem" data-sink-form="${esc(id)}" autocomplete="off">
+    <form class="card" style="margin-top:0.7rem" data-sink-form="${esc(id)}"
+          data-form-key="sink:${esc(id)}" autocomplete="off">
       <div class="card__head">
         <h3 class="card__title">${s ? `Edit ${esc(s.name)}` : 'New destination'}</h3>
       </div>
@@ -681,6 +848,9 @@ function renderSettings(data) {
   const maxPinned = data.meta.maxPinnedSymbols ?? 50;
   const provider = data.provider;
   const runtime = data.runtime ?? {};
+  // The chips highlight whatever is in the field, which after an unsaved edit
+  // is the draft rather than the saved interval.
+  const shownRefresh = Number(draftValue('settings-form', 'refreshSeconds') ?? s.refreshSeconds);
 
   return `
     <div class="page-head">
@@ -703,7 +873,7 @@ function renderSettings(data) {
                 .map(
                   (p) =>
                     `<button class="btn btn--sm ${
-                      p.seconds === s.refreshSeconds ? 'btn--outline btn--active' : 'btn--ghost'
+                      p.seconds === shownRefresh ? 'btn--outline btn--active' : 'btn--ghost'
                     }" type="button" data-preset="${p.seconds}">${esc(p.label)}</button>`,
                 )
                 .join('')}
@@ -842,11 +1012,12 @@ $('#view').addEventListener('click', (event) => {
   switch (action) {
     case 'edit':
       state.editing.add(id);
-      render();
+      render({ force: true });
       break;
     case 'cancel-edit':
       state.editing.delete(id);
-      render();
+      clearDraft(`ticker:${id}`);
+      render({ force: true });
       break;
     case 'toggle': {
       const t = state.data.tickers.find((x) => x.id === id);
@@ -875,21 +1046,23 @@ $('#view').addEventListener('click', (event) => {
     case 'delete': {
       const t = state.data.tickers.find((x) => x.id === id);
       if (!confirm(`Remove ${t?.symbol ?? 'this ticker'} from the watchlist?`)) return;
+      clearDraft(`ticker:${id}`);
       act(() => del(`/tickers/${id}`), { success: `Removed ${t?.symbol ?? 'ticker'}` });
       break;
     }
 
     case 'new-sink':
       state.editingSinks.add('new');
-      render();
+      render({ force: true });
       break;
     case 'edit-sink':
       state.editingSinks.add(id);
-      render();
+      render({ force: true });
       break;
     case 'cancel-sink':
       state.editingSinks.delete(id);
-      render();
+      clearDraft(`sink:${id}`);
+      render({ force: true });
       break;
     case 'toggle-sink': {
       const s = state.data.sinks.find((x) => x.id === id);
@@ -899,6 +1072,7 @@ $('#view').addEventListener('click', (event) => {
     case 'delete-sink': {
       const s = state.data.sinks.find((x) => x.id === id);
       if (!confirm(`Remove the destination "${s?.name ?? ''}"? Quotes will stop being sent there.`)) return;
+      clearDraft(`sink:${id}`);
       act(() => del(`/sinks/${id}`), { success: 'Destination removed' });
       break;
     }
@@ -930,7 +1104,10 @@ $('#view').addEventListener('submit', (event) => {
       async () => {
         await post('/tickers', { symbol, label: (values.label || '').trim() });
         form.reset();
-        $('#matches').innerHTML = '';
+        // Saved input is no longer a draft to protect; leaving it stashed
+        // would put the symbol straight back into the emptied field.
+        clearDraft('add-form');
+        state.matches = null;
         state.history.clear();
       },
       { success: `Added ${symbol.toUpperCase()}` },
@@ -947,6 +1124,7 @@ $('#view').addEventListener('submit', (event) => {
           label: (values.label || '').trim(),
         });
         state.editing.delete(id);
+        clearDraft(`ticker:${id}`);
         state.history.delete(id);
       },
       { success: 'Ticker updated' },
@@ -969,6 +1147,7 @@ $('#view').addEventListener('submit', (event) => {
         if (id === 'new') await post('/sinks', payload);
         else await patch(`/sinks/${id}`, payload);
         state.editingSinks.delete(id);
+        clearDraft(`sink:${id}`);
       },
       { success: id === 'new' ? 'Destination added' : 'Destination saved' },
     );
@@ -992,8 +1171,30 @@ $('#view').addEventListener('submit', (event) => {
       payload.quoteUserAgent = values.quoteUserAgent ?? '';
       payload.quoteTimeoutSeconds = Number(values.quoteTimeoutSeconds) || 0;
     }
-    act(() => patch('/settings', payload), { success: 'Settings saved' });
+    act(
+      async () => {
+        await patch('/settings', payload);
+        clearDraft('settings-form');
+      },
+      { success: 'Settings saved' },
+    );
   }
+});
+
+/* Every keystroke in the routed view is stashed against its form, so any
+ * redraw — background or not — can put it back. This is the listener that
+ * makes the whole draft mechanism work; the render side only reads. */
+$('#view').addEventListener('input', (event) => {
+  if (isField(event.target) && event.target.form) saveDraft(event.target.form);
+});
+
+/* A redraw the poll wanted while a field was focused is owed, not dropped.
+ * The timeout is because focusout fires before focus lands on whatever is
+ * next — which is often another field in the same form. */
+$('#view').addEventListener('focusout', () => {
+  setTimeout(() => {
+    if (state.renderPending && !isTyping()) render();
+  }, 0);
 });
 
 // "Search by name" and "Publish now" / "Reload" live in the routed view, so
@@ -1005,31 +1206,28 @@ $('#view').addEventListener('click', async (event) => {
       toast('Type a company or symbol first');
       return;
     }
-    const box = $('#matches');
-    box.innerHTML = '<span class="field__hint">Searching…</span>';
+    state.matches = { status: 'loading', items: [] };
+    render({ force: true });
     try {
       const { matches, warning } = await api(`/search?q=${encodeURIComponent(query)}`);
       if (warning) toast(warning, 'error');
-      box.innerHTML = matches.length
-        ? matches
-            .map(
-              (m) => `<button class="match" type="button" data-symbol="${esc(m.symbol)}">
-                  <span class="match__symbol">${esc(m.symbol)}</span>
-                  <span class="match__meta">${esc(m.name)} · ${esc(m.exchange)} · ${esc(m.type)}</span>
-                </button>`,
-            )
-            .join('')
-        : '<span class="field__hint">No matches. Type the exact symbol instead.</span>';
+      state.matches = { status: 'done', items: matches ?? [] };
     } catch (err) {
-      box.innerHTML = `<span class="field__hint">Search failed: ${esc(err.message)}</span>`;
+      state.matches = { status: 'error', items: [], message: err.message || String(err) };
     }
+    render({ force: true });
     return;
   }
 
   const match = event.target.closest('[data-symbol]');
   if (match) {
-    $('#add-symbol').value = match.dataset.symbol;
-    $('#matches').innerHTML = '';
+    const input = $('#add-symbol');
+    input.value = match.dataset.symbol;
+    // Writing the field is only half of it: the draft is what a redraw reads
+    // back, so it has to learn about the pick too.
+    saveDraft(input.form);
+    state.matches = null;
+    render({ force: true });
     return;
   }
 
@@ -1047,7 +1245,7 @@ $('#view').addEventListener('click', async (event) => {
   }
 
   if (event.target.id === 'refresh-view') {
-    refreshView();
+    refreshView({ force: true });
     return;
   }
 
@@ -1058,6 +1256,7 @@ $('#view').addEventListener('click', async (event) => {
     const input = $('#refreshSeconds');
     if (input) {
       input.value = preset.dataset.preset;
+      saveDraft(input.form);
       for (const chip of $$('[data-preset]')) {
         chip.classList.toggle('btn--active', chip === preset);
         chip.classList.toggle('btn--outline', chip === preset);
@@ -1073,6 +1272,9 @@ $('#view').addEventListener('click', async (event) => {
     button.disabled = true;
     const previous = button.textContent;
     button.textContent = 'Testing…';
+    // Hold off the poll's redraw, which would otherwise replace this button
+    // mid-request and leave it looking idle while the test is still running.
+    state.inlineBusy = true;
     try {
       const { result } = await post('/provider/test', symbol ? { symbol } : {});
       if (result.ok) {
@@ -1086,8 +1288,10 @@ $('#view').addEventListener('click', async (event) => {
     } catch (err) {
       toast(err.message || String(err), 'error');
     } finally {
+      state.inlineBusy = false;
       button.disabled = false;
       button.textContent = previous;
+      if (state.renderPending && !isTyping()) render();
     }
   }
 });
@@ -1183,8 +1387,11 @@ $('#dev-badge').addEventListener('click', () => {
 
 window.addEventListener('hashchange', () => {
   // A route change wants fresh data for the view it lands on; Activity in
-  // particular has its own collection.
-  refreshView();
+  // particular has its own collection. It redraws unconditionally — a tab that
+  // didn't move because a field still had focus would be a worse bug than the
+  // one the deferral exists to fix. Drafts survive the trip, so a half-filled
+  // form is still there when you come back to it.
+  refreshView({ force: true });
 });
 
 refreshView();
