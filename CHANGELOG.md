@@ -42,6 +42,13 @@ self-hosted web app in the shape of
   verb each destination accepted, and the failures in full. The server retains
   the last 500.
 
+**Typing is never interrupted.** The client re-reads the server every 10
+seconds, and a page that redraws itself on a timer will happily do it while you
+are halfway through a form. It no longer does: a background redraw waits for
+the field you are in, and anything you have typed is put back afterwards, so
+adding a destination or editing Settings survives both the poll and a trip to
+another tab. Search results stay put until you pick one.
+
 **What deliberately did not change.** The published payload is byte-for-byte
 what the script wrote — flat map of symbol → 2-decimal string, `"N/A"` for a
 failure, a `"timestamp"` in `MM/DD HH:MM:SS` — sent with the same

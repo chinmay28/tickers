@@ -343,6 +343,29 @@ The client polls `/api/state` every 10s, deliberately shorter than the server's
 30s minimum refresh interval, so a cycle's results never sit invisible for a
 whole poll.
 
+Redrawing the whole view every 10s is fine for read-only rows and hostile to
+anyone typing into a form, so a redraw nobody asked for is not allowed to
+happen under a cursor. Two rules cover it, and both are needed:
+
+- **A background redraw waits while a field has focus.** Nothing is rebuilt
+  under the cursor, so the caret, the selection and — on iOS, where a
+  re-created input closes it — the keyboard survive. The redraw is owed, not
+  dropped: it lands on `focusout`. The header, the footer and the offline
+  banner sit outside the routed view and keep updating regardless, so a
+  deferred redraw never means a stale status line.
+- **Typed values are stashed by (form, field) and put back after any redraw
+  that does happen.** Redraws the user *did* ask for — saving a ticker, opening
+  an edit form, changing tabs — still land immediately, and they no longer
+  empty the other forms on the page. A draft exists only once that field has
+  been typed into, so restoring one can never shadow a fresh server value; it
+  is dropped when the form is saved or cancelled. Symbol-search results live in
+  `state` for the same reason: a redraw must not take the list away from under
+  a finger already reaching for a row.
+
+The alternative — diffing, or keeping forms out of the re-rendered subtree — is
+more machinery than a page of drafts, and it would have to be got right in
+every view rather than once in `render`.
+
 Caching is split on purpose: the shell, `app.js`, `styles.css` and the manifest
 are `no-cache`, while icons and the badge get a day. An upgrade that left a
 cached `app.js` talking to a new API is exactly the failure the non-disruptive
