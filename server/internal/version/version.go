@@ -1,21 +1,28 @@
 // Package version carries the application version.
 //
-// The scheme is vMAJOR.MINOR.PATCH where the patch number is the repository's
-// commit count — every commit is a patch release, so `v1.0.42` is the 42nd
-// commit on the 1.0 line. Major and minor are declared here in source and
-// bumped by hand; the patch number can only come from git, which a compiled
-// binary has no access to, so it is stamped at link time instead:
+// The scheme is CountRoster's: vMAJOR.MINOR.PATCH where the patch number is
+// the repository's commit count — every commit is a patch release, so
+// `v1.0.42` is the 42nd commit on the 1.0 line. Major and minor are declared
+// here in source and bumped by hand; the patch number can only come from git,
+// which a compiled binary has no access to, so it is stamped at link time:
 //
 //	go build -ldflags "-X github.com/chinmay28/tickers/server/internal/version.Patch=$(git rev-list --count HEAD)"
 //
 // scripts/build.sh does this for you, and scripts/version.sh is the one place
-// that knows how to compute it — keep the two constants below in a form that
-// file's grep can still find.
+// that knows how to compute it — it reads the two constants below with an
+// anchored regex, so keep them one-per-line in `Name = digits` form.
 package version
 
 import "strconv"
 
 // Major and minor version. Bump these by hand.
+//
+// Tickers starts on the 1.0 line: the app is a rewrite of an existing script
+// whose published payload it reproduces exactly, so 1 is honest about the
+// compatibility promise, and 0 is honest about this being the first minor
+// series. Bumping Minor is for a release that changes what the GUI or the API
+// offers; Major is reserved for breaking the published payload, which is the
+// one thing this project has promised not to do.
 const (
 	Major = 1
 	Minor = 0
