@@ -33,7 +33,7 @@ by re-running one command.
    migration; add a new one. Never drop or rename a column an older binary
    reads — the quick start rolls back to the previous binary on a failed
    upgrade, and that only works if the new schema is a superset of the old.
-   See [DESIGN.md](./DESIGN.md#migrations).
+   See [docs/design.md](./docs/design.md#migrations).
 3. **No new runtime dependencies.** The deployable artifact is one static
    binary. A build-time Go module is fine if it earns its place; anything that
    has to exist on the target host is not.
@@ -57,7 +57,7 @@ by re-running one command.
 - One concern per PR.
 - Add tests for behaviour you add or fix. `go test -race ./...` must pass.
 - Update the docs the change touches — README for user-facing behaviour,
-  DESIGN.md for structural decisions, DEPLOYMENT.md for anything an operator
+  docs/design.md for structural decisions, DEPLOYMENT.md for anything an operator
   does.
 - Add a line to `CHANGELOG.md` under **Unreleased**.
 - Sign off your commits: `git commit -s`.

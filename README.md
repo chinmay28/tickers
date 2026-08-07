@@ -34,7 +34,7 @@ This is that script as a proper application — built the same way as
 
 ```
 tickers/
-├── DESIGN.md                   # architecture & design document
+├── docs/design.md              # architecture & design document
 ├── DEPLOYMENT.md               # deploying, upgrading, backing up
 ├── legacy/                     # the original cron script, kept for reference
 ├── scripts/                    #   quickstart.sh · build.sh · version.sh
@@ -231,7 +231,7 @@ what an existing consumer receives, those tests fail.
 
 ## Documentation
 
-- [DESIGN.md](./DESIGN.md) — architecture, schema, the REST contract
+- [docs/design.md](./docs/design.md) — architecture, schema, the REST contract
 - [DEPLOYMENT.md](./DEPLOYMENT.md) — deploying, upgrading, backup and restore
 - [server/README.md](./server/README.md) — the Go server and its CLI
 - [CHANGELOG.md](./CHANGELOG.md)
