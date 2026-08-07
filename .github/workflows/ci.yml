@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Vet, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l server)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change: $unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: cd server && go vet ./...
+
+      # -race because the refresh loop, the API and a manual refresh all touch
+      # the engine concurrently; a data race there is the bug this catches.
+      - name: go test -race
+        run: cd server && go test -race ./...
+
+      - name: Build the static binary
+        run: |
+          set -euo pipefail
+          scripts/build.sh -o /tmp/tickers
+          /tmp/tickers version
+
+      # The quick-start is the install path in the README; a syntax error in it
+      # is a broken install, so it gets checked like code.
+      - name: Shell scripts parse
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: Cross-compile for a Raspberry Pi
+        run: GOOS=linux GOARCH=arm64 scripts/build.sh -o /tmp/tickers-arm64

@@ -1,0 +1,854 @@
+/* Tickers — the whole stylesheet.
+ *
+ * Hand-written rather than generated, because the deployment story depends on
+ * it: no Node, no bundler, no build step between a git clone and a running
+ * Raspberry Pi. The file is organised top-down — tokens, reset, chrome,
+ * components, pages, responsive — and every colour is a token so the light
+ * theme is one block of overrides rather than a parallel stylesheet.
+ */
+
+/* ------------------------------------------------------------------ *
+ * Tokens — dark first, because that is how a wall-mounted dashboard is
+ * usually looked at. The palette is CountRoster's: #1f2933 chrome,
+ * #4ECDC4 accent, so the two apps sit next to each other without
+ * clashing.
+ * ------------------------------------------------------------------ */
+:root {
+  --bg: #0f1417;
+  --surface: #171e23;
+  --surface-2: #1f2933;
+  --border: #2b3740;
+  --border-strong: #3a4a55;
+  --text: #e8eef0;
+  --muted: #93a4ae;
+  --primary: #4ecdc4;
+  --primary-ink: #06231f;
+  --up: #4ade80;
+  --down: #f87171;
+  --warn: #fbbf24;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 24px 60px rgb(0 0 0 / 0.45);
+  --radius: 14px;
+  --radius-sm: 9px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f7f7;
+    --surface: #ffffff;
+    --surface-2: #eef3f3;
+    --border: #dbe4e4;
+    --border-strong: #c3d0d0;
+    --text: #16212a;
+    --muted: #5d6e78;
+    --primary: #17847a;
+    --primary-ink: #ffffff;
+    --up: #12855a;
+    --down: #c0392b;
+    --warn: #b26b00;
+    --shadow: 0 1px 2px rgb(15 30 40 / 0.08);
+    --shadow-lg: 0 24px 60px rgb(15 30 40 / 0.16);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Reset
+ * ------------------------------------------------------------------ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+body {
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+/* ------------------------------------------------------------------ *
+ * App shell
+ * ------------------------------------------------------------------ */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.app__header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem clamp(0.75rem, 3vw, 1.5rem);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.brand__logo {
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 9px;
+  flex: none;
+}
+.brand__text {
+  display: flex;
+  flex-direction: column;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.brand__version {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 400;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.app__header-end {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/* Developer mark. Muted until hovered so it never competes with the
+   primary action beside it. */
+.dev {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  line-height: 0;
+  border-radius: 50%;
+}
+.dev__logo {
+  display: block;
+  /* 36px is the smallest size the badge's wordmark still reads at — below it
+     the mark collapses into an anonymous dark dot. */
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  background: #101010;
+  box-shadow: 0 0 0 1px var(--border);
+  opacity: 0.8;
+  transition: opacity 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+.dev:hover .dev__logo,
+.dev:focus-visible .dev__logo {
+  opacity: 1;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 55%, transparent);
+}
+.dev:active .dev__logo {
+  transform: scale(0.94);
+}
+
+.app__main {
+  flex: 1;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: clamp(1rem, 3vw, 1.75rem) clamp(0.75rem, 3vw, 1.5rem) 6rem;
+}
+
+.app__footer {
+  padding: 1rem clamp(0.75rem, 3vw, 1.5rem) calc(4.5rem + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.banner {
+  padding: 0.6rem 1rem;
+  text-align: center;
+  font-size: 0.88rem;
+}
+.banner--warn {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--text);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+}
+
+/* ------------------------------------------------------------------ *
+ * Buttons, inputs, chips
+ * ------------------------------------------------------------------ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: none;
+  font-size: 0.88rem;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn--ghost {
+  color: var(--muted);
+}
+.btn--ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.btn--ghost.is-active {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.btn--primary {
+  background: var(--primary);
+  color: var(--primary-ink);
+}
+.btn--primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.btn--outline {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.btn--outline:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.btn--danger {
+  border-color: color-mix(in srgb, var(--down) 45%, transparent);
+  color: var(--down);
+}
+.btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+}
+.btn--sm {
+  padding: 0.28rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.input,
+.select {
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+.input:focus-visible,
+.select:focus-visible,
+.btn:focus-visible,
+.dev:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.input--mono {
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.field__label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.field__hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+}
+.chip--placeholder {
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  color: var(--warn);
+}
+.chip--off {
+  border-color: var(--border);
+}
+.chip--ok {
+  border-color: color-mix(in srgb, var(--up) 45%, transparent);
+  color: var(--up);
+}
+.chip--error {
+  border-color: color-mix(in srgb, var(--down) 45%, transparent);
+  color: var(--down);
+}
+
+/* ------------------------------------------------------------------ *
+ * Cards & page furniture
+ * ------------------------------------------------------------------ */
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1.1rem;
+}
+.page-head h1 {
+  margin: 0;
+  font-size: clamp(1.3rem, 3.4vw, 1.7rem);
+  letter-spacing: -0.02em;
+}
+.page-head p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  max-width: 62ch;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.card + .card {
+  margin-top: 1rem;
+}
+.card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.card__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+.card__body {
+  padding: 1rem;
+}
+
+.empty {
+  padding: 2.5rem 1rem;
+  text-align: center;
+  color: var(--muted);
+}
+.empty strong {
+  display: block;
+  color: var(--text);
+  margin-bottom: 0.3rem;
+}
+
+/* ------------------------------------------------------------------ *
+ * Watchlist
+ * ------------------------------------------------------------------ */
+.quotes {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.quote {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "handle head price"
+    "handle spark price"
+    "handle actions actions";
+  align-items: center;
+  gap: 0.2rem 0.8rem;
+  padding: 0.8rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.quote--disabled {
+  opacity: 0.55;
+}
+.quote--dragging {
+  opacity: 0.4;
+}
+.quote--drop-target {
+  border-color: var(--primary);
+}
+
+.quote__handle {
+  grid-area: handle;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding-right: 0.2rem;
+  color: var(--muted);
+  cursor: grab;
+  border: 0;
+  background: none;
+}
+.quote__handle:active {
+  cursor: grabbing;
+}
+
+.quote__head {
+  grid-area: head;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.quote__symbol {
+  font-family: var(--mono);
+  font-size: 1.02rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.quote__name {
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 34ch;
+}
+
+.quote__spark {
+  grid-area: spark;
+  height: 26px;
+  width: 100%;
+  max-width: 180px;
+  overflow: visible;
+}
+
+.quote__price {
+  grid-area: price;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+}
+.quote__value {
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.quote__value--na {
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+.quote__change {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.quote__change--up {
+  color: var(--up);
+}
+.quote__change--down {
+  color: var(--down);
+}
+.quote__change--flat {
+  color: var(--muted);
+}
+.quote__error {
+  grid-column: 1 / -1;
+  color: var(--down);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.quote__actions {
+  grid-area: actions;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.45rem;
+}
+
+/* Inline replace/edit form, shown in place of the row's normal content. */
+.quote__edit {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin-top: 0.5rem;
+  padding-top: 0.7rem;
+  border-top: 1px dashed var(--border-strong);
+}
+.quote__edit .field {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+
+/* Add-a-ticker form */
+.add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: flex-end;
+}
+.add-row .field {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+.matches {
+  margin-top: 0.7rem;
+  display: grid;
+  gap: 0.35rem;
+}
+.match {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  text-align: left;
+}
+.match:hover {
+  border-color: var(--primary);
+}
+.match__symbol {
+  font-family: var(--mono);
+  font-weight: 650;
+}
+.match__meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ *
+ * Tables (publishing, activity)
+ * ------------------------------------------------------------------ */
+.table-scroll {
+  overflow-x: auto;
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+.table th,
+.table td {
+  padding: 0.55rem 0.7rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 650;
+}
+.table tr:last-child td {
+  border-bottom: 0;
+}
+.table td.wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.code {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.7rem;
+  margin-bottom: 1rem;
+}
+.stat {
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.stat__label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 650;
+}
+.stat__value {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-weight: 650;
+  margin-top: 0.15rem;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.8rem;
+}
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.9rem;
+}
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+}
+.checkbox input {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--primary);
+}
+
+/* ------------------------------------------------------------------ *
+ * Mobile tab bar
+ * ------------------------------------------------------------------ */
+.tab-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 25;
+  display: none;
+  justify-content: space-around;
+  padding: 0.35rem 0.25rem calc(0.35rem + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  border-top: 1px solid var(--border);
+}
+.tab-bar__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+.tab-bar__item.is-active {
+  color: var(--primary);
+}
+
+/* ------------------------------------------------------------------ *
+ * Toasts
+ * ------------------------------------------------------------------ */
+.toasts {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(4.5rem + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: min(28rem, calc(100vw - 1.5rem));
+  pointer-events: none;
+}
+.toast {
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+  animation: toast-in 160ms ease-out;
+}
+.toast--error {
+  border-color: color-mix(in srgb, var(--down) 55%, transparent);
+}
+.toast--ok {
+  border-color: color-mix(in srgb, var(--up) 50%, transparent);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * The developer badge, thrown up full screen when the header mark is
+ * tapped. Everything below is on one clock: the overlay fades in, holds,
+ * and fades out over exactly DEV_FLASH_MS (app.js), which is when the
+ * script removes it.
+ * ------------------------------------------------------------------ */
+.dev-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: saturate(1.2) blur(14px);
+  animation: dev-flash-veil 3s ease-in-out forwards;
+}
+.dev-flash__lockup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.35rem;
+  animation: dev-flash-badge 3s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.dev-flash__logo {
+  width: min(64vmin, 26rem);
+  height: min(64vmin, 26rem);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-lg);
+}
+.dev-flash__handle {
+  font-family: var(--mono);
+  font-size: clamp(0.85rem, 3.2vmin, 1.1rem);
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+@keyframes dev-flash-veil {
+  0% { opacity: 0; }
+  7% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes dev-flash-badge {
+  0% { transform: scale(0.82); }
+  14% { transform: scale(1.02); }
+  22% { transform: scale(1); }
+  82% { transform: scale(1); }
+  100% { transform: scale(1.06); }
+}
+
+/* ------------------------------------------------------------------ *
+ * Responsive — the header nav collapses into the bottom tab bar, and the
+ * quote row drops its drag handle (touch reordering uses the ↑↓ buttons).
+ * ------------------------------------------------------------------ */
+@media (max-width: 720px) {
+  .nav .btn--ghost {
+    display: none;
+  }
+  .tab-bar {
+    display: flex;
+  }
+  .quote {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "head price"
+      "spark price"
+      "actions actions";
+  }
+  .quote__handle {
+    display: none;
+  }
+  .quote__name {
+    max-width: 20ch;
+  }
+  /* Five actions have to fit one line at 390px, or Remove wraps onto a row of
+     its own and every card grows by 2rem. Tighter than the desktop sizing, but
+     still comfortably past the 44px touch target on the vertical axis. */
+  .quote__actions {
+    gap: 0.25rem;
+    flex-wrap: nowrap;
+  }
+  .quote__actions .btn {
+    padding: 0.3rem 0.45rem;
+    font-size: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* The badge still needs to disappear on its own, so keep its fade — just
+     make it instant rather than animated. */
+  .dev-flash {
+    animation: none;
+  }
+}

@@ -1,0 +1,41 @@
+# Reference systemd unit for Tickers.
+#
+# scripts/quickstart.sh generates a copy of this with the real paths/port filled
+# in and installs it at /etc/systemd/system/tickers.service. Use this file as
+# documentation, or adapt it for a hand-rolled install.
+#
+# Defaults assumed below (override in quickstart.sh via env vars):
+#   service user : tickers                        (TICKERS_USER)
+#   binary       : /opt/tickers/src/server/bin/tickers   (source mode)
+#                  /opt/tickers/bin/tickers              (release mode)
+#   database     : /var/lib/tickers/tickers.sqlite (TICKERS_DATA_DIR)
+#   port         : 8797                            (PORT)
+#
+# 8797 rather than 8787 so Tickers and CountRoster can share a Raspberry Pi.
+
+[Unit]
+Description=Tickers — self-hosted quote watchlist and publisher
+Documentation=https://github.com/chinmay28/tickers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tickers
+Group=tickers
+WorkingDirectory=/opt/tickers/src
+ExecStart=/opt/tickers/src/server/bin/tickers serve --db /var/lib/tickers/tickers.sqlite --port 8797 --host 0.0.0.0
+Restart=on-failure
+RestartSec=3
+
+# Hardening — safe on a trusted LAN, defensive if exposure ever widens.
+# The data directory is the only writable path the service needs: the binary
+# embeds the web client, so there is nothing else on disk to serve.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/tickers
+
+[Install]
+WantedBy=multi-user.target

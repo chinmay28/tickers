@@ -1,0 +1,15 @@
+{
+  "name": "Tickers",
+  "short_name": "Tickers",
+  "description": "A self-hosted watchlist that fetches quotes on a schedule and publishes them to your own key-value endpoints.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0f1417",
+  "theme_color": "#1f2933",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

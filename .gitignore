@@ -1,0 +1,15 @@
+# Build output
+server/bin/
+dist/
+
+# Local data — the database never belongs in the repo
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

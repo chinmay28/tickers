@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1f2933" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="description"
+      content="A self-hosted watchlist that fetches quotes on a schedule and publishes them to your own key-value endpoints."
+    />
+    <title>Tickers</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <a class="brand" href="#/" aria-label="Tickers — home">
+          <img class="brand__logo" src="/icon.svg" alt="" aria-hidden="true" />
+          <span class="brand__text">
+            Tickers
+            <span class="brand__version" id="app-version">—</span>
+          </span>
+        </a>
+
+        <div class="app__header-end">
+          <nav class="nav" aria-label="Primary">
+            <a class="btn btn--ghost" href="#/" data-route="watchlist">Watchlist</a>
+            <a class="btn btn--ghost" href="#/publishing" data-route="publishing">Publishing</a>
+            <a class="btn btn--ghost" href="#/activity" data-route="activity">Activity</a>
+            <a class="btn btn--ghost" href="#/settings" data-route="settings">Settings</a>
+            <button class="btn btn--primary" id="refresh-now" type="button">Refresh now</button>
+          </nav>
+
+          <!-- Developer credit. Deliberately quiet — a muted disk that only
+               comes to full strength on hover, so it never competes with the
+               primary action next to it. Tapping it shows the badge full
+               screen, which is the only place its detail is readable. -->
+          <button
+            class="dev"
+            id="dev-badge"
+            type="button"
+            title="Built by CM Hegday · 0x434d"
+            aria-label="Show the developer badge"
+          >
+            <img class="dev__logo" src="/dev-badge.png" alt="" aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+
+      <div class="banner banner--warn" id="offline-banner" role="status" hidden>
+        Can’t reach the Tickers server. Nothing is being fetched or published
+        until the connection is restored.
+      </div>
+
+      <main class="app__main" id="view" aria-live="polite"></main>
+
+      <footer class="app__footer">
+        <span id="footer-status">Loading…</span>
+      </footer>
+
+      <nav class="tab-bar" aria-label="Primary">
+        <a class="tab-bar__item" href="#/" data-route="watchlist">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-6 4 4 4-7 5 6"/><path d="M3 21h18"/></svg>
+          <span>Watchlist</span>
+        </a>
+        <a class="tab-bar__item" href="#/publishing" data-route="publishing">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 3v13"/><path d="m8 7 4-4 4 4"/></svg>
+          <span>Publishing</span>
+        </a>
+        <a class="tab-bar__item" href="#/activity" data-route="activity">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+          <span>Activity</span>
+        </a>
+        <a class="tab-bar__item" href="#/settings" data-route="settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          <span>Settings</span>
+        </a>
+      </nav>
+    </div>
+
+    <div class="toasts" id="toasts" aria-live="assertive"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
