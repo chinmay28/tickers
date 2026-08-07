@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -330,8 +329,9 @@ func (e *Engine) Snapshot() (publish.Snapshot, error) {
 		return publish.Snapshot{}, err
 	}
 
-	sort.SliceStable(tickers, func(i, j int) bool { return tickers[i].Position < tickers[j].Position })
-
+	// No re-sorting here: EnabledTickers already returns display order, pinned
+	// symbols first, and sorting by position again would drop them back into
+	// the middle of the payload.
 	snap := publish.Snapshot{At: time.Now(), Quotes: make([]store.Quote, 0, len(tickers))}
 	for _, t := range tickers {
 		if q, ok := stored[t.ID]; ok {

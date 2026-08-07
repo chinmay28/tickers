@@ -12,10 +12,10 @@ watchlist meant editing the source and redeploying.
 This is that script as a proper application — built the same way as
 [CountRoster](https://github.com/chinmay28/countroster):
 
-- **A GUI for the watchlist.** Add, replace, relabel, pause, reorder and remove
-  symbols from a browser. The seven symbols the script hardcoded ship as
-  *placeholders* the app invites you to replace — the first thing you see is a
-  **Replace** button on each.
+- **A GUI for the watchlist.** Add, replace, relabel, pause, pin, reorder and
+  remove symbols from a browser. The seven symbols the script hardcoded ship as
+  the starting **pinned** list, configured in Settings — pinned symbols always
+  sort to the top of the watchlist and of the payload.
 - **Backwards-compatible publishing.** The payload is byte-for-byte the one the
   script wrote — flat map of symbol → 2-decimal string, `"N/A"` for a failure,
   a `"timestamp"` in `MM/DD HH:MM:SS` — with the same PUT-then-POST fallback.
@@ -61,9 +61,10 @@ scripts/build.sh                              # needs Go >= 1.21 (newer toolchai
 ./server/bin/tickers serve --db ./data/tickers.sqlite
 ```
 
-Open `http://localhost:8797`. The watchlist starts with the placeholders; press
-**Replace** on each, or **Add** your own. To use it from your phone, reach the
-server over your LAN/Tailscale and "Add to Home Screen".
+Open `http://localhost:8797`. The watchlist starts with the seven shipped
+symbols, all pinned; press **Edit** on each, or **Add** your own and pin what
+you actually watch. To use it from your phone, reach the server over your
+LAN/Tailscale and "Add to Home Screen".
 
 While working on the web client, skip the rebuild — serve the assets from disk:
 
@@ -119,8 +120,8 @@ never lose data:**
 - Schema changes run through an append-only, idempotent migration runner, and
   every migration is additive — so the binary it rolls back *to* can still read
   the database the new one touched.
-- Re-running never re-seeds: placeholders you replaced stay replaced, and
-  symbols you deleted stay deleted.
+- Re-running never re-seeds: symbols you replaced stay replaced, symbols you
+  deleted stay deleted, and your pinned list stays as you set it.
 
 Override defaults with env vars (`PORT`, `HOST`, `TICKERS_INSTALL`,
 `TICKERS_REF`, `TICKERS_RELEASE`, `TICKERS_DATA_DIR`, `TICKERS_PREFIX`,
@@ -132,9 +133,12 @@ Override defaults with env vars (`PORT`, `HOST`, `TICKERS_INSTALL`,
 
 **Watchlist** — the symbols being tracked. Each row shows the last price, the
 move from the previous close, a sparkline from stored history, and when it was
-last read. Placeholders carry a `placeholder` chip until you replace them.
+last read. Pinned symbols carry a `pinned` chip and always sort above the rest;
+**Pin**/**Unpin** on a row edits the same list the Settings page shows as text.
 Drag to reorder on a desktop, or use ↑↓ on a phone; **the watchlist order is
-the payload order**.
+the payload order**. Pinning never takes reordering away from a row — it is a
+set, not an order, so the watchlist's own sequence still applies within the
+pinned group.
 
 **Publishing** — where snapshots go. A destination is a base URL, a key, an
 optional category, and a format. After every refresh the snapshot is
@@ -153,11 +157,14 @@ Two formats:
 **Activity** — the last refresh cycles, with per-symbol counts, which verb each
 destination accepted, and the failures in full.
 
-**Settings** — two groups, both live:
+**Settings** — three groups, all live:
 
 - *Refresh loop* — how often symbols are fetched (a seconds field plus
   30s/1m/5m/15m/1h presets; 30s is the floor), how long price history is kept,
   and whether every refresh also publishes.
+- *Pinned tickers* — the comma-separated symbols that sort to the top of the
+  watchlist, up to 50. A symbol that isn't on the watchlist is ignored, so
+  removing a ticker never means editing this too.
 - *Quote source* — the **server URL** prices come from, the request timeout,
   and the User-Agent sent upstream. Leave a field blank to fall back to the
   default, which the field shows as its placeholder. **Test connection** fetches

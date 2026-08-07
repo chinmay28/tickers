@@ -16,9 +16,13 @@ self-hosted web app in the shape of
 
 **What you can now do without editing source:**
 
-- Add, replace, relabel, pause, reorder and remove symbols from a browser. The
-  seven symbols the script hardcoded ship as *placeholders* with a one-click
-  **Replace** action.
+- Add, replace, relabel, pause, pin, reorder and remove symbols from a browser.
+- Pin the symbols you actually watch: pinned symbols always sort to the top of
+  the watchlist and of the published payload. The list is configured in
+  Settings as comma-separated symbols, with **Pin**/**Unpin** on each row as a
+  shortcut into the same list. The seven symbols the script hardcoded ship
+  pinned, as the starting example. It is a set rather than an order, so
+  drag-to-reorder still works on a pinned row.
 - Search Yahoo by company name when you don't know the ticker.
 - Publish to several destinations, each with its own base URL, key, category,
   format and timeout — and **Test** one on demand with the real payload.

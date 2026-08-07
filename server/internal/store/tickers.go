@@ -4,10 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
-// Tickers lists the whole watchlist in display order.
+// Tickers lists the whole watchlist in display order — pinned symbols first.
 func (s *Store) Tickers() ([]Ticker, error) {
 	rows, err := s.db.Query(`
 		SELECT id, symbol, label, position, enabled, origin, created_at, updated_at
@@ -16,10 +17,15 @@ func (s *Store) Tickers() ([]Ticker, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanTickers(rows)
+	ts, err := scanTickers(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.pinFirst(ts)
 }
 
-// EnabledTickers is the watchlist the refresh loop actually fetches.
+// EnabledTickers is the watchlist the refresh loop actually fetches, in the
+// same display order — which is also the payload's order.
 func (s *Store) EnabledTickers() ([]Ticker, error) {
 	rows, err := s.db.Query(`
 		SELECT id, symbol, label, position, enabled, origin, created_at, updated_at
@@ -28,7 +34,11 @@ func (s *Store) EnabledTickers() ([]Ticker, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanTickers(rows)
+	ts, err := scanTickers(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.pinFirst(ts)
 }
 
 // Ticker looks one up by ID.
@@ -40,7 +50,44 @@ func (s *Store) Ticker(id string) (Ticker, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return Ticker{}, ErrNotFound
 	}
-	return t, err
+	if err != nil {
+		return Ticker{}, err
+	}
+	pinned, err := s.PinnedSymbols()
+	if err != nil {
+		return Ticker{}, err
+	}
+	return applyPins([]Ticker{t}, pinned)[0], nil
+}
+
+// pinFirst stamps Pinned and lifts the pinned rows to the top.
+func (s *Store) pinFirst(ts []Ticker) ([]Ticker, error) {
+	pinned, err := s.PinnedSymbols()
+	if err != nil {
+		return nil, err
+	}
+	return applyPins(ts, pinned), nil
+}
+
+// applyPins marks every ticker whose symbol is pinned and moves those to the
+// front.
+//
+// The sort is stable and keys on nothing but pinned-ness, so `position` still
+// decides the order *within* each group: dragging a row still reorders it, and
+// unpinning a symbol drops it straight back into the slot it would otherwise
+// have had. That is why the setting is a set of symbols rather than an
+// ordering — pinning answers "above the fold or not", and the watchlist
+// answers "in what order".
+func applyPins(ts []Ticker, pinned []string) []Ticker {
+	isPinned := make(map[string]bool, len(pinned))
+	for _, sym := range pinned {
+		isPinned[sym] = true
+	}
+	for i := range ts {
+		ts[i].Pinned = isPinned[ts[i].Symbol]
+	}
+	sort.SliceStable(ts, func(i, j int) bool { return ts[i].Pinned && !ts[j].Pinned })
+	return ts
 }
 
 // NewTicker is the input for adding a symbol to the watchlist.
@@ -89,11 +136,16 @@ type TickerPatch struct {
 
 // UpdateTicker applies a patch.
 //
-// Changing the symbol is the "replace this placeholder" path the UI leans on,
-// so it does two extra things: it promotes the row out of `seed` origin (it is
-// the user's choice now, not the shipped default), and it drops the stale
-// quote, because a row showing the old symbol's price under the new symbol's
-// name for the seconds until the next refresh is worse than showing nothing.
+// Changing the symbol does two extra things: it promotes the row out of `seed`
+// origin (it is the user's choice now, not the shipped default), and it drops
+// the stale quote, because a row showing the old symbol's price under the new
+// symbol's name for the seconds until the next refresh is worse than showing
+// nothing.
+//
+// It deliberately leaves the pinned list alone. Pins are configured in
+// Settings and keyed by symbol, so retyping a pinned row's symbol unpins it as
+// a side effect of the symbol no longer matching — which is the same thing
+// that happens if you delete the row and add a different one.
 func (s *Store) UpdateTicker(id string, patch TickerPatch) (Ticker, error) {
 	existing, err := s.Ticker(id)
 	if err != nil {

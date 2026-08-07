@@ -165,10 +165,11 @@ func (s *Store) AppliedMigrations() ([]string, error) {
 // SeedSymbols is the watchlist a brand-new install starts with: the hardcoded
 // list from the original update_minion_quotes.py script this app grew out of.
 //
-// They are seeded as *placeholders* (origin "seed"), which the web client
-// flags with a "placeholder" chip and a one-click Replace action. The point is
-// that a fresh install shows something real immediately, and that swapping the
-// author's watchlist for your own is the first thing the UI invites you to do.
+// They are seeded *pinned*, so a fresh install shows something real above the
+// fold immediately and the pinned list starts out as a worked example of what
+// the setting does. Unpinning them in Settings is a one-field edit, and they
+// are ordinary tickers otherwise — nothing about them is special to the
+// refresh loop.
 var SeedSymbols = []string{"VTI", "GLD", "P", "ORCL", "STRC", "IBIT", "BTC-USD"}
 
 // seed populates first-run defaults. It is keyed off a settings flag rather
@@ -197,6 +198,13 @@ func (s *Store) seed() error {
 			newID(), sym, i, now, now); err != nil {
 			return fmt.Errorf("store: seed ticker %s: %w", sym, err)
 		}
+	}
+	// Pin what we just seeded. This is the only place the default pinned list
+	// is written: Config() falls back to *empty*, so that unpinning everything
+	// stays unpinned rather than reading back as the shipped defaults.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`,
+		SettingPinnedSymbols, strings.Join(SeedSymbols, ",")); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'true')`, SettingSeeded); err != nil {
 		return err
