@@ -159,9 +159,12 @@ const state = {
   history: new Map(),
   runs: [],
   busy: false,
+  /** Set as soon as the user types anywhere in the routed view, cleared once
+   *  what they were typing has been saved or abandoned. See pollState. */
+  dirty: false,
 };
 
-async function loadState() {
+async function loadState({ keepView = false } = {}) {
   try {
     state.data = await api('/state');
     if (!state.connected) {
@@ -174,7 +177,35 @@ async function loadState() {
     console.warn('state fetch failed', err);
   }
   $('#offline-banner').hidden = state.connected;
+  // keepView still refreshes the chrome around the view — the offline banner
+  // above, the run status below — just not the view itself.
+  if (keepView && state.data) {
+    renderChrome(state.data);
+    return;
+  }
   render();
+}
+
+const FIELD_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA']);
+
+/** True when the user has something in flight in the routed view: a field
+ *  focused, or text they typed and haven't saved yet. */
+function viewIsBusy() {
+  if (state.dirty) return true;
+  const el = document.activeElement;
+  return !!el && FIELD_TAGS.has(el.tagName) && $('#view').contains(el);
+}
+
+/** The background poll.
+ *
+ *  Rendering replaces the whole routed view, and every form in it holds its
+ *  values in the DOM rather than in `state` — so a tick that lands while
+ *  somebody is filling in a destination wipes what they typed out from under
+ *  them, which is exactly what a 10-second timer will eventually do to every
+ *  form long enough to be worth filling in. A price that is one poll stale is
+ *  the cheaper failure, so the view waits until they are done. */
+async function pollState() {
+  await loadState({ keepView: viewIsBusy() });
 }
 
 /** Reload everything the current view needs, then redraw. */
@@ -196,6 +227,9 @@ async function act(fn, { success } = {}) {
   state.busy = true;
   try {
     await fn();
+    // Whatever was typed is now saved, so the view is free to repaint again.
+    // Only on success: a failed save has to leave the form as the user left it.
+    state.dirty = false;
     if (success) toast(success, 'ok');
     await refreshView();
   } catch (err) {
@@ -227,6 +261,13 @@ function syncNav() {
  * Render
  * ------------------------------------------------------------------ */
 
+/** The bits outside #view: they can be repainted at any time, because there is
+ *  never anything half-typed in them. */
+function renderChrome(data) {
+  $('#app-version').textContent = data.version;
+  renderFooter(data);
+}
+
 function render() {
   syncNav();
   const view = $('#view');
@@ -243,8 +284,6 @@ function render() {
     return;
   }
 
-  $('#app-version').textContent = data.version;
-
   switch (route()) {
     case 'publishing':
       view.innerHTML = renderPublishing(data);
@@ -260,7 +299,7 @@ function render() {
       drawSparklines();
   }
 
-  renderFooter(data);
+  renderChrome(data);
 }
 
 function renderFooter(data) {
@@ -834,6 +873,13 @@ function nudge(id, delta) {
   act(() => post('/tickers/reorder', { ids }));
 }
 
+// One keystroke anywhere in the view is enough to hold the poll off it. The
+// flag outlives blur on purpose: dismissing a phone keyboard mid-form drops
+// focus, and that must not be the moment the timer decides it may repaint.
+$('#view').addEventListener('input', () => {
+  state.dirty = true;
+});
+
 $('#view').addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
@@ -846,6 +892,7 @@ $('#view').addEventListener('click', (event) => {
       break;
     case 'cancel-edit':
       state.editing.delete(id);
+      state.dirty = false;
       render();
       break;
     case 'toggle': {
@@ -889,6 +936,7 @@ $('#view').addEventListener('click', (event) => {
       break;
     case 'cancel-sink':
       state.editingSinks.delete(id);
+      state.dirty = false;
       render();
       break;
     case 'toggle-sink': {
@@ -1183,9 +1231,11 @@ $('#dev-badge').addEventListener('click', () => {
 
 window.addEventListener('hashchange', () => {
   // A route change wants fresh data for the view it lands on; Activity in
-  // particular has its own collection.
+  // particular has its own collection. It also abandons anything half-typed on
+  // the page being left, which is what releases the poll.
+  state.dirty = false;
   refreshView();
 });
 
 refreshView();
-setInterval(loadState, POLL_MS);
+setInterval(pollState, POLL_MS);

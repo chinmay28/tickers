@@ -42,6 +42,14 @@ self-hosted web app in the shape of
   verb each destination accepted, and the failures in full. The server retains
   the last 500.
 
+**Fixed.** The ten-second background poll no longer repaints a form you are
+filling in. It used to redraw the whole routed view on every tick, which wiped
+half-typed fields — most visibly on the New destination form, where the fields
+went blank mid-entry and the form became impossible to complete. The view is
+now held back while there is unsaved input on it, and resumes as soon as that
+input is saved, cancelled, or navigated away from; the status footer keeps
+updating either way.
+
 **What deliberately did not change.** The published payload is byte-for-byte
 what the script wrote — flat map of symbol → 2-decimal string, `"N/A"` for a
 failure, a `"timestamp"` in `MM/DD HH:MM:SS` — sent with the same
