@@ -18,7 +18,7 @@ server/
 ```
 
 Dependencies point one way: `api` → `engine` → {`quotes`, `publish`} →
-`store`. See [DESIGN.md](../DESIGN.md) for why.
+`store`. See [docs/design.md](../docs/design.md) for why.
 
 ## Build
 
@@ -60,7 +60,7 @@ The three `--quote-*` flags are a *fallback* the Settings page can override:
 the real ordering is **stored setting > flag > env > built-in default**. They
 exist so a systemd unit can be templated; the GUI is where they normally get
 changed, and a change there is in force on the next request. See
-[DESIGN.md](../DESIGN.md#configuration-precedence).
+[docs/design.md](../docs/design.md#configuration-precedence).
 
 `tickers publish` is the original cron script's job exactly: fetch, publish,
 exit. It prints per-destination results and exits non-zero if every symbol

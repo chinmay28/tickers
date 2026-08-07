@@ -1,8 +1,9 @@
 # Tickers — design
 
 This document explains what the pieces are and why they are shaped the way
-they are. [README.md](./README.md) is what the app does;
-[DEPLOYMENT.md](./DEPLOYMENT.md) is how to run it.
+they are. [README.md](../README.md) is what the app does;
+[DEPLOYMENT.md](../DEPLOYMENT.md) is how to run it;
+[server/README.md](../server/README.md) is the Go module and its CLI.
 
 ## Where it came from
 
@@ -138,6 +139,49 @@ govern it, and both exist because of the upgrade story:
 
 `/api/health` reports the applied list, so an operator can see from outside
 which schema a running instance is on.
+
+## The quote source
+
+Prices come from **Yahoo Finance's public HTTP endpoints, called directly**.
+There is no `yfinance` here — that is a Python library, it went with the rest
+of the interpreter, and dropping it is most of why the deployable artifact is
+one file. Two plain GETs are the whole integration:
+
+| | |
+|---|---|
+| Quotes | `GET {base}/v8/finance/chart/{SYMBOL}?range=1d&interval=1m` |
+| Symbol search | `GET {base}/v1/finance/search?q=…` |
+
+The *behaviour* is still yfinance's, deliberately.
+`yf.Ticker(t).history(period="1d", interval="1m")['Close'].iloc[-1]` reads that
+same chart endpoint and takes the last close of the 1-minute series, so the
+parser scans the `close` array **backwards for the last non-null value** rather
+than reading `meta.regularMarketPrice`. Yahoo returns nulls for the current,
+not-yet-closed minute, and the two values can disagree by a minute — which
+would show up as this app and the old script quoting different numbers for the
+same instant. `meta.regularMarketPrice` is the fallback for when the series
+comes back empty, which is normal outside trading hours.
+`TestFetchPrefersLastNonNullClose` pins it against a fixture with a
+trailing-null series.
+
+Three things follow from this being an *unofficial* API — no key, no
+documentation, no stability contract:
+
+- **It can start refusing you.** The endpoints answer browsers and stonewall
+  obvious scripts, and the User-Agent that works drifts. That is why the UA is
+  a GUI field rather than a constant: the fix should be a text box, not a
+  redeploy.
+- **It can go away, or be blocked by the network the Pi is on.** Hence the
+  configurable base URL — point it at a mirror or a caching proxy — and the
+  `POST /api/provider/test` probe, which reports the raw outcome so a wrong
+  URL, a blocked network and a bad symbol don't all look identical.
+- **A failure is per-symbol, never fatal.** `Fetch` returns two maps, quotes
+  and errors, and one bad symbol cannot take the others down with it.
+
+Swapping in a different source (a paid feed, Stooq, Alpha Vantage) is a new
+file in `internal/quotes/` implementing `Provider` and nothing else changing —
+that is the entire reason the interface exists. It is not a planned feature;
+see the non-goals.
 
 ## Configuration precedence
 
