@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -86,12 +87,14 @@ Run 'tickers serve -h' for the serve flags.
 // flags exist because they are self-documenting. Both are supported, and the
 // precedence is the boring one people expect.
 type config struct {
-	db           string
-	port         int
-	host         string
-	webDist      string
-	quoteBaseURL string
-	verbose      bool
+	db             string
+	port           int
+	host           string
+	webDist        string
+	quoteBaseURL   string
+	quoteUserAgent string
+	quoteTimeout   int
+	verbose        bool
 }
 
 func bindFlags(fs *flag.FlagSet, cfg *config) {
@@ -102,18 +105,32 @@ func bindFlags(fs *flag.FlagSet, cfg *config) {
 	fs.StringVar(&cfg.host, "host", envOr("HOST", "0.0.0.0"), "address to bind")
 	fs.StringVar(&cfg.webDist, "web-dist", envOr("WEB_DIST", ""),
 		"serve the web client from this directory instead of the embedded copy")
+	// The three quote-source flags are fallbacks the Settings page can override
+	// (see newProvider). They exist so a systemd unit can be templated; the GUI
+	// is where they are normally changed.
 	fs.StringVar(&cfg.quoteBaseURL, "quote-base-url", envOr("TICKERS_QUOTE_BASE_URL", ""),
 		"quote API root to use instead of Yahoo's (a mirror, a caching proxy, or a test double)")
+	fs.StringVar(&cfg.quoteUserAgent, "quote-user-agent", envOr("TICKERS_QUOTE_USER_AGENT", ""),
+		"User-Agent sent to the quote provider (empty uses a browser default)")
+	fs.IntVar(&cfg.quoteTimeout, "quote-timeout", envInt("TICKERS_QUOTE_TIMEOUT", 0),
+		"seconds to wait for one quote request (0 uses the provider default)")
 	fs.BoolVar(&cfg.verbose, "verbose", envOr("TICKERS_VERBOSE", "") != "", "log every API request")
 }
 
-// newProvider builds the quote source. The base URL is overridable so an
-// instance can sit behind a caching proxy or a mirror — the endpoint shapes are
-// Yahoo's either way.
+// newProvider builds the quote source.
+//
+// What the flags supply here is a *fallback*, not a fixed value: the same
+// fields are editable on the Settings page, and a stored setting wins. Clearing
+// the field in the GUI reveals this fallback again, and clearing both reveals
+// the provider's own default. That ordering — stored > flag > env > built-in —
+// is what lets an operator template a systemd unit and still let someone fix a
+// blocked user agent from a phone.
 func newProvider(cfg config) *quotes.Yahoo {
-	provider := quotes.NewYahoo(20 * time.Second)
-	provider.BaseURL = cfg.quoteBaseURL
-	return provider
+	return quotes.NewYahoo(quotes.Settings{
+		BaseURL:   cfg.quoteBaseURL,
+		UserAgent: cfg.quoteUserAgent,
+		Timeout:   time.Duration(cfg.quoteTimeout) * time.Second,
+	})
 }
 
 func serve(args []string) error {
@@ -143,10 +160,11 @@ func serve(args []string) error {
 	server := &http.Server{
 		Addr: net.JoinHostPort(cfg.host, strconv.Itoa(cfg.port)),
 		Handler: api.New(api.Options{
-			Store:  st,
-			Engine: eng,
-			Logger: log,
-			Web:    webHandler,
+			Store:   st,
+			Engine:  eng,
+			Logger:  log,
+			Web:     webHandler,
+			Runtime: runtimeInfo(cfg),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No write timeout: a manual refresh can legitimately take longer than
@@ -227,6 +245,25 @@ func publishOnce(args []string) error {
 		return errors.New("every symbol failed to fetch")
 	}
 	return nil
+}
+
+// runtimeInfo is the start-up configuration the Settings page shows read-only:
+// the things a browser genuinely cannot change about a process that is already
+// listening and already has a file open.
+func runtimeInfo(cfg config) api.Runtime {
+	webSource := "embedded"
+	if cfg.webDist != "" {
+		webSource = cfg.webDist
+	}
+	dbPath := cfg.db
+	if abs, err := filepath.Abs(dbPath); err == nil {
+		dbPath = abs
+	}
+	return api.Runtime{
+		ListenAddr: net.JoinHostPort(cfg.host, strconv.Itoa(cfg.port)),
+		DBPath:     dbPath,
+		WebSource:  webSource,
+	}
 }
 
 func newLogger(verbose bool) *slog.Logger {

@@ -115,7 +115,8 @@ re-adding a symbol you removed by accident brings its chart back.
 **Settings are a key/value table.** Adding one never needs a migration — which
 matters because a rolled-back binary has to keep running against a database a
 newer version has already touched. An unset key reads back as its default, not
-as zero.
+as zero. That property is what let the quote-source settings ship without a
+schema change at all.
 
 **`runs` is capped at 500 rows.** An unbounded audit log on a Pi's SD card is a
 slow-motion disk-full bug.
@@ -137,6 +138,49 @@ govern it, and both exist because of the upgrade story:
 
 `/api/health` reports the applied list, so an operator can see from outside
 which schema a running instance is on.
+
+## Configuration precedence
+
+Two kinds of configuration, split by a single question: *can this change while
+the process is running?*
+
+**Start-up flags** — the listen address, the database path, `--web-dist`. A
+running process cannot move the socket it is already accepting on or swap the
+file it has open, so these are flags only. They are reported read-only by
+`/api/state` and shown on the Settings page, because "which database is this
+instance actually using?" should not require reading a unit file.
+
+**Stored settings** — the interval, retention, publish-on-refresh, and the
+quote source's URL, timeout and user agent. These live in the database, are
+edited in the GUI, and are re-read every cycle.
+
+The quote-source fields exist in *both* places, and the ordering is
+**stored > flag > env > built-in default**, implemented by
+`quotes.Settings.Merge`: a zero field means "defer to the layer beneath", so
+clearing a box in the GUI reveals the flag, and clearing the flag reveals the
+provider's own default. The flags are there so a systemd unit can be templated;
+the GUI is there so a blocked user agent can be fixed from a phone without a
+redeploy.
+
+Pushing a stored change into a live provider is `quotes.Configurable`:
+
+```go
+type Configurable interface {
+    Apply(Settings)      // safe to call while Fetch is in flight
+    Effective() Settings // what is in force, with defaults resolved
+}
+```
+
+`Engine.ApplyConfig` calls it before every upstream operation — the refresh
+cycle, symbol search, and the connection test — because "I changed the setting
+and nothing happened" is the one failure a settings page must never have. On
+the `Yahoo` side a `sync.RWMutex` guards the swap, and the HTTP client is
+rebuilt only when the timeout actually moves: mutating a live client's
+`Timeout` would race with requests already using it, and building one per
+request would throw away connection pooling.
+
+`Effective()` is what the UI renders, which is why an empty override field can
+show the value it is falling back to as its placeholder.
 
 ## The refresh cycle
 
@@ -204,6 +248,7 @@ its life half-updated.
 | PATCH/DELETE | `/api/sinks/{id}` | edit / remove |
 | POST | `/api/sinks/{id}/test` | send the real payload to one destination |
 | GET/PATCH | `/api/settings` | read / update |
+| POST | `/api/provider/test` | fetch one symbol through the current settings |
 | GET | `/api/runs` | recent cycles |
 | POST | `/api/refresh` | run a cycle now |
 | POST | `/api/publish` | publish the current snapshot now |

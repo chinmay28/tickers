@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // chartJSON is a trimmed but structurally faithful /v8/finance/chart response:
@@ -61,7 +63,7 @@ func newTestYahoo(t *testing.T, handler http.HandlerFunc) *Yahoo {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return &Yahoo{BaseURL: srv.URL, Client: srv.Client()}
+	return NewYahoo(Settings{BaseURL: srv.URL, Timeout: 5 * time.Second})
 }
 
 func TestFetchPrefersLastNonNullClose(t *testing.T) {
@@ -218,4 +220,96 @@ func deref(p *float64) any {
 		return nil
 	}
 	return *p
+}
+
+func TestSettingsMergeKeepsUnsetFields(t *testing.T) {
+	base := Settings{BaseURL: "https://a", Timeout: time.Second, UserAgent: "ua"}
+
+	if got := base.Merge(Settings{}); got != base {
+		t.Errorf("an empty override changed things: %+v", got)
+	}
+	got := base.Merge(Settings{BaseURL: "https://b"})
+	if got.BaseURL != "https://b" || got.Timeout != time.Second || got.UserAgent != "ua" {
+		t.Errorf("merge = %+v; only BaseURL should have moved", got)
+	}
+}
+
+func TestApplyLayersStoredOverStartupOverDefault(t *testing.T) {
+	// The precedence the Settings page depends on: stored > flag > built-in,
+	// and clearing a stored field reveals the layer beneath it again.
+	y := NewYahoo(Settings{BaseURL: "https://from-flag", UserAgent: "flag-ua"})
+
+	eff := y.Effective()
+	if eff.BaseURL != "https://from-flag" || eff.UserAgent != "flag-ua" {
+		t.Fatalf("start-up fallback not applied: %+v", eff)
+	}
+	if eff.Timeout != DefaultTimeout {
+		t.Errorf("timeout = %v, want the package default %v", eff.Timeout, DefaultTimeout)
+	}
+
+	y.Apply(Settings{BaseURL: "https://from-db/", Timeout: 7 * time.Second})
+	eff = y.Effective()
+	if eff.BaseURL != "https://from-db" {
+		t.Errorf("stored base URL did not win (or the trailing slash survived): %q", eff.BaseURL)
+	}
+	if eff.Timeout != 7*time.Second {
+		t.Errorf("timeout = %v, want the stored 7s", eff.Timeout)
+	}
+	if eff.UserAgent != "flag-ua" {
+		t.Errorf("user agent = %q; an unset stored field must fall through to the flag", eff.UserAgent)
+	}
+
+	// Clearing everything stored falls back to the flag, then the default.
+	y.Apply(Settings{})
+	if eff := y.Effective(); eff.BaseURL != "https://from-flag" || eff.Timeout != DefaultTimeout {
+		t.Errorf("clearing the override did not reveal the fallback: %+v", eff)
+	}
+}
+
+func TestApplyTakesEffectOnTheNextRequest(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if got := r.Header.Get("User-Agent"); got != "changed-ua" {
+			t.Errorf("User-Agent = %q, want the reconfigured value", got)
+		}
+		w.Write([]byte(chartJSON))
+	}))
+	defer srv.Close()
+
+	// Start pointed nowhere useful, then reconfigure — this is what the
+	// Settings page does, and the point is that no restart is involved.
+	y := NewYahoo(Settings{BaseURL: "http://127.0.0.1:1", Timeout: time.Second})
+	y.Apply(Settings{BaseURL: srv.URL, UserAgent: "changed-ua", Timeout: 5 * time.Second})
+
+	got, failures := y.Fetch(context.Background(), []string{"VTI"})
+	if len(failures) != 0 {
+		t.Fatalf("fetch failed after reconfiguration: %v", failures)
+	}
+	if _, ok := got["VTI"]; !ok || hits != 1 {
+		t.Fatalf("request did not reach the new base URL (hits=%d)", hits)
+	}
+}
+
+func TestApplyIsSafeDuringFetch(t *testing.T) {
+	// Worth running under -race: Apply swaps the client and the settings while
+	// Fetch is reading them.
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(chartJSON))
+	})
+	base := y.Effective()
+
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				y.Apply(Settings{BaseURL: base.BaseURL, Timeout: time.Duration(i+1) * time.Second})
+				return
+			}
+			y.Fetch(context.Background(), []string{"VTI"})
+		}(i)
+	}
+	wg.Wait()
 }

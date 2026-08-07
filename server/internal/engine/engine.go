@@ -9,9 +9,11 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +64,67 @@ func New(st *store.Store, provider quotes.Provider, publisher *publish.Publisher
 
 // Provider exposes the quote source, for the API's symbol-search endpoint.
 func (e *Engine) Provider() quotes.Provider { return e.provider }
+
+// ApplyConfig pushes the stored quote-source settings into the provider, so a
+// base URL, timeout or user agent edited in the GUI takes effect on the next
+// request rather than at the next restart. Providers that can't be
+// reconfigured are left alone.
+//
+// Every path that talks upstream calls this first — the refresh cycle, symbol
+// search and the connection test — because "I changed the setting and it did
+// nothing" is the failure a settings page must never have.
+func (e *Engine) ApplyConfig(cfg store.Config) {
+	configurable, ok := e.provider.(quotes.Configurable)
+	if !ok {
+		return
+	}
+	configurable.Apply(quotes.Settings{
+		BaseURL:   cfg.QuoteBaseURL,
+		Timeout:   cfg.QuoteTimeout(),
+		UserAgent: cfg.QuoteUserAgent,
+	})
+}
+
+// ProviderSettings reports the settings the provider is actually using, with
+// every default resolved. Returns ok=false for a provider that isn't
+// configurable, which is what the UI keys off to hide the fields.
+func (e *Engine) ProviderSettings() (quotes.Settings, bool) {
+	configurable, ok := e.provider.(quotes.Configurable)
+	if !ok {
+		return quotes.Settings{}, false
+	}
+	return configurable.Effective(), true
+}
+
+// syncProvider reads the stored config and applies it. Used by the paths that
+// don't already have a Config in hand.
+func (e *Engine) syncProvider() {
+	cfg, err := e.store.Config()
+	if err != nil {
+		e.log.Warn("could not read config before an upstream call", "error", err)
+		return
+	}
+	e.ApplyConfig(cfg)
+}
+
+// CheckProvider fetches one symbol through the current settings and reports
+// what happened. It is the Settings page's "Test connection" — the fastest way
+// to tell a wrong base URL from a blocked network from a bad symbol.
+func (e *Engine) CheckProvider(ctx context.Context, symbol string) (quotes.Quote, error) {
+	e.syncProvider()
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		symbol = "VTI"
+	}
+	found, failures := e.provider.Fetch(ctx, []string{symbol})
+	if q, ok := found[symbol]; ok {
+		return q, nil
+	}
+	if err, ok := failures[symbol]; ok && err != nil {
+		return quotes.Quote{}, err
+	}
+	return quotes.Quote{}, fmt.Errorf("no quote returned for %s", symbol)
+}
 
 // Status is what the UI shows about the loop itself.
 type Status struct {
@@ -170,6 +233,10 @@ func (e *Engine) RunCycle(ctx context.Context, trigger string) (store.Run, error
 	if err != nil {
 		return e.finish(run, err)
 	}
+	// Before anything talks upstream: a base URL, timeout or user agent edited
+	// in the GUI has to be in force for this cycle, not the next restart.
+	e.ApplyConfig(cfg)
+
 	tickers, err := e.store.EnabledTickers()
 	if err != nil {
 		return e.finish(run, err)

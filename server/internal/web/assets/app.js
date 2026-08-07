@@ -652,15 +652,29 @@ function runRow(run) {
 
 /* ---------------------------- Settings ----------------------------- */
 
+/** Interval presets, so the common cadences are one tap rather than arithmetic
+ *  in an number field. The floor (30s) is enforced server-side too. */
+const INTERVAL_PRESETS = [
+  { label: '30s', seconds: 30 },
+  { label: '1 min', seconds: 60 },
+  { label: '5 min', seconds: 300 },
+  { label: '15 min', seconds: 900 },
+  { label: '1 hour', seconds: 3600 },
+];
+
 function renderSettings(data) {
   const s = data.settings;
   const min = data.meta.minRefreshSeconds ?? 30;
+  const minTimeout = data.meta.minQuoteTimeout ?? 5;
+  const maxTimeout = data.meta.maxQuoteTimeout ?? 120;
+  const provider = data.provider;
+  const runtime = data.runtime ?? {};
 
   return `
     <div class="page-head">
       <div>
         <h1>Settings</h1>
-        <p>Changes take effect immediately — the refresh loop re-reads these every cycle, so nothing here needs a restart.</p>
+        <p>Changes take effect immediately — the refresh loop and the quote source re-read these every cycle, so nothing here needs a restart.</p>
       </div>
     </div>
 
@@ -669,10 +683,20 @@ function renderSettings(data) {
       <div class="card__body">
         <div class="form-grid">
           <div class="field">
-            <label class="field__label" for="refreshSeconds">Interval (seconds)</label>
+            <label class="field__label" for="refreshSeconds">Fetch every (seconds)</label>
             <input class="input" id="refreshSeconds" name="refreshSeconds" type="number"
                    min="${min}" step="10" value="${esc(s.refreshSeconds)}" />
-            <span class="field__hint">Minimum ${min}s. Currently every ${esc(duration(s.refreshSeconds))}.</span>
+            <div class="presets">
+              ${INTERVAL_PRESETS.filter((p) => p.seconds >= min)
+                .map(
+                  (p) =>
+                    `<button class="btn btn--sm ${
+                      p.seconds === s.refreshSeconds ? 'btn--outline btn--active' : 'btn--ghost'
+                    }" type="button" data-preset="${p.seconds}">${esc(p.label)}</button>`,
+                )
+                .join('')}
+            </div>
+            <span class="field__hint">Minimum ${min}s — the provider is free and unauthenticated, so polling harder is how you get rate-limited.</span>
           </div>
           <div class="field">
             <label class="field__label" for="historyHours">History retention (hours)</label>
@@ -689,20 +713,66 @@ function renderSettings(data) {
             <span class="field__hint">Off means quotes are still stored, but only sent when you press Publish now.</span>
           </div>
         </div>
+
+        ${
+          provider
+            ? `
+        <h3 class="card__subtitle">Quote source</h3>
+        <p class="field__hint" style="margin:0 0 0.7rem">
+          Where prices come from. Leave a field blank to use the default shown in it —
+          the values in force right now are listed under <em>Server</em> below.
+        </p>
+        <div class="form-grid">
+          <div class="field">
+            <label class="field__label" for="quoteBaseUrl">Server URL</label>
+            <input class="input" id="quoteBaseUrl" name="quoteBaseUrl" type="url"
+                   value="${esc(s.quoteBaseUrl)}" placeholder="${esc(provider.defaultBaseUrl)}" />
+            <span class="field__hint">Point at a mirror or a caching proxy. Must be http:// or https://.</span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="quoteTimeoutSeconds">Request timeout (seconds)</label>
+            <input class="input" id="quoteTimeoutSeconds" name="quoteTimeoutSeconds" type="number"
+                   min="0" max="${maxTimeout}" step="1" value="${esc(s.quoteTimeoutSeconds || '')}"
+                   placeholder="${esc(provider.defaultTimeoutSeconds)}" />
+            <span class="field__hint">${minTimeout}–${maxTimeout}s, or blank for the default.</span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="quoteUserAgent">User agent</label>
+            <input class="input" id="quoteUserAgent" name="quoteUserAgent"
+                   value="${esc(s.quoteUserAgent)}" placeholder="browser default" />
+            <span class="field__hint">Yahoo stonewalls obvious scripts. If every symbol suddenly reads N/A, a fresher browser string is the usual fix.</span>
+          </div>
+        </div>`
+            : ''
+        }
+
         <div class="form-actions">
           <button class="btn btn--primary" type="submit">Save settings</button>
+          ${provider ? `<button class="btn btn--outline" type="button" id="test-provider">Test connection</button>` : ''}
         </div>
       </div>
     </form>
 
     <div class="card">
-      <div class="card__head"><h2 class="card__title">About</h2></div>
+      <div class="card__head">
+        <h2 class="card__title">Server</h2>
+        <span class="field__hint">Start-up flags — change these in the systemd unit, then restart.</span>
+      </div>
       <div class="card__body">
         <div class="table-scroll">
           <table class="table">
             <tbody>
               <tr><th>Version</th><td><code>${esc(data.version)}</code></td></tr>
-              <tr><th>Quote provider</th><td>${esc(data.engine.provider)}</td></tr>
+              <tr><th>Listening on</th><td><code>${esc(runtime.listenAddr ?? '—')}</code></td></tr>
+              <tr><th>Database</th><td class="wrap"><code>${esc(runtime.dbPath ?? '—')}</code></td></tr>
+              <tr><th>Web client</th><td class="wrap"><code>${esc(runtime.webSource ?? '—')}</code></td></tr>
+              ${
+                provider
+                  ? `<tr><th>Quote URL in use</th><td class="wrap"><code>${esc(provider.baseUrl)}</code></td></tr>
+                     <tr><th>Timeout in use</th><td>${esc(provider.timeoutSeconds)}s</td></tr>
+                     <tr><th>User agent in use</th><td class="wrap"><code>${esc(provider.userAgent)}</code></td></tr>`
+                  : `<tr><th>Quote provider</th><td>${esc(data.engine.provider)}</td></tr>`
+              }
               <tr><th>Seeded placeholders</th><td class="wrap"><code>${esc((data.meta.seedSymbols ?? []).join(', '))}</code></td></tr>
               <tr><th>Upgrades</th><td class="wrap">Re-run <code>scripts/quickstart.sh</code>. It snapshots the database, swaps code in, and rolls back if the new version fails its health check.</td></tr>
             </tbody>
@@ -861,15 +931,20 @@ $('#view').addEventListener('submit', (event) => {
   }
 
   if (form.id === 'settings-form') {
-    act(
-      () =>
-        patch('/settings', {
-          refreshSeconds: Number(values.refreshSeconds),
-          historyHours: Number(values.historyHours),
-          publishOnRefresh: form.elements.publishOnRefresh.checked,
-        }),
-      { success: 'Settings saved' },
-    );
+    const payload = {
+      refreshSeconds: Number(values.refreshSeconds),
+      historyHours: Number(values.historyHours),
+      publishOnRefresh: form.elements.publishOnRefresh.checked,
+    };
+    // The quote-source fields only exist for a configurable provider. Send
+    // them as strings so a cleared box reaches the server as "" — which is
+    // how you ask for the default back — rather than being dropped.
+    if (form.elements.quoteBaseUrl) {
+      payload.quoteBaseUrl = values.quoteBaseUrl ?? '';
+      payload.quoteUserAgent = values.quoteUserAgent ?? '';
+      payload.quoteTimeoutSeconds = Number(values.quoteTimeoutSeconds) || 0;
+    }
+    act(() => patch('/settings', payload), { success: 'Settings saved' });
   }
 });
 
@@ -923,7 +998,50 @@ $('#view').addEventListener('click', async (event) => {
     return;
   }
 
-  if (event.target.id === 'refresh-view') refreshView();
+  if (event.target.id === 'refresh-view') {
+    refreshView();
+    return;
+  }
+
+  // Interval preset chips write into the number field rather than saving, so
+  // one tap is still followed by a deliberate Save.
+  const preset = event.target.closest('[data-preset]');
+  if (preset) {
+    const input = $('#refreshSeconds');
+    if (input) {
+      input.value = preset.dataset.preset;
+      for (const chip of $$('[data-preset]')) {
+        chip.classList.toggle('btn--active', chip === preset);
+        chip.classList.toggle('btn--outline', chip === preset);
+        chip.classList.toggle('btn--ghost', chip !== preset);
+      }
+    }
+    return;
+  }
+
+  if (event.target.id === 'test-provider') {
+    const button = event.target;
+    const symbol = ($('#add-symbol')?.value || '').trim();
+    button.disabled = true;
+    const previous = button.textContent;
+    button.textContent = 'Testing…';
+    try {
+      const { result } = await post('/provider/test', symbol ? { symbol } : {});
+      if (result.ok) {
+        toast(
+          `${result.provider}: ${result.symbol} = ${money(result.price, result.currency)} (${result.durationMs} ms)`,
+          'ok',
+        );
+      } else {
+        toast(`${result.provider} unreachable: ${result.error}`, 'error');
+      }
+    } catch (err) {
+      toast(err.message || String(err), 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = previous;
+    }
+  }
 });
 
 $('#refresh-now').addEventListener('click', () => {
