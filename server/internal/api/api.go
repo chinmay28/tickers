@@ -16,6 +16,7 @@ import (
 
 	"github.com/chinmay28/tickers/server/internal/engine"
 	"github.com/chinmay28/tickers/server/internal/publish"
+	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
 	"github.com/chinmay28/tickers/server/internal/version"
 )
@@ -27,8 +28,22 @@ type Server struct {
 	publisher *publish.Publisher
 	log       *slog.Logger
 	started   time.Time
+	runtime   Runtime
 	// web serves the embedded client; nil means API-only.
 	web http.Handler
+}
+
+// Runtime is the start-up configuration the Settings page shows read-only.
+//
+// These are the things that genuinely cannot be changed from a browser: the
+// address the server is already listening on, and the file it already has
+// open. Showing them is most of the value — "which database is this instance
+// actually using?" is otherwise a question you answer by reading a unit file.
+type Runtime struct {
+	ListenAddr string `json:"listenAddr"`
+	DBPath     string `json:"dbPath"`
+	// WebSource is "embedded" or the --web-dist directory being served.
+	WebSource string `json:"webSource"`
 }
 
 // Options configures a Server.
@@ -40,6 +55,8 @@ type Options struct {
 	Publisher *publish.Publisher
 	// Web serves the client at every non-/api path. Nil disables it.
 	Web http.Handler
+	// Runtime is reported by /api/state for the Settings page.
+	Runtime Runtime
 }
 
 // New builds the API server.
@@ -58,6 +75,7 @@ func New(opts Options) *Server {
 		publisher: publisher,
 		log:       log,
 		started:   time.Now(),
+		runtime:   opts.Runtime,
 		web:       opts.Web,
 	}
 }
@@ -86,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	mux.HandleFunc("PATCH /api/settings", s.handlePatchSettings)
+	mux.HandleFunc("POST /api/provider/test", s.handleTestProvider)
 
 	mux.HandleFunc("GET /api/runs", s.handleRuns)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
@@ -146,7 +165,41 @@ type stateResponse struct {
 	Settings store.Config   `json:"settings"`
 	Engine   engine.Status  `json:"engine"`
 	Preview  map[string]any `json:"preview"`
+	Runtime  Runtime        `json:"runtime"`
+	// Provider is the quote source's effective settings, with every default
+	// resolved — nil for a provider that can't be reconfigured, which is what
+	// the UI keys off to hide those fields.
+	Provider *providerView  `json:"provider"`
 	Meta     map[string]any `json:"meta"`
+}
+
+// providerView is what the Settings page renders for the quote source: the
+// values in force right now, so an empty override field can show the default
+// it is falling back to as its placeholder.
+type providerView struct {
+	Name             string `json:"name"`
+	BaseURL          string `json:"baseUrl"`
+	UserAgent        string `json:"userAgent"`
+	TimeoutSeconds   int    `json:"timeoutSeconds"`
+	DefaultBaseURL   string `json:"defaultBaseUrl"`
+	DefaultUserAgent string `json:"defaultUserAgent"`
+	DefaultTimeout   int    `json:"defaultTimeoutSeconds"`
+}
+
+func (s *Server) providerView() *providerView {
+	effective, ok := s.engine.ProviderSettings()
+	if !ok {
+		return nil
+	}
+	return &providerView{
+		Name:             s.engine.Provider().Name(),
+		BaseURL:          effective.BaseURL,
+		UserAgent:        effective.UserAgent,
+		TimeoutSeconds:   int(effective.Timeout / time.Second),
+		DefaultBaseURL:   quotes.DefaultBaseURL,
+		DefaultUserAgent: quotes.DefaultUserAgent,
+		DefaultTimeout:   int(quotes.DefaultTimeout / time.Second),
+	}
 }
 
 // tickerView is a ticker with its latest reading attached — the shape the
@@ -193,8 +246,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		Settings: cfg,
 		Engine:   s.engine.Status(),
 		Preview:  preview,
+		Runtime:  s.runtime,
+		Provider: s.providerView(),
 		Meta: map[string]any{
 			"minRefreshSeconds": store.MinRefreshSeconds,
+			"minQuoteTimeout":   store.MinQuoteTimeout,
+			"maxQuoteTimeout":   store.MaxQuoteTimeout,
 			"formats":           []string{store.FormatMinion, store.FormatDetailed},
 			"seedSymbols":       store.SeedSymbols,
 		},
@@ -460,7 +517,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":          cfg,
+		"provider":          s.providerView(),
 		"minRefreshSeconds": store.MinRefreshSeconds,
+		"minQuoteTimeout":   store.MinQuoteTimeout,
+		"maxQuoteTimeout":   store.MaxQuoteTimeout,
 	})
 }
 
@@ -474,10 +534,50 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	// Nudge the loop so a shortened interval takes effect from now rather than
-	// after the old, longer wait finishes.
+	// Push the quote-source fields into the provider straight away, so the
+	// response already reflects what the next request will use — and nudge the
+	// loop so a shortened interval takes effect from now rather than after the
+	// old, longer wait finishes.
+	s.engine.ApplyConfig(cfg)
 	s.engine.Kick()
-	writeJSON(w, http.StatusOK, map[string]any{"settings": cfg})
+	writeJSON(w, http.StatusOK, map[string]any{"settings": cfg, "provider": s.providerView()})
+}
+
+// handleTestProvider fetches one symbol through the settings as they stand and
+// reports the outcome verbatim.
+//
+// This is the Settings page's "Test connection", and it is the fastest way to
+// tell the three failures apart that all look identical from the watchlist: a
+// wrong base URL, a network that blocks the provider, and a symbol that simply
+// doesn't exist. It always answers 200 — the *result* carries the failure,
+// because a 502 here would just be a second error to interpret.
+func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Symbol string `json:"symbol"`
+	}
+	// An empty body is fine: the engine falls back to a known-good symbol.
+	if r.ContentLength > 0 && !decode(w, r, &body) {
+		return
+	}
+
+	start := time.Now()
+	quote, err := s.engine.CheckProvider(r.Context(), body.Symbol)
+	result := map[string]any{
+		"provider":   s.engine.Provider().Name(),
+		"durationMs": time.Since(start).Milliseconds(),
+		"settings":   s.providerView(),
+	}
+	if err != nil {
+		result["ok"] = false
+		result["error"] = err.Error()
+	} else {
+		result["ok"] = true
+		result["symbol"] = quote.Symbol
+		result["price"] = quote.Price
+		result["currency"] = quote.Currency
+		result["name"] = quote.ShortName
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": result})
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {

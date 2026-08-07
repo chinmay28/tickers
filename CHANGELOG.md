@@ -22,8 +22,18 @@ self-hosted web app in the shape of
 - Search Yahoo by company name when you don't know the ticker.
 - Publish to several destinations, each with its own base URL, key, category,
   format and timeout — and **Test** one on demand with the real payload.
-- Change the poll interval, history retention and whether every refresh
-  publishes. Changes take effect immediately; no restart.
+- Change the poll interval (a seconds field plus 30s/1m/5m/15m/1h presets),
+  history retention, and whether every refresh publishes.
+- Change the **quote source** — the upstream server URL, the request timeout
+  and the User-Agent — and press **Test connection** to fetch one symbol and
+  see the price or the exact error. The user-agent field matters in practice:
+  Yahoo stonewalls obvious scripts and the string that works drifts, so this
+  turns a redeploy into a text box. A read-only *Server* card shows the
+  start-up configuration (listen address, database path, client source) that a
+  browser genuinely can't change.
+- Everything in Settings takes effect on the next cycle; no restart. The
+  quote-source fields also exist as `--quote-*` flags for templating a systemd
+  unit, and the ordering is stored setting > flag > env > built-in default.
 - See recent refresh cycles on an Activity page, with per-symbol counts, which
   verb each destination accepted, and the failures in full. The server retains
   the last 500.

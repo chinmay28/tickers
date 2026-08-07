@@ -15,13 +15,20 @@ import (
 // YahooName is the provider's identifier.
 const YahooName = "yahoo"
 
-// DefaultUserAgent is sent on every request.
+// DefaultBaseURL is Yahoo Finance's public API root.
+const DefaultBaseURL = "https://query1.finance.yahoo.com"
+
+// DefaultUserAgent is sent on every request unless one is configured.
 //
 // Yahoo's public endpoints answer a browser and stonewall an obvious script,
 // which is the single most common reason a self-hosted quote fetcher starts
 // returning nothing after working for months. yfinance sets a browser UA for
-// the same reason; this is that, made explicit.
+// the same reason; this is that, made explicit — and it is configurable
+// because the string that works is a moving target.
 const DefaultUserAgent = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+// DefaultTimeout bounds a single request when nothing else says otherwise.
+const DefaultTimeout = 20 * time.Second
 
 // maxConcurrent caps in-flight requests. A watchlist is a handful of symbols,
 // and firing all of them at once from a Raspberry Pi on a domestic connection
@@ -30,45 +37,65 @@ const maxConcurrent = 4
 
 // Yahoo reads quotes from Yahoo Finance's public chart endpoint — the same
 // data yfinance returns for `history(period="1d", interval="1m")`.
+//
+// It is Configurable: the base URL, timeout and user agent can all be changed
+// from the Settings page while the service runs. The mutex is what makes that
+// safe — Apply can land while a refresh cycle is mid-flight.
 type Yahoo struct {
-	// BaseURL is the API root. Overridden in tests; leave empty in production.
-	BaseURL string
-	// Client is the HTTP client. Leave nil for a sensible default.
-	Client *http.Client
-	// UserAgent overrides DefaultUserAgent.
-	UserAgent string
+	mu sync.RWMutex
+	// fallback is what the operator supplied at start-up (flags/env). Stored
+	// settings overlay it; clearing a stored field reveals it again.
+	fallback Settings
+	active   Settings
+	client   *http.Client
 }
 
-// NewYahoo builds a provider with a timeout-bounded client.
-func NewYahoo(timeout time.Duration) *Yahoo {
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
-	return &Yahoo{Client: &http.Client{Timeout: timeout}}
+// NewYahoo builds a provider. The settings given are the start-up fallback —
+// any field left zero uses the package default, and a stored override from the
+// database wins over both.
+func NewYahoo(fallback Settings) *Yahoo {
+	y := &Yahoo{fallback: fallback}
+	y.Apply(Settings{})
+	return y
 }
 
 // Name implements Provider.
 func (y *Yahoo) Name() string { return YahooName }
 
-func (y *Yahoo) baseURL() string {
-	if y.BaseURL != "" {
-		return strings.TrimRight(y.BaseURL, "/")
+// Apply implements Configurable.
+func (y *Yahoo) Apply(override Settings) {
+	next := Settings{
+		BaseURL:   DefaultBaseURL,
+		Timeout:   DefaultTimeout,
+		UserAgent: DefaultUserAgent,
+	}.Merge(y.fallback).Merge(override)
+	next.BaseURL = strings.TrimRight(next.BaseURL, "/")
+
+	y.mu.Lock()
+	defer y.mu.Unlock()
+	// Rebuild the client only when the timeout actually moves: mutating a live
+	// client's Timeout would race with requests already using it, and building
+	// a fresh one per request would throw away connection pooling. Sharing the
+	// default transport keeps the pool across rebuilds.
+	if y.client == nil || y.active.Timeout != next.Timeout {
+		y.client = &http.Client{Timeout: next.Timeout, Transport: http.DefaultTransport}
 	}
-	return "https://query1.finance.yahoo.com"
+	y.active = next
 }
 
-func (y *Yahoo) client() *http.Client {
-	if y.Client != nil {
-		return y.Client
-	}
-	return &http.Client{Timeout: 15 * time.Second}
+// Effective implements Configurable.
+func (y *Yahoo) Effective() Settings {
+	y.mu.RLock()
+	defer y.mu.RUnlock()
+	return y.active
 }
 
-func (y *Yahoo) userAgent() string {
-	if y.UserAgent != "" {
-		return y.UserAgent
-	}
-	return DefaultUserAgent
+// current returns the settings and client to use for one request, read under
+// the lock so a concurrent Apply can't tear them apart.
+func (y *Yahoo) current() (Settings, *http.Client) {
+	y.mu.RLock()
+	defer y.mu.RUnlock()
+	return y.active, y.client
 }
 
 // Fetch implements Provider, pricing symbols concurrently.
@@ -143,8 +170,9 @@ type chartResponse struct {
 }
 
 func (y *Yahoo) fetchOne(ctx context.Context, symbol string) (Quote, error) {
+	settings, _ := y.current()
 	endpoint := fmt.Sprintf("%s/v8/finance/chart/%s?range=1d&interval=1m&includePrePost=false",
-		y.baseURL(), url.PathEscape(symbol))
+		settings.BaseURL, url.PathEscape(symbol))
 
 	body, err := y.get(ctx, endpoint)
 	if err != nil {
@@ -210,8 +238,9 @@ func (y *Yahoo) Search(ctx context.Context, query string) ([]Match, error) {
 	if query == "" {
 		return []Match{}, nil
 	}
+	settings, _ := y.current()
 	endpoint := fmt.Sprintf("%s/v1/finance/search?q=%s&quotesCount=10&newsCount=0&listsCount=0",
-		y.baseURL(), url.QueryEscape(query))
+		settings.BaseURL, url.QueryEscape(query))
 
 	body, err := y.get(ctx, endpoint)
 	if err != nil {
@@ -247,10 +276,11 @@ func (y *Yahoo) get(ctx context.Context, endpoint string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", y.userAgent())
+	settings, client := y.current()
+	req.Header.Set("User-Agent", settings.UserAgent)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := y.client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

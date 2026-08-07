@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -407,4 +408,90 @@ func mustTicker(t *testing.T, st *Store, symbol string) Ticker {
 	}
 	t.Fatalf("no ticker %s on the watchlist", symbol)
 	return Ticker{}
+}
+
+func TestQuoteSourceSettingsRoundTripAndValidate(t *testing.T) {
+	st := newTestStore(t)
+
+	// Defaults are all "unset", meaning "use whatever the provider decides".
+	cfg, _ := st.Config()
+	if cfg.QuoteBaseURL != "" || cfg.QuoteUserAgent != "" || cfg.QuoteTimeoutSeconds != 0 {
+		t.Fatalf("fresh quote settings are not empty: %+v", cfg)
+	}
+
+	url := "https://quotes.example.com/api/"
+	ua := "Mozilla/5.0 (custom)"
+	timeout := 30
+	cfg, err := st.UpdateConfig(ConfigPatch{
+		QuoteBaseURL: &url, QuoteUserAgent: &ua, QuoteTimeoutSeconds: &timeout,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if cfg.QuoteBaseURL != "https://quotes.example.com/api" {
+		t.Errorf("base URL = %q; the trailing slash should be trimmed", cfg.QuoteBaseURL)
+	}
+	if cfg.QuoteUserAgent != ua || cfg.QuoteTimeoutSeconds != 30 {
+		t.Errorf("quote settings = %+v", cfg)
+	}
+	if cfg.QuoteTimeout() != 30*time.Second {
+		t.Errorf("QuoteTimeout() = %v, want 30s", cfg.QuoteTimeout())
+	}
+	if again, _ := st.Config(); again != cfg {
+		t.Fatalf("quote settings did not persist: %+v vs %+v", again, cfg)
+	}
+
+	// Clearing is how you ask for the default back, so "" must be accepted and
+	// must survive the round trip as "" rather than being ignored.
+	empty := ""
+	zero := 0
+	cfg, err = st.UpdateConfig(ConfigPatch{
+		QuoteBaseURL: &empty, QuoteUserAgent: &empty, QuoteTimeoutSeconds: &zero,
+	})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if cfg.QuoteBaseURL != "" || cfg.QuoteUserAgent != "" || cfg.QuoteTimeoutSeconds != 0 {
+		t.Errorf("clearing left values behind: %+v", cfg)
+	}
+	if again, _ := st.Config(); again.QuoteBaseURL != "" {
+		t.Errorf("cleared base URL came back as %q", again.QuoteBaseURL)
+	}
+}
+
+func TestQuoteSourceSettingsRejectBadInput(t *testing.T) {
+	st := newTestStore(t)
+
+	bad := "file:///etc/passwd"
+	if _, err := st.UpdateConfig(ConfigPatch{QuoteBaseURL: &bad}); err == nil {
+		t.Error("a file:// quote URL was accepted — that is an arbitrary-read primitive")
+	}
+	noHost := "http://"
+	if _, err := st.UpdateConfig(ConfigPatch{QuoteBaseURL: &noHost}); err == nil {
+		t.Error("a hostless quote URL was accepted")
+	}
+
+	tooShort := MinQuoteTimeout - 1
+	if _, err := st.UpdateConfig(ConfigPatch{QuoteTimeoutSeconds: &tooShort}); err == nil {
+		t.Error("a timeout below the floor was accepted")
+	}
+	tooLong := MaxQuoteTimeout + 1
+	if _, err := st.UpdateConfig(ConfigPatch{QuoteTimeoutSeconds: &tooLong}); err == nil {
+		t.Error("a timeout above the ceiling was accepted")
+	}
+
+	// A newline in the user agent would let the value inject request headers.
+	injected := "curl/8\r\nX-Evil: yes"
+	if _, err := st.UpdateConfig(ConfigPatch{QuoteUserAgent: &injected}); err == nil {
+		t.Error("a user agent containing CRLF was accepted")
+	}
+	long := strings.Repeat("a", MaxUserAgentLen+1)
+	if _, err := st.UpdateConfig(ConfigPatch{QuoteUserAgent: &long}); err == nil {
+		t.Error("an over-long user agent was accepted")
+	}
+
+	// None of the rejections may have partially written.
+	if cfg, _ := st.Config(); cfg.QuoteBaseURL != "" || cfg.QuoteUserAgent != "" || cfg.QuoteTimeoutSeconds != 0 {
+		t.Errorf("a rejected patch still changed stored settings: %+v", cfg)
+	}
 }

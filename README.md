@@ -153,14 +153,28 @@ Two formats:
 **Activity** — the last refresh cycles, with per-symbol counts, which verb each
 destination accepted, and the failures in full.
 
-**Settings** — poll interval (minimum 30s), history retention, and whether to
-publish after every refresh. Changes take effect immediately; nothing here
-needs a restart.
+**Settings** — two groups, both live:
+
+- *Refresh loop* — how often symbols are fetched (a seconds field plus
+  30s/1m/5m/15m/1h presets; 30s is the floor), how long price history is kept,
+  and whether every refresh also publishes.
+- *Quote source* — the **server URL** prices come from, the request timeout,
+  and the User-Agent sent upstream. Leave a field blank to fall back to the
+  default, which the field shows as its placeholder. **Test connection** fetches
+  one symbol right then and reports the price or the exact error — the fastest
+  way to tell a wrong URL from a blocked network from a bad symbol.
+
+Below those, a read-only **Server** card shows what the process was started
+with: listen address, database path, whether the client is embedded or served
+from disk, and the quote settings actually in force.
+
+Everything in Settings takes effect on the next cycle. Nothing needs a restart.
 
 ## Configuration
 
-Configure the server with `tickers serve` flags — prefer these over the env
-vars, which remain only as fallbacks:
+Almost everything is configured in the GUI and stored in the database: the
+watchlist, the publish destinations, the poll interval, and the quote source.
+The flags below are what has to be decided before the process starts.
 
 | Flag | Env fallback | Default | Meaning |
 |---|---|---|---|
@@ -169,10 +183,21 @@ vars, which remain only as fallbacks:
 | `--db` | `TICKERS_DB` | `./data/tickers.sqlite` | SQLite file path |
 | `--web-dist` | `WEB_DIST` | — | serve the client from this directory instead of the embedded copy |
 | `--verbose` | `TICKERS_VERBOSE` | off | log every API request |
+| `--quote-base-url` | `TICKERS_QUOTE_BASE_URL` | Yahoo's | quote API root — *overridable in the GUI* |
+| `--quote-timeout` | `TICKERS_QUOTE_TIMEOUT` | `20` | seconds per quote request — *overridable in the GUI* |
+| `--quote-user-agent` | `TICKERS_QUOTE_USER_AGENT` | a browser string | *overridable in the GUI* |
 
-Each flag wins over its env var, which wins over the default (**flag > env >
-default**). Everything else — the watchlist, the destinations, the interval —
-lives in the database and is edited in the GUI.
+For the first five: **flag > env > default**.
+
+The three quote-source flags are a *fallback*, not a fixed value — they exist so
+a systemd unit can be templated, but the Settings page wins:
+**stored setting > flag > env > built-in default**. Clearing the field in the
+GUI reveals the flag again; clearing both reveals the built-in default.
+
+The listen address and database path deliberately stay out of the GUI: a web
+app that can change the port it is served on is a web app that can lock you out
+of itself. They're shown read-only on the Settings page so you don't have to go
+read the unit file to find them.
 
 There is also a one-shot mode, which is the original script's job exactly:
 

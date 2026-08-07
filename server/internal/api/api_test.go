@@ -53,6 +53,11 @@ type harness struct {
 
 func newHarness(t *testing.T, provider quotes.Provider) *harness {
 	t.Helper()
+	return newHarnessWith(t, provider, Runtime{})
+}
+
+func newHarnessWith(t *testing.T, provider quotes.Provider, runtime Runtime) *harness {
+	t.Helper()
 	st, err := store.Open(t.TempDir() + "/api.sqlite")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -64,7 +69,7 @@ func newHarness(t *testing.T, provider quotes.Provider) *harness {
 	if err != nil {
 		t.Fatalf("web handler: %v", err)
 	}
-	srv := New(Options{Store: st, Engine: eng, Web: webHandler})
+	srv := New(Options{Store: st, Engine: eng, Web: webHandler, Runtime: runtime})
 	return &harness{handler: srv.Handler(), store: st, engine: eng}
 }
 
@@ -555,4 +560,132 @@ func truncate(s string) string {
 		return s[:80] + "…"
 	}
 	return s
+}
+
+func TestSettingsExposeAndUpdateTheQuoteSource(t *testing.T) {
+	h := newHarness(t, stubProvider{})
+
+	// A stub provider isn't Configurable, so the UI is told to hide the fields.
+	_, body := h.do(t, http.MethodGet, "/api/settings", nil)
+	if body["provider"] != nil {
+		t.Errorf("provider = %v, want null for a non-configurable provider", body["provider"])
+	}
+
+	// A real one is, and reports the defaults the form uses as placeholders.
+	real := newHarnessWith(t, quotes.NewYahoo(quotes.Settings{}), Runtime{})
+	_, body = real.do(t, http.MethodGet, "/api/settings", nil)
+	provider, ok := body["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider = %v, want the effective settings", body["provider"])
+	}
+	if provider["baseUrl"] != quotes.DefaultBaseURL {
+		t.Errorf("baseUrl = %v, want the package default", provider["baseUrl"])
+	}
+	if provider["defaultTimeoutSeconds"] != float64(quotes.DefaultTimeout/time.Second) {
+		t.Errorf("defaultTimeoutSeconds = %v", provider["defaultTimeoutSeconds"])
+	}
+
+	// Saving an override must be visible in the provider straight away — the
+	// response itself has to reflect what the next request will use, or the
+	// page shows a value the server isn't honouring.
+	rec, body := real.do(t, http.MethodPatch, "/api/settings", map[string]any{
+		"quoteBaseUrl": "https://mirror.example.com/", "quoteTimeoutSeconds": 45,
+		"quoteUserAgent": "Tickers/test",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch returned %d: %v", rec.Code, body)
+	}
+	provider = body["provider"].(map[string]any)
+	if provider["baseUrl"] != "https://mirror.example.com" {
+		t.Errorf("provider baseUrl = %v, want the saved override", provider["baseUrl"])
+	}
+	if provider["timeoutSeconds"] != 45.0 || provider["userAgent"] != "Tickers/test" {
+		t.Errorf("provider = %v", provider)
+	}
+
+	// And it survives into /api/state, which is what the page actually renders.
+	_, state := real.do(t, http.MethodGet, "/api/state", nil)
+	if state["provider"].(map[string]any)["baseUrl"] != "https://mirror.example.com" {
+		t.Errorf("state provider = %v", state["provider"])
+	}
+	if state["settings"].(map[string]any)["quoteBaseUrl"] != "https://mirror.example.com" {
+		t.Errorf("state settings = %v", state["settings"])
+	}
+
+	// Clearing goes back to the default rather than to an empty base URL.
+	_, body = real.do(t, http.MethodPatch, "/api/settings", map[string]any{"quoteBaseUrl": ""})
+	if body["provider"].(map[string]any)["baseUrl"] != quotes.DefaultBaseURL {
+		t.Errorf("clearing did not restore the default: %v", body["provider"])
+	}
+}
+
+func TestSettingsRejectAnUnusableQuoteSource(t *testing.T) {
+	h := newHarnessWith(t, quotes.NewYahoo(quotes.Settings{}), Runtime{})
+
+	for name, patch := range map[string]map[string]any{
+		"file scheme":      {"quoteBaseUrl": "file:///etc/passwd"},
+		"no host":          {"quoteBaseUrl": "http://"},
+		"timeout low":      {"quoteTimeoutSeconds": 1},
+		"timeout high":     {"quoteTimeoutSeconds": store.MaxQuoteTimeout + 1},
+		"header injection": {"quoteUserAgent": "curl\r\nX-Evil: 1"},
+	} {
+		if rec, _ := h.do(t, http.MethodPatch, "/api/settings", patch); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: returned %d, want 400", name, rec.Code)
+		}
+	}
+}
+
+func TestProviderTestReportsSuccessAndFailureAsPayload(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"chart":{"result":[{"meta":{"currency":"USD","symbol":"VTI",
+		  "shortName":"Vanguard Total Stock Market ETF","regularMarketPrice":301.5,
+		  "chartPreviousClose":300},"indicators":{"quote":[{"close":[301.5]}]}}],"error":null}}`))
+	}))
+	defer upstream.Close()
+
+	h := newHarnessWith(t, quotes.NewYahoo(quotes.Settings{}), Runtime{})
+	if rec, body := h.do(t, http.MethodPatch, "/api/settings", map[string]any{
+		"quoteBaseUrl": upstream.URL, "quoteTimeoutSeconds": 10,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("patch returned %d: %v", rec.Code, body)
+	}
+
+	rec, body := h.do(t, http.MethodPost, "/api/provider/test", map[string]any{"symbol": "vti"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test returned %d: %v", rec.Code, body)
+	}
+	result := body["result"].(map[string]any)
+	if result["ok"] != true || result["symbol"] != "VTI" || result["price"] != 301.5 {
+		t.Fatalf("result = %v", result)
+	}
+
+	// An unreachable source is reported in the payload, not as an HTTP error —
+	// a 502 here would just be a second error for the user to interpret.
+	if rec, _ := h.do(t, http.MethodPatch, "/api/settings", map[string]any{
+		"quoteBaseUrl": "http://127.0.0.1:1", "quoteTimeoutSeconds": 5,
+	}); rec.Code != http.StatusOK {
+		t.Fatal("could not point the provider at a dead port")
+	}
+	rec, body = h.do(t, http.MethodPost, "/api/provider/test", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a failing test returned %d, want 200", rec.Code)
+	}
+	result = body["result"].(map[string]any)
+	if result["ok"] != false || result["error"] == nil {
+		t.Errorf("result = %v, want a reported failure", result)
+	}
+}
+
+func TestStateReportsRuntimeConfiguration(t *testing.T) {
+	runtime := Runtime{ListenAddr: "0.0.0.0:8797", DBPath: "/var/lib/tickers/tickers.sqlite", WebSource: "embedded"}
+	h := newHarnessWith(t, stubProvider{}, runtime)
+
+	_, body := h.do(t, http.MethodGet, "/api/state", nil)
+	got, ok := body["runtime"].(map[string]any)
+	if !ok {
+		t.Fatalf("runtime = %v", body["runtime"])
+	}
+	if got["listenAddr"] != runtime.ListenAddr || got["dbPath"] != runtime.DBPath || got["webSource"] != "embedded" {
+		t.Errorf("runtime = %v, want %+v", got, runtime)
+	}
 }

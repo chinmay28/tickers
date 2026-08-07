@@ -351,3 +351,96 @@ func TestConcurrentCyclesAreSerialised(t *testing.T) {
 		t.Errorf("provider called %d times, want 5", provider.callCount())
 	}
 }
+
+// configurableProvider records what settings it was handed, so a test can
+// assert that the engine actually pushes stored configuration down.
+type configurableProvider struct {
+	fakeProvider
+	mu      sync.Mutex
+	applied []quotes.Settings
+}
+
+func (c *configurableProvider) Apply(s quotes.Settings) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applied = append(c.applied, s)
+}
+
+func (c *configurableProvider) Effective() quotes.Settings {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.applied) == 0 {
+		return quotes.Settings{}
+	}
+	return c.applied[len(c.applied)-1]
+}
+
+func (c *configurableProvider) last() (quotes.Settings, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.applied) == 0 {
+		return quotes.Settings{}, false
+	}
+	return c.applied[len(c.applied)-1], true
+}
+
+func TestRunCyclePushesQuoteSettingsToTheProvider(t *testing.T) {
+	provider := &configurableProvider{fakeProvider: fakeProvider{prices: map[string]float64{"VTI": 300}}}
+	eng, st := newTestEngine(t, provider)
+
+	url := "https://mirror.example.com"
+	ua := "Tickers/test"
+	timeout := 42
+	if _, err := st.UpdateConfig(store.ConfigPatch{
+		QuoteBaseURL: &url, QuoteUserAgent: &ua, QuoteTimeoutSeconds: &timeout,
+	}); err != nil {
+		t.Fatalf("update config: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	// The point of the whole feature: settings edited in the GUI are in force
+	// for the very next cycle, with no restart.
+	got, ok := provider.last()
+	if !ok {
+		t.Fatal("the cycle never configured the provider")
+	}
+	if got.BaseURL != url || got.UserAgent != ua || got.Timeout != 42*time.Second {
+		t.Errorf("applied %+v, want the stored settings", got)
+	}
+}
+
+func TestProviderSettingsReportsUnconfigurableProviders(t *testing.T) {
+	eng, _ := newTestEngine(t, &fakeProvider{})
+	if _, ok := eng.ProviderSettings(); ok {
+		t.Error("a plain provider reported itself configurable")
+	}
+	// ApplyConfig must be a no-op rather than a panic for those.
+	eng.ApplyConfig(store.DefaultConfig())
+}
+
+func TestCheckProviderReportsBothOutcomes(t *testing.T) {
+	provider := &configurableProvider{fakeProvider: fakeProvider{
+		prices: map[string]float64{"VTI": 300},
+		fail:   map[string]bool{"BROKEN": true},
+	}}
+	eng, _ := newTestEngine(t, provider)
+
+	q, err := eng.CheckProvider(context.Background(), " vti ")
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if q.Symbol != "VTI" || q.Price == nil || *q.Price != 300 {
+		t.Errorf("quote = %+v", q)
+	}
+
+	if _, err := eng.CheckProvider(context.Background(), "BROKEN"); err == nil {
+		t.Error("a failing symbol reported success")
+	}
+	// An empty symbol falls back to a known-good default rather than erroring.
+	if _, err := eng.CheckProvider(context.Background(), ""); err != nil {
+		t.Errorf("empty symbol: %v", err)
+	}
+}

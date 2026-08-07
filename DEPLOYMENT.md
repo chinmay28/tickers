@@ -167,11 +167,23 @@ logs one line per cycle either way.
 Settings; and press **Test** on the destination — it sends the real payload and
 reports the exact HTTP response.
 
-**Every symbol shows N/A.** The host can't reach Yahoo's endpoints. Check
-`journalctl -u tickers` for the error on each symbol; a corporate proxy or a
-DNS-filtering router is the usual cause. `curl -s -o /dev/null -w '%{http_code}'
-'https://query1.finance.yahoo.com/v8/finance/chart/VTI?range=1d&interval=1m'`
-from the host tells you quickly.
+**Every symbol shows N/A.** Press **Test connection** on the Settings page
+first — it fetches one symbol through the current settings and reports the
+exact error, which is usually enough on its own. The two common causes:
+
+- *The host can't reach the provider.* A corporate proxy or a DNS-filtering
+  router. Confirm from the host with
+  `curl -s -o /dev/null -w '%{http_code}' 'https://query1.finance.yahoo.com/v8/finance/chart/VTI?range=1d&interval=1m'`,
+  then either fix the network or point **Server URL** (Settings → Quote source)
+  at a mirror or caching proxy you can reach.
+- *The provider is refusing the client.* Yahoo answers browsers and stonewalls
+  obvious scripts, and the string that works drifts over time. Paste a current
+  browser User-Agent into Settings → Quote source → **User agent** and test
+  again. No restart, no redeploy.
+
+Both fields are stored in the database and override whatever the systemd unit
+passed; clearing a field falls back to the unit's value, and clearing both
+falls back to the built-in default.
 
 **One symbol shows N/A.** Usually a typo or a symbol Yahoo doesn't carry under
 that name. The row shows the provider's own error; use **Search by name** to
@@ -179,7 +191,12 @@ find the right ticker.
 
 **Rate limiting.** The poll interval floor is 30 seconds and requests are capped
 at four in flight. If you are watching dozens of symbols and seeing failures,
-raise the interval before anything else.
+raise the interval (Settings → Refresh loop) before anything else — the presets
+go up to an hour.
+
+**Timeouts.** A slow link can need more than the default 20 seconds per
+request; Settings → Quote source → **Request timeout** accepts 5–120s. Blank
+means the default.
 
 ## 5. Exposure and TLS
 

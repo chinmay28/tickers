@@ -50,8 +50,17 @@ tickers help
 | `--host` | `HOST` | `0.0.0.0` |
 | `--web-dist` | `WEB_DIST` | — (use the embedded client) |
 | `--verbose` | `TICKERS_VERBOSE` | off |
+| `--quote-base-url` | `TICKERS_QUOTE_BASE_URL` | Yahoo's |
+| `--quote-timeout` | `TICKERS_QUOTE_TIMEOUT` | `20` (seconds) |
+| `--quote-user-agent` | `TICKERS_QUOTE_USER_AGENT` | a browser string |
 
 Flag > env > default. Both subcommands take the same flags.
+
+The three `--quote-*` flags are a *fallback* the Settings page can override:
+the real ordering is **stored setting > flag > env > built-in default**. They
+exist so a systemd unit can be templated; the GUI is where they normally get
+changed, and a change there is in force on the next request. See
+[DESIGN.md](../DESIGN.md#configuration-precedence).
 
 `tickers publish` is the original cron script's job exactly: fetch, publish,
 exit. It prints per-destination results and exits non-zero if every symbol
@@ -89,10 +98,10 @@ What each suite is responsible for:
 | Package | Pins |
 |---|---|
 | `store` | migrations apply once and never re-seed; symbol normalisation; placeholder promotion; history excludes failures; sink validation |
-| `quotes` | the chart-response parse, including the trailing-null series and the meta fallback; per-symbol failure isolation |
+| `quotes` | the chart-response parse, including the trailing-null series and the meta fallback; per-symbol failure isolation; the settings-precedence merge and reconfiguration while a fetch is in flight |
 | `publish` | **the legacy payload, byte for byte**, and the PUT→POST fallback |
-| `engine` | cycle counts, publish gating, snapshot ordering, cycle serialisation |
-| `api` | status codes, the `/api/state` shape, placeholder replacement end to end, static-asset and deep-link serving |
+| `engine` | cycle counts, publish gating, snapshot ordering, cycle serialisation, pushing stored quote settings into the provider |
+| `api` | status codes, the `/api/state` shape, placeholder replacement end to end, quote-source settings round-tripping and validation, static-asset and deep-link serving |
 
 `internal/publish/publish_test.go` is the compatibility specification: if a
 change would alter what an existing consumer receives, it fails there first.
