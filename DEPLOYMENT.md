@@ -228,7 +228,7 @@ tickers.example.com {
 
 If you expose it beyond a trusted network, put authentication in the proxy
 (basic auth, an identity-aware proxy, a VPN). The application has none and will
-not gain any — see [docs/design.md](./docs/design.md#threat-model).
+not gain any — see [docs/DESIGN.md](./docs/DESIGN.md#threat-model).
 
 Bind to loopback when a proxy is in front: set `HOST=127.0.0.1` so the port
 isn't reachable directly.

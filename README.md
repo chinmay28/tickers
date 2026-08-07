@@ -34,7 +34,7 @@ This is that script as a proper application — built the same way as
 
 ```
 tickers/
-├── docs/design.md              # architecture & design document
+├── docs/DESIGN.md              # architecture & design document
 ├── DEPLOYMENT.md               # deploying, upgrading, backing up
 ├── legacy/                     # the original cron script, kept for reference
 ├── scripts/                    #   quickstart.sh · build.sh · version.sh
@@ -210,12 +210,40 @@ non-zero if every symbol failed.
 
 ## Versioning
 
-The version is `vMAJOR.MINOR.PATCH` where the patch number is the repository's
-**commit count** — `v1.0.42` is the 42nd commit on the 1.0 line — shown in the
-app header, printed by `tickers version`, and returned by `/api/health`. Major
-and minor are constants in `server/internal/version/version.go`; a build made
-without git (or from a shallow clone) reports patch `0`, which marks an
-unstamped development build and is never released.
+The same scheme CountRoster uses: **`vMAJOR.MINOR.PATCH`, where the patch
+number is the repository's commit count** — every commit is a patch release,
+so `v1.0.42` is the 42nd commit on the 1.0 line. It's shown in the app header,
+printed by `tickers version`, and returned by `/api/health`.
+
+Tickers starts on **1.0**. Major and minor are constants in
+[`server/internal/version/version.go`](./server/internal/version/version.go)
+and are bumped by hand; `scripts/version.sh` is the one place that assembles
+the whole string, reading those constants so nothing can disagree about them.
+
+```bash
+scripts/version.sh            # v1.0.42
+scripts/version.sh --patch    # 42
+```
+
+A build with no git — a tarball, or a **shallow clone** — reports patch `0`.
+That's deliberate: `git clone --depth 1` answers `rev-list --count HEAD` with
+`1`, which isn't an error and isn't obviously wrong, it just quietly ships a
+build calling itself `v1.0.1`. Patch `0` is the agreed "unstamped development
+build" marker, it matches the Go default, and the release workflow refuses to
+publish one. Anything building a release needs the full commit graph:
+`fetch-depth: 0` in Actions, and `--filter=blob:none` rather than `--depth 1`
+for a cheap clone that still carries all of it (which is what
+`scripts/quickstart.sh` does, deepening an old shallow checkout if it finds
+one).
+
+Because the tag is determined by the commit rather than chosen, releasing is:
+
+```bash
+git tag "$(scripts/version.sh)" && git push origin "$(scripts/version.sh)"
+```
+
+The workflow refuses to publish if the tag doesn't match the version the commit
+builds.
 
 ## Testing & checks
 
@@ -231,7 +259,7 @@ what an existing consumer receives, those tests fail.
 
 ## Documentation
 
-- [docs/design.md](./docs/design.md) — architecture, schema, the REST contract
+- [docs/DESIGN.md](./docs/DESIGN.md) — architecture, schema, the REST contract
 - [DEPLOYMENT.md](./DEPLOYMENT.md) — deploying, upgrading, backup and restore
 - [server/README.md](./server/README.md) — the Go server and its CLI
 - [CHANGELOG.md](./CHANGELOG.md)

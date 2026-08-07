@@ -6,7 +6,7 @@ them into a home-automation key-value store, falling back to POST.
 
 It is kept here unmodified, as the specification for the parts that must not
 change. Four things in it are contracts, and the Go implementation reproduces
-all four — see [docs/design.md](../docs/design.md#where-it-came-from):
+all four — see [docs/DESIGN.md](../docs/DESIGN.md#where-it-came-from):
 
 1. The payload shape — `{"VTI": "295.50", …, "timestamp": "08/07 14:03:22"}`,
    with `"N/A"` for an unavailable price.
