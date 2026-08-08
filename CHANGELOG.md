@@ -24,6 +24,12 @@ initial amount, a rebalancing cadence, and an optional benchmark.
   not a comparison.
 - **Every calendar year**, with a part year shown and labelled rather than
   dropped or quietly claimed as a whole one.
+- **Leaders and laggards**, under the calendar years: which holdings carried the
+  portfolio over a period and which held it back, with the portfolio's and the
+  benchmark's own return over the same period beside them — "underperformer"
+  otherwise only means "lowest of these". Toggle between year to date, one,
+  three, five and ten years, and the whole run; periods the run doesn't cover
+  are shown unavailable rather than measured from the wrong place.
 - The run starts where its **latest holding** does, whatever start year is
   asked for, and names the holding responsible. Rebalancing lands on calendar
   boundaries, and *never* lets the weights drift on purpose.

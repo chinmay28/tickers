@@ -1049,6 +1049,7 @@ function renderBacktest(data) {
       <div class="card__body">${annualTable(b)}</div>
     </div>
 
+    ${leadersCard(b)}
   `;
 }
 
@@ -1293,6 +1294,133 @@ function annualTable(b) {
         )
         .join('')}</tbody>
     </table></div>`;
+}
+
+/* ----------------------- Leaders and laggards -----------------------
+ *
+ * Under the calendar years because it answers the question they raise. "2022:
+ * −14%" is the portfolio; what a reader wants next is which holding did that to
+ * it, and which one kept it from being worse. */
+
+/** Short forms for the period chips. The server's own labels are sentences —
+ *  right for the caption underneath, too wide for six chips on a phone. */
+const LEADER_CHIPS = { ytd: 'YTD', '1y': '1Y', '3y': '3Y', '5y': '5Y', '10y': '10Y', run: 'All' };
+
+/** Below this many holdings the two columns stop being two columns: a top three
+ *  and a bottom three of five holdings share one, and printing the same row on
+ *  both sides of the card is worse than not splitting it. Six is where the split
+ *  is exactly the whole allocation, which is the case it was designed for. */
+const LEADER_SPLIT = 6;
+
+/** Which period is showing. The stored choice wins where the run can answer it —
+ *  someone comparing two portfolios over three years should not have to pick 3Y
+ *  twice — falling back to the year to date, and then to the whole run for a
+ *  portfolio too young to have one. */
+function leaderKey(boards) {
+  const chosen = boards.find((l) => l.key === state.backtest?.leaders);
+  if (chosen?.available) return chosen.key;
+  const ytd = boards.find((l) => l.key === 'ytd' && l.available);
+  return (ytd ?? boards.findLast((l) => l.available))?.key ?? '';
+}
+
+function leadersCard(b) {
+  const boards = b.leaders ?? [];
+  // One holding has no leaders: the ranking would be the portfolio's own return
+  // written out a second time.
+  if ((b.holdings ?? []).length < 2 || !boards.some((l) => l.available)) return '';
+
+  const board = boards.find((l) => l.key === leaderKey(boards));
+  return `
+    <div class="card">
+      <div class="card__head">
+        <div class="card__heading">
+          <h3 class="card__title">Leaders and laggards</h3>
+          <span class="card__meta">what each holding did on its own</span>
+        </div>
+      </div>
+      <div class="card__body">
+        <div class="presets">
+          ${boards
+            .map(
+              (l) => `<button class="btn btn--sm ${
+                l.key === board.key ? 'btn--outline btn--active' : 'btn--ghost'
+              }" type="button" data-action="leaders" data-key="${esc(l.key)}"${
+                l.available ? '' : ` disabled title="${esc(l.label)} — the run doesn’t reach back that far"`
+              }>${esc(LEADER_CHIPS[l.key] ?? l.label)}</button>`,
+            )
+            .join('')}
+        </div>
+        ${leaderBoard(b, board)}
+      </div>
+    </div>`;
+}
+
+function leaderBoard(b, board) {
+  const returns = board.returns ?? [];
+  if (!returns.length) return '<div class="empty">Nothing to rank over this period.</div>';
+
+  const split = returns.length >= LEADER_SPLIT;
+  const best = split ? returns.slice(0, 3) : returns;
+  const worst = split ? returns.slice(-3) : [];
+  const hidden = split ? returns.length - best.length - worst.length : 0;
+
+  return `
+    <p class="field__hint leaders__against">
+      ${esc(monthName(board.from))} → ${esc(monthName(board.to))} · portfolio
+      <span class="perf-change perf-change--${direction(board.portfolio)}">${esc(
+        percent(board.portfolio),
+      )}</span>${
+        board.benchmark === null || board.benchmark === undefined
+          ? ''
+          : ` · ${esc(b.benchmark?.label ?? 'benchmark')}
+              <span class="perf-change perf-change--${direction(board.benchmark)}">${esc(
+                percent(board.benchmark),
+              )}</span>`
+      }
+    </p>
+    <div class="leaders">
+      ${leaderColumn(b, split ? 'Top performers' : 'Best to worst', best)}
+      ${split ? leaderColumn(b, 'Underperformers', worst) : ''}
+    </div>
+    ${
+      hidden
+        ? `<p class="field__hint leaders__hidden">${hidden} ${
+            hidden === 1 ? 'holding' : 'holdings'
+          } in the middle not shown.</p>`
+        : ''
+    }`;
+}
+
+function leaderColumn(b, title, rows) {
+  return `
+    <div class="leaders__col">
+      <h4 class="leaders__title">${esc(title)}</h4>
+      ${rows.map((r) => leaderRow(b, r)).join('')}
+    </div>`;
+}
+
+function leaderRow(b, r) {
+  // Named from the allocation rather than carried on the row: the payload says
+  // *that* the move is partly a stand-in's, and the holding already says whose.
+  const stand = (b.holdings ?? []).find((h) => h.symbol === r.symbol)?.replacement;
+  return `
+    <div class="leader">
+      ${symbolMark(r.symbol)}
+      <div class="leader__name">
+        <strong>${esc(r.symbol)}</strong>
+        ${
+          r.proxied && stand
+            ? `<span class="chip__stand" title="Part of this move is ${esc(
+                stand,
+              )}’s — it stood in before ${esc(r.symbol)}’s own history begins">← ${esc(stand)}</span>`
+            : ''
+        }
+        <span class="field__hint">${esc(
+          Number(r.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+        )}%</span>
+      </div>
+      <span class="perf-change perf-change--${direction(r.percent)}">${esc(percent(r.percent))}</span>
+    </div>`;
 }
 
 /** A yield is never signed — income is not a move — and a missing one is a year
@@ -1820,6 +1948,12 @@ $('#view').addEventListener('click', (event) => {
     case 'cancel-edit':
       state.editing.delete(id);
       clearDraft(`ticker:${id}`);
+      render({ force: true });
+      break;
+    // The leaderboard's period. Purely a redraw: every period came back with
+    // the run, so switching costs nothing and cannot fail.
+    case 'leaders':
+      state.backtest = { ...state.backtest, leaders: button.dataset.key };
       render({ force: true });
       break;
     case 'toggle': {
@@ -2432,7 +2566,11 @@ $('#portfolio-cancel').addEventListener('click', () => portfolioDialog.close());
  *  allocation rather than trusting a copy of it. */
 async function runBacktest(id, spec) {
   if (route() !== 'portfolios') location.hash = '#/portfolios';
-  state.backtest = { id, status: 'loading' };
+  // The leaderboard's period survives a run, for the same reason the
+  // performance sheet's range survives an opening: comparing two portfolios
+  // over three years should not mean picking 3Y twice.
+  const leaders = state.backtest?.leaders;
+  state.backtest = { id, leaders, status: 'loading' };
   render({ force: true });
 
   try {
@@ -2442,10 +2580,10 @@ async function runBacktest(id, spec) {
     // The page may have moved on — another portfolio run, or this one deleted —
     // while the request was in flight.
     if (state.backtest?.id !== id) return;
-    state.backtest = { id, status: 'ready', data: body.backtest };
+    state.backtest = { ...state.backtest, status: 'ready', data: body.backtest };
   } catch (err) {
     if (state.backtest?.id !== id) return;
-    state.backtest = { id, status: 'error', error: err.message || String(err) };
+    state.backtest = { ...state.backtest, status: 'error', error: err.message || String(err) };
   }
   render({ force: true });
 }

@@ -1023,6 +1023,51 @@ svg {
   box-shadow: none;
 }
 
+/* Leaders and laggards. Two columns on a screen wide enough for them, because
+   the whole point of the card is reading one against the other; one column on a
+   phone, where side-by-side would leave each return four characters wide. */
+.leaders {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.4rem 1.4rem;
+  margin-top: 0.7rem;
+}
+.leaders__against {
+  margin: 0.7rem 0 0;
+}
+.leaders__title {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.leaders__hidden {
+  margin: 0.6rem 0 0;
+}
+/* The return is pinned right so the column reads as a column of returns —
+   ragged ones have to be compared one pair at a time. */
+.leader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid var(--border);
+}
+.leader__name {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+  margin-right: auto;
+}
+.leader__name strong {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
 /* Interval preset chips under the seconds field. */
 .presets {
   display: flex;
