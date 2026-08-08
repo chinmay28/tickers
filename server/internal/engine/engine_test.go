@@ -763,3 +763,94 @@ func TestPortfolioLegsAreFetchedOnceAlongsideTheWatchlist(t *testing.T) {
 		t.Errorf("GLD (a holding not on the watchlist) was asked for %d times, want 1", seen["GLD"])
 	}
 }
+
+func TestRelinkingKeepsTheBaselineAndAsksForNothing(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "BND": 70}}
+	eng, st := newTestEngine(t, provider)
+
+	p, err := st.CreatePortfolio(store.NewPortfolio{
+		Name:          "Two fund",
+		Holdings:      []store.Holding{{Symbol: "VTI", Weight: 60}, {Symbol: "BND", Weight: 40}},
+		InitialAmount: 10000,
+	})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if _, err := eng.LinkPortfolio(context.Background(), p); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	priced, err := st.Portfolio(p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	before := provider.callCount()
+
+	// The store has already decided the units survive this edit. Linking again
+	// must then leave them alone *and* not go upstream: there is nothing to
+	// price, and a rename that quietly re-based the row would throw away
+	// whatever it had grown by.
+	renamed := "Renamed"
+	updated, err := st.UpdatePortfolio(p.ID, store.PortfolioPatch{Name: &renamed})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := eng.LinkPortfolio(context.Background(), updated); err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+
+	if provider.callCount() != before {
+		t.Errorf("relinking made %d extra fetches; nothing needed pricing",
+			provider.callCount()-before)
+	}
+	after, err := st.Portfolio(p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	for i, h := range after.Holdings {
+		if h.Units != priced.Holdings[i].Units {
+			t.Errorf("%s units moved from %v to %v across a rename",
+				h.Symbol, priced.Holdings[i].Units, h.Units)
+		}
+	}
+}
+
+func TestChangingTheAllocationRebasesTheRow(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "BND": 70}}
+	eng, st := newTestEngine(t, provider)
+
+	p, err := st.CreatePortfolio(store.NewPortfolio{
+		Name:          "Two fund",
+		Holdings:      []store.Holding{{Symbol: "VTI", Weight: 60}, {Symbol: "BND", Weight: 40}},
+		InitialAmount: 10000,
+	})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if _, err := eng.LinkPortfolio(context.Background(), p); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	// Different holdings are genuinely different units, so this one *should*
+	// re-base — the row starts again at the initial amount.
+	shifted := []store.Holding{{Symbol: "VTI", Weight: 70}, {Symbol: "BND", Weight: 30}}
+	updated, err := st.UpdatePortfolio(p.ID, store.PortfolioPatch{Holdings: &shifted})
+	if err != nil {
+		t.Fatalf("reweight: %v", err)
+	}
+	row, err := eng.LinkPortfolio(context.Background(), updated)
+	if err != nil {
+		t.Fatalf("relink: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	quotes, err := st.Quotes()
+	if err != nil {
+		t.Fatalf("quotes: %v", err)
+	}
+	q := quotes[row.ID]
+	if q.Price == nil || math.Abs(*q.Price-10000) > 1e-6 {
+		t.Errorf("value = %v after reweighting, want the initial amount 10000", deref(q.Price))
+	}
+}

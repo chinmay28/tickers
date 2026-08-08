@@ -541,23 +541,36 @@ func explainEval(err error, failures map[string]error) string {
 // the quote source is unreachable gets its row anyway, with no units — the row
 // says so, and the next save fills them in.
 func (e *Engine) LinkPortfolio(ctx context.Context, p store.Portfolio) (store.Ticker, error) {
-	e.syncProvider()
-
-	symbols := make([]string, 0, len(p.Holdings))
-	for _, h := range p.Holdings {
-		symbols = append(symbols, h.Symbol)
-	}
-	fetched, failures := e.provider.Fetch(ctx, symbols)
-
+	// A holding that already has units keeps them. The store decides that —
+	// it clears them when the allocation or the initial amount moved and
+	// carries them otherwise — so a rename, a benchmark or a changed cadence
+	// reaches here with every unit intact, keeps the baseline the row has been
+	// growing from, and makes no upstream request at all.
 	units := make(map[string]float64, len(p.Holdings))
+	needed := make([]string, 0, len(p.Holdings))
 	for _, h := range p.Holdings {
-		q, ok := fetched[h.Symbol]
-		if !ok || q.Price == nil || *q.Price <= 0 {
-			e.log.Warn("could not price a holding when linking a portfolio",
-				"portfolio", p.Name, "symbol", h.Symbol, "error", failures[h.Symbol])
+		if h.Units != 0 {
+			units[h.Symbol] = h.Units
 			continue
 		}
-		units[h.Symbol] = p.InitialAmount * h.Weight / 100 / *q.Price
+		needed = append(needed, h.Symbol)
+	}
+
+	if len(needed) > 0 {
+		e.syncProvider()
+		fetched, failures := e.provider.Fetch(ctx, needed)
+		for _, h := range p.Holdings {
+			if h.Units != 0 {
+				continue
+			}
+			q, ok := fetched[h.Symbol]
+			if !ok || q.Price == nil || *q.Price <= 0 {
+				e.log.Warn("could not price a holding when linking a portfolio",
+					"portfolio", p.Name, "symbol", h.Symbol, "error", failures[h.Symbol])
+				continue
+			}
+			units[h.Symbol] = p.InitialAmount * h.Weight / 100 / *q.Price
+		}
 	}
 
 	t, err := e.store.SyncPortfolioTicker(p, units)

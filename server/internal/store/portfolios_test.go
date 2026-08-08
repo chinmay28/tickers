@@ -406,3 +406,104 @@ func TestAPortfolioRowCannotBeRePointedFromTheWatchlist(t *testing.T) {
 		t.Errorf("row = %+v after relabelling", updated)
 	}
 }
+
+func TestUnitsSurviveAnEditThatDidNotMoveTheAllocation(t *testing.T) {
+	st := newTestStore(t)
+	p, err := st.CreatePortfolio(NewPortfolio{Name: "Two fund", Holdings: sixtyForty()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := st.SyncPortfolioTicker(p, map[string]float64{"VTI": 20, "BND": 57}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// The units are the watchlist row's baseline — what makes it start at the
+	// initial amount and grow from there. Recomputing them re-bases the row and
+	// throws away whatever it had made, so an edit that does not touch what is
+	// held must not trigger one. The editor posts the whole allocation on every
+	// save, and posts it without units, so "holdings were in the patch" cannot
+	// be the test.
+	same := sixtyForty()
+	renamed := "Renamed"
+	benchmark := "VFINX"
+	updated, err := st.UpdatePortfolio(p.ID, PortfolioPatch{
+		Name: &renamed, Benchmark: &benchmark, Holdings: &same,
+	})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if updated.Holdings[0].Units != 20 || updated.Holdings[1].Units != 57 {
+		t.Errorf("units = %v/%v after a rename, want them untouched at 20/57",
+			updated.Holdings[0].Units, updated.Holdings[1].Units)
+	}
+
+	// A replacement changes the backtest and nothing about what is held.
+	withStandIn := sixtyForty()
+	withStandIn[0].Replacement = "QQQ"
+	updated, err = st.UpdatePortfolio(p.ID, PortfolioPatch{Holdings: &withStandIn})
+	if err != nil {
+		t.Fatalf("add replacement: %v", err)
+	}
+	if updated.Holdings[0].Units != 20 {
+		t.Errorf("units = %v after adding a stand-in, want 20", updated.Holdings[0].Units)
+	}
+}
+
+func TestUnitsAreClearedWhenTheAllocationActuallyMoves(t *testing.T) {
+	st := newTestStore(t)
+	base, err := st.CreatePortfolio(NewPortfolio{Name: "Two fund", Holdings: sixtyForty()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	priced := map[string]float64{"VTI": 20, "BND": 57}
+
+	cases := []struct {
+		name  string
+		patch func() PortfolioPatch
+	}{
+		{"a weight moved", func() PortfolioPatch {
+			shifted := []Holding{{Symbol: "VTI", Weight: 70}, {Symbol: "BND", Weight: 30}}
+			return PortfolioPatch{Holdings: &shifted}
+		}},
+		{"a holding was swapped", func() PortfolioPatch {
+			swapped := []Holding{{Symbol: "VTI", Weight: 60}, {Symbol: "GLD", Weight: 40}}
+			return PortfolioPatch{Holdings: &swapped}
+		}},
+		{"a holding was added", func() PortfolioPatch {
+			grown := []Holding{{Symbol: "VTI", Weight: 50}, {Symbol: "BND", Weight: 30}, {Symbol: "GLD", Weight: 20}}
+			return PortfolioPatch{Holdings: &grown}
+		}},
+		{"the initial amount changed", func() PortfolioPatch {
+			amount := 25000.0
+			return PortfolioPatch{InitialAmount: &amount}
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.SyncPortfolioTicker(base, priced); err != nil {
+				t.Fatalf("re-prime: %v", err)
+			}
+			updated, err := st.UpdatePortfolio(base.ID, tc.patch())
+			if err != nil {
+				t.Fatalf("patch: %v", err)
+			}
+			// All of them, not just the one that moved: a row holding some old
+			// units and one new one is worth neither the initial amount nor
+			// what it had grown to.
+			for _, h := range updated.Holdings {
+				if h.Units != 0 {
+					t.Errorf("%s kept units %v; %s means every unit is recomputed",
+						h.Symbol, h.Units, tc.name)
+				}
+			}
+			// Put it back for the next case.
+			if _, err := st.UpdatePortfolio(base.ID, PortfolioPatch{
+				Holdings:      func() *[]Holding { h := sixtyForty(); return &h }(),
+				InitialAmount: func() *float64 { a := base.InitialAmount; return &a }(),
+			}); err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+		})
+	}
+}

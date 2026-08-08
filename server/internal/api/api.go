@@ -566,8 +566,9 @@ func (s *Server) handleUpdatePortfolio(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	// Re-price the row: an edited allocation means different units, and a
-	// renamed portfolio means a different published key.
+	// Re-sync the row. Whether its units are recomputed — which re-bases the
+	// value to the initial amount — depends on whether the allocation actually
+	// moved, and that is decided in the store, not here.
 	if _, err := s.engine.LinkPortfolio(r.Context(), p); err != nil {
 		s.fail(w, err)
 		return

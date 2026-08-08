@@ -286,3 +286,62 @@ func TestAPortfolioNameThatCollidesWithASymbolIsRejected(t *testing.T) {
 		t.Errorf("a portfolio whose row could not be created was left saved: %v", portfolios)
 	}
 }
+
+func TestRenamingAPortfolioKeepsTheRowsBaseline(t *testing.T) {
+	h := backtestHarness(t)
+
+	_, body := h.do(t, http.MethodPost, "/api/portfolios", twoFund())
+	created, _ := body["portfolio"].(map[string]any)
+	id, _ := created["id"].(string)
+
+	unitsOf := func(p map[string]any) []float64 {
+		holdings, _ := p["holdings"].([]any)
+		out := make([]float64, 0, len(holdings))
+		for _, entry := range holdings {
+			h, _ := entry.(map[string]any)
+			units, _ := h["units"].(float64)
+			out = append(out, units)
+		}
+		return out
+	}
+	before := unitsOf(created)
+	if len(before) != 2 || before[0] == 0 {
+		t.Fatalf("the portfolio was saved without units: %v", before)
+	}
+
+	// The editor posts the whole allocation on every save, and posts it without
+	// units — so a rename arrives looking exactly like an allocation edit. If
+	// that re-priced, the watchlist row would drop back to the initial amount
+	// and throw away everything it had grown by.
+	renamed := twoFund()
+	renamed["name"] = "Renamed fund"
+	rec, body := h.do(t, http.MethodPatch, "/api/portfolios/"+id, renamed)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rename: status %d: %v", rec.Code, body)
+	}
+	updated, _ := body["portfolio"].(map[string]any)
+	after := unitsOf(updated)
+	for i := range before {
+		if after[i] != before[i] {
+			t.Errorf("units moved from %v to %v across a rename", before, after)
+			break
+		}
+	}
+
+	// Changing a weight is a different allocation, and does re-base.
+	reweighted := twoFund()
+	reweighted["name"] = "Renamed fund"
+	reweighted["holdings"] = []map[string]any{
+		{"symbol": "VTI", "weight": 70},
+		{"symbol": "BND", "weight": 30},
+	}
+	rec, body = h.do(t, http.MethodPatch, "/api/portfolios/"+id, reweighted)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reweight: status %d: %v", rec.Code, body)
+	}
+	updated, _ = body["portfolio"].(map[string]any)
+	if reweightedUnits := unitsOf(updated); reweightedUnits[0] == before[0] {
+		t.Errorf("units %v survived a weight change; a different allocation is different units",
+			reweightedUnits)
+	}
+}
