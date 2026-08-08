@@ -82,6 +82,27 @@ const rawOnlyHistoryJSON = `{
   }
 }`
 
+// dividendJSON is what `events=div` adds: a map keyed by epoch second, in no
+// particular order, with a zero-amount entry of the kind Yahoo occasionally
+// emits for a declared-but-unpaid distribution.
+const dividendJSON = `{
+  "chart": {
+    "result": [{
+      "meta": { "currency": "USD", "symbol": "VTSMX", "gmtoffset": -18000 },
+      "timestamp": [1679500800],
+      "indicators": { "quote": [{ "close": [100.0] }] },
+      "events": {
+        "dividends": {
+          "1687363200": { "amount": 0.27, "date": 1687363200 },
+          "1679500800": { "amount": 0.31, "date": 1679500800 },
+          "1690000000": { "amount": 0, "date": 1690000000 }
+        }
+      }
+    }],
+    "error": null
+  }
+}`
+
 const chartErrorJSON = `{
   "chart": { "result": null, "error": { "code": "Not Found", "description": "No data found, symbol may be delisted" } }
 }`
@@ -276,6 +297,60 @@ func TestHistoryPrefersAdjustedClosesAndDropsGaps(t *testing.T) {
 	// what a composite aligns its legs on.
 	if bars[0].Date != "2024-01-03" || bars[1].Date != "2024-01-05" {
 		t.Errorf("dates = %q/%q, want the exchange's own calendar days", bars[0].Date, bars[1].Date)
+	}
+	// Both series come back. A yield divides a payout by the price of its own
+	// day, and the adjusted close is not that price.
+	if bars[0].Raw != 10.0 || bars[1].Raw != 12.0 {
+		t.Errorf("raw closes = %v/%v, want the unadjusted 10.0/12.0", bars[0].Raw, bars[1].Raw)
+	}
+}
+
+func TestDividendsReadTheEventsBlock(t *testing.T) {
+	var query url.Values
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		w.Write([]byte(dividendJSON))
+	})
+
+	since := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	dividends, err := y.Dividends(context.Background(), "vtsmx", since)
+	if err != nil {
+		t.Fatalf("dividends: %v", err)
+	}
+
+	if query.Get("events") != "div" {
+		t.Errorf("events = %q; without it Yahoo returns prices and no payouts", query.Get("events"))
+	}
+	// Monthly bars, because this call reads the events block and nothing else —
+	// asking for daily would drag thirty years of prices along with it.
+	if query.Get("interval") != "1mo" {
+		t.Errorf("interval = %q, want 1mo", query.Get("interval"))
+	}
+
+	if len(dividends) != 2 {
+		t.Fatalf("got %d dividends, want 2 (the zero-amount entry is not a payout): %+v", len(dividends), dividends)
+	}
+	// Yahoo keys the block by epoch, so what comes out of the map is unordered
+	// until this sorts it — and a yield summed per year needs them in order.
+	if dividends[0].Date != "2023-03-22" || dividends[1].Date != "2023-06-21" {
+		t.Errorf("dates = %q/%q, want them oldest first", dividends[0].Date, dividends[1].Date)
+	}
+	if dividends[0].Amount != 0.31 {
+		t.Errorf("amount = %v, want 0.31", dividends[0].Amount)
+	}
+}
+
+func TestDividendsAreEmptyForSomethingThatPaysNone(t *testing.T) {
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(rawOnlyHistoryJSON))
+	})
+
+	dividends, err := y.Dividends(context.Background(), "BTC-USD", time.Now().AddDate(-1, 0, 0))
+	if err != nil {
+		t.Fatalf("a symbol with no events block is not an error: %v", err)
+	}
+	if len(dividends) != 0 {
+		t.Errorf("got %v, want none", dividends)
 	}
 }
 

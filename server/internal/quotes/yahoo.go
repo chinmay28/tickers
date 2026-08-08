@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -177,6 +178,15 @@ type chartResult struct {
 		Quote    []closeSeries    `json:"quote"`
 		AdjClose []adjCloseSeries `json:"adjclose"`
 	} `json:"indicators"`
+	// Events is populated only when the request asked for it. Yahoo keys the
+	// dividends by epoch second as a string, which is why this is a map rather
+	// than the array every other series here is.
+	Events struct {
+		Dividends map[string]struct {
+			Amount float64 `json:"amount"`
+			Date   int64   `json:"date"`
+		} `json:"dividends"`
+	} `json:"events"`
 }
 
 type closeSeries struct {
@@ -275,6 +285,7 @@ func (y *Yahoo) History(ctx context.Context, symbol string, since time.Time) ([]
 
 	res := parsed.Chart.Result[0]
 	closes := historyCloses(res)
+	raw := rawCloses(res)
 	bars := make([]Bar, 0, len(res.Timestamp))
 	for i, ts := range res.Timestamp {
 		// A null close is a session with no trade — a holiday Yahoo still
@@ -283,12 +294,65 @@ func (y *Yahoo) History(ctx context.Context, symbol string, since time.Time) ([]
 		if i >= len(closes) || closes[i] == nil {
 			continue
 		}
-		bars = append(bars, Bar{
+		bar := Bar{
 			Date:  time.Unix(ts+res.Meta.GMTOffset, 0).UTC().Format("2006-01-02"),
 			Close: *closes[i],
-		})
+		}
+		if i < len(raw) && raw[i] != nil {
+			bar.Raw = *raw[i]
+		}
+		bars = append(bars, bar)
 	}
 	return bars, nil
+}
+
+// Dividends implements Distributor.
+//
+// It asks the same chart endpoint with `events=div`, at a monthly interval: the
+// events block does not depend on the bar interval, and asking for daily bars
+// would fetch thirty years of prices this call has no use for. Yahoo keys the
+// block by epoch second, so the map is walked and sorted rather than read in
+// order.
+func (y *Yahoo) Dividends(ctx context.Context, symbol string, since time.Time) ([]Distribution, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return nil, errors.New("a symbol is required")
+	}
+	settings, _ := y.current()
+	endpoint := fmt.Sprintf("%s/v8/finance/chart/%s?period1=%d&period2=%d&interval=1mo&events=div",
+		settings.BaseURL, url.PathEscape(symbol), since.Unix(), time.Now().Add(24*time.Hour).Unix())
+
+	body, err := y.get(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed chartResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("decode dividends for %s: %w", symbol, err)
+	}
+	if parsed.Chart.Error != nil {
+		return nil, fmt.Errorf("%s: %s", symbol, parsed.Chart.Error.Description)
+	}
+	if len(parsed.Chart.Result) == 0 {
+		return nil, fmt.Errorf("%s: %w", symbol, ErrNotFound)
+	}
+
+	res := parsed.Chart.Result[0]
+	out := make([]Distribution, 0, len(res.Events.Dividends))
+	for _, d := range res.Events.Dividends {
+		if d.Amount == 0 {
+			continue
+		}
+		out = append(out, Distribution{
+			// Same offset as a bar's date, for the same reason: a payout has to
+			// land in the exchange's own year, not UTC's.
+			Date:   time.Unix(d.Date+res.Meta.GMTOffset, 0).UTC().Format("2006-01-02"),
+			Amount: d.Amount,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out, nil
 }
 
 // historyCloses prefers the split- and dividend-adjusted series and falls back
@@ -298,6 +362,15 @@ func historyCloses(res chartResult) []*float64 {
 	if len(res.Indicators.AdjClose) > 0 && len(res.Indicators.AdjClose[0].AdjClose) > 0 {
 		return res.Indicators.AdjClose[0].AdjClose
 	}
+	if len(res.Indicators.Quote) > 0 {
+		return res.Indicators.Quote[0].Close
+	}
+	return nil
+}
+
+// rawCloses is the unadjusted series, or nil when the response has none. It is
+// what a dividend has to be divided by to be a yield — see Bar.Raw.
+func rawCloses(res chartResult) []*float64 {
 	if len(res.Indicators.Quote) > 0 {
 		return res.Indicators.Quote[0].Close
 	}

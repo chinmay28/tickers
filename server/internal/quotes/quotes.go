@@ -107,6 +107,22 @@ type Bar struct {
 	// Date is YYYY-MM-DD in the exchange's timezone.
 	Date  string
 	Close float64
+	// Raw is the close *before* adjustment — the price actually printed that
+	// day. It exists for one job: a dividend is paid per share in the money of
+	// its day, so a yield has to divide it by the price of its day. Dividing a
+	// 1998 payout by a 1998 close that has since been marked down by thirty
+	// years of distributions gives a yield several times the real one.
+	//
+	// Zero means the provider didn't distinguish the two; callers should read
+	// Close instead, which is what a series with no adjustment already is.
+	Raw float64
+}
+
+// Distribution is one dividend, per share, in the money of the day it was paid.
+type Distribution struct {
+	// Date is YYYY-MM-DD, the ex-dividend date.
+	Date   string
+	Amount float64
 }
 
 // Historian is a provider that can also return past closes, for the
@@ -120,6 +136,21 @@ type Historian interface {
 	// the provider has no data for in that window comes back empty rather than
 	// as an error — "nothing traded" is an answer.
 	History(ctx context.Context, symbol string, since time.Time) ([]Bar, error)
+}
+
+// Distributor is a provider that can also say what a symbol paid out.
+//
+// It is separate from Historian rather than a method on it, and that separation
+// is the point: a source can perfectly well have prices and no dividend feed —
+// crypto and currency series have nothing to pay — and folding the two together
+// would make such a source unable to offer history at all. Callers assert for
+// it and drop the feature quietly when it isn't there, the way they do with
+// Configurable.
+type Distributor interface {
+	// Dividends returns every distribution from since until now, oldest first.
+	// A symbol that has never paid one comes back empty rather than as an
+	// error — "it doesn't pay a dividend" is an answer.
+	Dividends(ctx context.Context, symbol string, since time.Time) ([]Distribution, error)
 }
 
 // ErrNoSearch is returned by providers that can only price a known symbol.
