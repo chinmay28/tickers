@@ -866,6 +866,14 @@ function renderBacktest(data) {
              the 13-week Treasury bill.`
           : ''
       }
+      ${
+        b.portfolio.yieldPercent === null || b.portfolio.yieldPercent === undefined
+          ? ''
+          : `Yields are the cash actually distributed, divided by what the
+             portfolio was worth when the year opened — income the growth
+             figures already contain, shown separately because it is a
+             different question.`
+      }
       Nothing here models fees, taxes or spreads, so it is what the allocation
       did, not what an account holding it would have.
     </p>
@@ -1005,6 +1013,13 @@ function metricsTable(b) {
                )}</tr>`
             : ''
         }
+        ${
+          columns.some((m) => m.yieldPercent !== null && m.yieldPercent !== undefined)
+            ? `<tr><th title="Mean income yield across the full calendar years">Income yield</th>${cells(
+                (m) => esc(yieldCell(m.yieldPercent)),
+              )}</tr>`
+            : ''
+        }
         <tr><th>Best year</th>${cells((m) => year(m.bestYear))}</tr>
         <tr><th>Worst year</th>${cells((m) => year(m.worstYear))}</tr>
         <tr><th>Deepest fall</th>${cells((m) => drawdownCell(m))}</tr>
@@ -1039,10 +1054,14 @@ function annualTable(b) {
   const rows = b.annual ?? [];
   if (!rows.length) return '<div class="empty">The run is too short to cover a calendar year.</div>';
   const hasBenchmark = Boolean(b.benchmark);
+  // The column appears only when the quote source can actually answer. A
+  // yield of "—" on every row would read as "this paid nothing".
+  const hasYield = rows.some((r) => r.yieldPercent !== null && r.yieldPercent !== undefined);
 
   return `<div class="table-scroll"><table class="table">
       <thead><tr>
         <th>Year</th><th>Portfolio</th>${hasBenchmark ? `<th>${esc(b.benchmark.label)}</th>` : ''}
+        ${hasYield ? '<th title="Income as a percentage of the value the year opened at">Yield</th>' : ''}
       </tr></thead>
       <tbody>${rows
         .map(
@@ -1063,10 +1082,18 @@ function annualTable(b) {
                   )}">${esc(percent(r.benchmark))}</span></td>`
                 : ''
             }
+            ${hasYield ? `<td class="field__hint">${esc(yieldCell(r.yieldPercent))}</td>` : ''}
           </tr>`,
         )
         .join('')}</tbody>
     </table></div>`;
+}
+
+/** A yield is never signed — income is not a move — and a missing one is a year
+ *  the source couldn't price, not a year that paid nothing. */
+function yieldCell(value) {
+  if (value === null || value === undefined) return '—';
+  return `${value.toFixed(2)}%`;
 }
 
 /* --------------------------- Publishing ----------------------------

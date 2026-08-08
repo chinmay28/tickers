@@ -210,6 +210,15 @@ reinvested — this is a total return, not a price chart.
 - **CAGR, volatility, best and worst calendar year, and the deepest
   peak-to-trough fall** — with the months it ran between and whether it was ever
   recovered.
+- **Sharpe and Sortino**, measured against `^IRX` (the 13-week Treasury bill).
+  Both are omitted rather than computed against a silent 0% when that series
+  can't be fetched.
+- **Periodic contributions** — an amount and a cadence. Returns stay
+  time-weighted, so money paid in never counts as growth; what went in is shown
+  as its own row instead.
+- **Dividend yield per year**, the cash actually distributed over what the
+  portfolio was worth when the year opened. It needs a quote source with a
+  payout feed; without one the column is absent rather than zero.
 - **Every calendar year**, with the first and last labelled *part year* where
   the run doesn't cover them end to end.
 - The run starts at the latest month all of its holdings have data for, whatever
@@ -221,9 +230,9 @@ reinvested — this is a total return, not a price chart.
   twelve months after the run began. *Never* lets the weights drift, which over
   decades is a materially different portfolio from the one it started as.
 
-Nothing here models fees, taxes, spreads or contributions, and there is no
-inflation adjustment: it is what the allocation did, not what an account holding
-it would have.
+Nothing here models fees, taxes or spreads, and there is no inflation
+adjustment: it is what the allocation did, not what an account holding it would
+have.
 
 **Publishing** — where snapshots go. A destination is a base URL, a key, an
 optional category, and a format. After every refresh the snapshot is

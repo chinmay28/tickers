@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -96,6 +97,10 @@ type AnnualReturn struct {
 	// in June would be a fabrication, and dropping the row loses real
 	// information, so it is shown and labelled.
 	Partial bool `json:"partial"`
+	// Yield is the income the year threw off as a percentage of what the
+	// portfolio was worth when it began — nil when the quote source has no
+	// dividend feed, which is different from a portfolio that paid nothing.
+	Yield *float64 `json:"yieldPercent"`
 }
 
 // HoldingResult is one line of the allocation as it was actually simulated.
@@ -135,6 +140,11 @@ type Metrics struct {
 	// against 0% is a different statistic wearing the same name.
 	Sharpe  *float64 `json:"sharpe"`
 	Sortino *float64 `json:"sortino"`
+	// Yield is the mean income yield across the *full* calendar years, for the
+	// same reason Best and Worst use only those: a run that started in October
+	// collected one quarter's distributions, and calling that its yield would
+	// understate it by a factor of four.
+	Yield *float64 `json:"yieldPercent"`
 	// Best and Worst are full calendar years only, so a run that started in
 	// October can't report its first three months as its worst year.
 	Best  *AnnualReturn `json:"bestYear"`
@@ -277,14 +287,15 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 	// One fetch per distinct symbol. A benchmark that is also a holding — a
 	// perfectly reasonable thing to compare against — costs one series, not two.
 	series := map[string]map[string]float64{}
+	raw := map[string]map[string]float64{}
 	firstMonth := map[string]string{}
 	for _, h := range holdings {
-		if err := e.loadMonthly(ctx, historian, h.Symbol, series, firstMonth); err != nil {
+		if err := e.loadMonthly(ctx, historian, h.Symbol, series, raw, firstMonth); err != nil {
 			return Backtest{}, err
 		}
 	}
 	if benchmark != "" {
-		if err := e.loadMonthly(ctx, historian, benchmark, series, firstMonth); err != nil {
+		if err := e.loadMonthly(ctx, historian, benchmark, series, raw, firstMonth); err != nil {
 			return Backtest{}, err
 		}
 	}
@@ -322,8 +333,21 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 	if bill, err := e.riskFree(ctx, historian); err == nil {
 		rates = riskFreeRates(months, bill)
 	}
+	// Payouts, also best-effort and also not a leg: a source with no dividend
+	// feed costs the yield column and nothing else.
+	payouts := map[string][]quotes.Distribution{}
+	if distributor, ok := e.provider.(quotes.Distributor); ok {
+		for _, h := range holdings {
+			payouts[h.Symbol] = e.symbolDividends(ctx, distributor, h.Symbol)
+		}
+		if benchmark != "" {
+			payouts[benchmark] = e.symbolDividends(ctx, distributor, benchmark)
+		}
+	}
+
 	run := simulate(holdings, series, months, cash)
 	annual := annualReturns(months, run.index)
+	applyYields(annual, annualYields(months, run, holdings, raw, payouts), len(payouts) > 0)
 
 	out := Backtest{
 		Start:       months[0],
@@ -355,6 +379,8 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		bench = &benchRun
 
 		benchAnnual := annualReturns(months, benchRun.index)
+		benchHoldings := []HoldingResult{{Symbol: benchmark, Weight: 100}}
+		applyYields(benchAnnual, annualYields(months, benchRun, benchHoldings, raw, payouts), len(payouts) > 0)
 		benchMetrics := measure(benchmark, months, benchRun, benchAnnual, rates)
 		out.Benchmark = &benchMetrics
 
@@ -392,14 +418,14 @@ func (e *Engine) riskFree(ctx context.Context, h quotes.Historian) (map[string]f
 	if err != nil {
 		return nil, err
 	}
-	rates, _ := monthEnds(bars)
+	rates, _, _ := monthEnds(bars)
 	return rates, nil
 }
 
 // loadMonthly fetches one symbol's daily bars and reduces them to month-end
 // closes, recording the first month it has.
 func (e *Engine) loadMonthly(ctx context.Context, h quotes.Historian, symbol string,
-	series map[string]map[string]float64, firstMonth map[string]string) error {
+	series, raw map[string]map[string]float64, firstMonth map[string]string) error {
 	if _, done := series[symbol]; done {
 		return nil
 	}
@@ -412,25 +438,31 @@ func (e *Engine) loadMonthly(ctx context.Context, h quotes.Historian, symbol str
 		}
 		return fmt.Errorf("%s: %w", symbol, err)
 	}
-	closes, first := monthEnds(bars)
+	closes, unadjusted, first := monthEnds(bars)
 	if len(closes) == 0 {
 		return fmt.Errorf("%w: the quote source has no price history for %s", ErrBadSpec, symbol)
 	}
 	series[symbol] = closes
+	raw[symbol] = unadjusted
 	firstMonth[symbol] = first
 	return nil
 }
 
 // monthEnds reduces daily bars to one close per month — the last session of
-// each, which is the month's close.
+// each, which is the month's close. It returns the adjusted series, the
+// unadjusted one, and the first month there is.
 //
-// Adjusted closes are what the provider gives (see quotes.historyCloses), so
+// Adjusted closes are what the growth runs on (see quotes.historyCloses), so
 // each month's number already carries dividends and splits. That is the whole
 // reason a backtest over funds is possible at all here: the total-return series
 // is the series, and nothing has to model a distribution.
-func monthEnds(bars []quotes.Bar) (map[string]float64, string) {
-	closes := make(map[string]float64, len(bars)/20)
-	first := ""
+//
+// The unadjusted series exists only for the yield, which divides a payout by
+// the price of its own day — see quotes.Bar.Raw. A provider that draws no
+// distinction reports zero, and the adjusted series is already that price.
+func monthEnds(bars []quotes.Bar) (closes, raw map[string]float64, first string) {
+	closes = make(map[string]float64, len(bars)/20)
+	raw = make(map[string]float64, len(bars)/20)
 	for _, b := range bars {
 		if len(b.Date) < 7 {
 			continue
@@ -439,11 +471,111 @@ func monthEnds(bars []quotes.Bar) (map[string]float64, string) {
 		// Bars arrive oldest first, so the last write for a month wins and is
 		// that month's final session.
 		closes[month] = b.Close
+		if b.Raw > 0 {
+			raw[month] = b.Raw
+		} else {
+			raw[month] = b.Close
+		}
 		if first == "" || month < first {
 			first = month
 		}
 	}
-	return closes, first
+	return closes, raw, first
+}
+
+// dividendEntry is one symbol's cached payout series.
+type dividendEntry struct {
+	payouts []quotes.Distribution
+	fetched time.Time
+}
+
+// symbolDividends fetches one symbol's distributions, or returns the cached
+// ones. Cached by symbol on the same TTL as the price series, and for the same
+// reason: two portfolios over the same fund pay for it once.
+func (e *Engine) symbolDividends(ctx context.Context, d quotes.Distributor, symbol string) []quotes.Distribution {
+	e.mu.Lock()
+	entry, ok := e.dividendCache[symbol]
+	if ok && time.Since(entry.fetched) <= historyTTL {
+		e.mu.Unlock()
+		return entry.payouts
+	}
+	e.mu.Unlock()
+
+	payouts, err := d.Dividends(ctx, symbol, historyStart())
+	if err != nil {
+		// Best-effort throughout: a symbol whose payouts can't be read costs
+		// its portfolio a yield column, not a backtest.
+		return nil
+	}
+
+	e.mu.Lock()
+	if e.dividendCache == nil {
+		e.dividendCache = map[string]dividendEntry{}
+	}
+	e.dividendCache[symbol] = dividendEntry{payouts: payouts, fetched: time.Now()}
+	e.mu.Unlock()
+	return payouts
+}
+
+// paidBetween totals what one symbol distributed after `after` and up to and
+// including `through`, both YYYY-MM.
+//
+// Exclusive at the start because `after` is the baseline month — the position
+// is taken at its close, so a payout made during it went to whoever held it
+// before. That is also what keeps a part first year from claiming a full year
+// of income.
+func paidBetween(payouts []quotes.Distribution, after, through string) float64 {
+	total := 0.0
+	for _, d := range payouts {
+		if len(d.Date) < 7 {
+			continue
+		}
+		if month := d.Date[:7]; month > after && month <= through {
+			total += d.Amount
+		}
+	}
+	return total
+}
+
+// annualYields is the income each calendar year threw off, as a percentage of
+// what the portfolio was worth when the year began.
+//
+// The shares held are worked out from the money in each holding and the
+// *unadjusted* price of the baseline month, because that is what a share cost
+// on the day the position is being valued. Weights have drifted by then and
+// that is deliberate: the income a portfolio actually produced depends on what
+// it actually held, not on what it was aiming at.
+//
+// A year whose baseline price is missing for any holding is skipped rather than
+// approximated — one leg silently contributing nothing would understate the
+// whole portfolio's yield.
+func annualYields(months []string, run result, holdings []HoldingResult,
+	raw map[string]map[string]float64, payouts map[string][]quotes.Distribution) map[int]float64 {
+	out := map[int]float64{}
+	if len(run.holdings) == 0 {
+		return out
+	}
+
+	for _, s := range yearSpans(months) {
+		value := run.balances[s.from]
+		if value <= 0 {
+			continue
+		}
+		income, complete := 0.0, true
+		for i, h := range holdings {
+			price := raw[h.Symbol][months[s.from]]
+			if price <= 0 {
+				complete = false
+				break
+			}
+			shares := run.holdings[s.from][i] / price
+			income += shares * paidBetween(payouts[h.Symbol], months[s.from], months[s.to])
+		}
+		if complete {
+			out[s.year] = income / value * 100
+		}
+	}
+	return out
 }
 
 // commonMonths is every month all the series have, oldest first.
@@ -573,8 +705,13 @@ type plan struct {
 // With no contributions the two are proportional and the distinction costs
 // nothing.
 type result struct {
-	balances    []float64
-	index       []float64
+	balances []float64
+	index    []float64
+	// holdings is each holding's value at each month, which the yield needs to
+	// turn money into shares. Recorded after everything that month did — the
+	// growth, the contribution and the rebalance — because that is the position
+	// carried into the next one.
+	holdings    [][]float64
 	rebalances  int
 	contributed float64
 }
@@ -595,9 +732,11 @@ func simulate(holdings []HoldingResult, series map[string]map[string]float64,
 	out := result{
 		balances: make([]float64, len(months)),
 		index:    make([]float64, len(months)),
+		holdings: make([][]float64, len(months)),
 	}
 	out.balances[0] = p.initial
 	out.index[0] = 1
+	out.holdings[0] = append([]float64(nil), values...)
 
 	for k := 1; k < len(months); k++ {
 		total := 0.0
@@ -641,6 +780,7 @@ func simulate(holdings []HoldingResult, series map[string]map[string]float64,
 			}
 			out.rebalances++
 		}
+		out.holdings[k] = append([]float64(nil), values...)
 	}
 	return out
 }
@@ -667,15 +807,23 @@ func onBoundary(month, cadence string) bool {
 	}
 }
 
-// annualReturns is one row per calendar year the run touched.
+// span is one calendar year's slice of a run: the index of the month its
+// measurements start from, and the index of its last month.
 //
-// A year's baseline is the balance at the end of the previous December where
-// the run has one, and the run's own first month where it doesn't — which is
-// what makes the first year partial. The last year is partial whenever the run
-// ends before December.
-func annualReturns(months []string, balances []float64) []AnnualReturn {
+// `from` is a *baseline*, not a member: the balance at the end of the previous
+// December where the run has one, and the run's own first month where it
+// doesn't. Returns and yields both hang off this, which is why it is computed
+// once rather than in each of them — two definitions of "the year began here"
+// would eventually stop agreeing.
+type span struct {
+	year     int
+	from, to int
+}
+
+// yearSpans is one span per calendar year the run has returns in.
+func yearSpans(months []string) []span {
 	if len(months) < 2 {
-		return []AnnualReturn{}
+		return nil
 	}
 	lastOf := map[int]int{}
 	order := []int{}
@@ -690,7 +838,7 @@ func annualReturns(months []string, balances []float64) []AnnualReturn {
 		lastOf[year] = i
 	}
 	// A run beginning at a December has that December as its baseline and
-	// nothing else in that year, so the year gets no row. A run beginning in
+	// nothing else in that year, so the year gets no span. A run beginning in
 	// May does have returns in its first year — seven months of them — and
 	// they are reported as a part year, exactly as the final year is. Showing
 	// one and dropping the other would be the inconsistency.
@@ -698,26 +846,34 @@ func annualReturns(months []string, balances []float64) []AnnualReturn {
 		order = order[1:]
 	}
 
-	out := make([]AnnualReturn, 0, len(order))
+	spans := make([]span, 0, len(order))
 	for _, year := range order {
 		end := lastOf[year]
-		// The baseline is the last month before this year; index 0 when the
-		// year is the run's first, which is exactly the base month.
-		start := 0
+		from := 0
 		for i := end; i >= 0; i-- {
 			if months[i][:4] != months[end][:4] {
-				start = i
+				from = i
 				break
 			}
 		}
-		if balances[start] <= 0 {
+		spans = append(spans, span{year: year, from: from, to: end})
+	}
+	return spans
+}
+
+// annualReturns is one row per calendar year the run touched.
+func annualReturns(months []string, index []float64) []AnnualReturn {
+	spans := yearSpans(months)
+	out := make([]AnnualReturn, 0, len(spans))
+	for _, s := range spans {
+		if index[s.from] <= 0 {
 			continue
 		}
 		out = append(out, AnnualReturn{
-			Year:    year,
-			Percent: (balances[end]/balances[start] - 1) * 100,
+			Year:    s.year,
+			Percent: (index[s.to]/index[s.from] - 1) * 100,
 			// Full means measured from the previous December to this one.
-			Partial: months[start][5:] != "12" || months[end][5:] != "12",
+			Partial: months[s.from][5:] != "12" || months[s.to][5:] != "12",
 		})
 	}
 	return out
@@ -749,9 +905,14 @@ func measure(label string, months []string, run result, annual []AnnualReturn, r
 	}
 	m.Sharpe, m.Sortino = riskAdjusted(index, rates)
 
+	yields, fullYears := 0.0, 0
 	for i := range annual {
 		if annual[i].Partial {
 			continue
+		}
+		if annual[i].Yield != nil {
+			yields += *annual[i].Yield
+			fullYears++
 		}
 		year := annual[i]
 		if m.Best == nil || year.Percent > m.Best.Percent {
@@ -762,6 +923,11 @@ func measure(label string, months []string, run result, annual []AnnualReturn, r
 			worst := year
 			m.Worst = &worst
 		}
+	}
+
+	if fullYears > 0 {
+		mean := yields / float64(fullYears)
+		m.Yield = &mean
 	}
 
 	// On the index, not the balances: a portfolio paid into every month can be
@@ -854,4 +1020,22 @@ func (e *Engine) BacktestPortfolio(ctx context.Context, id string) (Backtest, er
 		return Backtest{}, err
 	}
 	return e.Backtest(ctx, backtestSpec(p))
+}
+
+// applyYields stamps the per-year yields onto the rows they belong to.
+//
+// `available` is the difference between "this portfolio paid nothing" and "this
+// quote source cannot say what it paid". The first is a 0 worth printing; the
+// second has to stay nil, or a source with no dividend feed would report every
+// income fund on earth as yielding nothing.
+func applyYields(annual []AnnualReturn, yields map[int]float64, available bool) {
+	if !available {
+		return
+	}
+	for i := range annual {
+		if value, ok := yields[annual[i].Year]; ok {
+			v := value
+			annual[i].Yield = &v
+		}
+	}
 }

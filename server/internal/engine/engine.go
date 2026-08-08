@@ -43,6 +43,10 @@ type Engine struct {
 	// sheet. See performance.go — it is under this mutex because it is read
 	// from HTTP handlers while the loop is running.
 	historyCache map[string]historyEntry
+	// dividendCache is the same, for the payout series a portfolio's yield
+	// needs. Separate because it comes from a separate upstream call, and a
+	// symbol can perfectly well have one and not the other.
+	dividendCache map[string]dividendEntry
 
 	// kick asks the loop to run now and then resume its schedule. Buffered by
 	// one: several nudges in quick succession collapse into a single run,
@@ -59,12 +63,13 @@ func New(st *store.Store, provider quotes.Provider, publisher *publish.Publisher
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Engine{
-		store:        st,
-		provider:     provider,
-		publisher:    publisher,
-		log:          log,
-		kick:         make(chan struct{}, 1),
-		historyCache: map[string]historyEntry{},
+		store:         st,
+		provider:      provider,
+		publisher:     publisher,
+		log:           log,
+		kick:          make(chan struct{}, 1),
+		historyCache:  map[string]historyEntry{},
+		dividendCache: map[string]dividendEntry{},
 	}
 }
 

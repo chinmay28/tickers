@@ -30,6 +30,31 @@ func monthlyBars(first string, closes ...float64) []quotes.Bar {
 	return bars
 }
 
+// payingHistorian is a fakeHistorian that also distributes, so the yield has
+// something to divide.
+type payingHistorian struct {
+	*fakeHistorian
+	payouts map[string][]quotes.Distribution
+}
+
+func (p payingHistorian) Dividends(_ context.Context, symbol string, _ time.Time) ([]quotes.Distribution, error) {
+	return p.payouts[symbol], nil
+}
+
+// dividendEngine wires an engine to a source with both prices and payouts.
+// Bars carry Raw explicitly: a yield divides a payout by the price of its own
+// day, and the adjusted close is not that price.
+func dividendEngine(t *testing.T, bars map[string][]quotes.Bar,
+	payouts map[string][]quotes.Distribution) *Engine {
+	t.Helper()
+	historian := newFakeHistorian(map[string]float64{})
+	for symbol, series := range bars {
+		historian.bars[symbol] = series
+	}
+	eng, _ := newTestEngine(t, payingHistorian{fakeHistorian: historian, payouts: payouts})
+	return eng
+}
+
 // backtestEngine wires an engine to a historian holding the given series.
 func backtestEngine(t *testing.T, bars map[string][]quotes.Bar) (*Engine, *fakeHistorian) {
 	t.Helper()
@@ -680,6 +705,167 @@ func TestBacktestSurvivesAQuoteSourceWithNoTreasuryBill(t *testing.T) {
 	}
 	if math.Abs(result.Portfolio.End-1010) > 1e-9 {
 		t.Errorf("final balance = %.4f, want the usual 1010", result.Portfolio.End)
+	}
+}
+
+// flatWithRaw is thirteen months at a steady 100, with the unadjusted price
+// held at 50 — deliberately different, so a yield computed off the wrong
+// series is off by exactly a factor of two and cannot pass by accident.
+func flatWithRaw(first string, months int, adjusted, raw float64) []quotes.Bar {
+	bars := monthlyBars(first, make([]float64, months)...)
+	for i := range bars {
+		bars[i].Close = adjusted
+		bars[i].Raw = raw
+	}
+	return bars
+}
+
+func TestYieldDividesPayoutsByThePriceOfTheirOwnDay(t *testing.T) {
+	// December 2019 through December 2020, so 2020 is a whole year. 1,000 buys
+	// 20 shares at the unadjusted 50; four payouts of 0.25 is 1 per share, so
+	// 20 of income on 1,000 — a yield of 2%.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{"INCOME": flatWithRaw("2019-12", 13, 100, 50)},
+		map[string][]quotes.Distribution{"INCOME": {
+			{Date: "2020-03-15", Amount: 0.25},
+			{Date: "2020-06-15", Amount: 0.25},
+			{Date: "2020-09-15", Amount: 0.25},
+			{Date: "2020-12-15", Amount: 0.25},
+		}})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "INCOME", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if len(result.Annual) != 1 || result.Annual[0].Yield == nil {
+		t.Fatalf("no yield for 2020: %+v", result.Annual)
+	}
+	// 4% would be the answer from the adjusted close, which is the mistake this
+	// pins: a payout is per share in the money of its own day.
+	if got := *result.Annual[0].Yield; math.Abs(got-2) > 1e-9 {
+		t.Errorf("2020 yielded %.4f%%, want 2 — 20 shares at 50 collecting 1 each on 1,000", got)
+	}
+}
+
+func TestYieldCountsOnlyWhatWasPaidWhileHeld(t *testing.T) {
+	// The run starts in June, so the March payout went to whoever held it then.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{"INCOME": flatWithRaw("2020-06", 7, 100, 50)},
+		map[string][]quotes.Distribution{"INCOME": {
+			{Date: "2020-03-15", Amount: 10},
+			{Date: "2020-09-15", Amount: 1},
+		}})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "INCOME", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if len(result.Annual) != 1 || result.Annual[0].Yield == nil {
+		t.Fatalf("no yield row: %+v", result.Annual)
+	}
+	// 20 shares collecting 1 each on 1,000 is 2%. Counting March too would be
+	// 22% — income the portfolio never received.
+	if got := *result.Annual[0].Yield; math.Abs(got-2) > 1e-9 {
+		t.Errorf("yield = %.4f%%, want 2; a payout made before the run began is not its income", got)
+	}
+	if !result.Annual[0].Partial {
+		t.Error("a run starting in June has a part 2020, and the yield row has to say so")
+	}
+	// A part year is not the portfolio's yield, for the same reason it is not
+	// its best year: it collected a fraction of the distributions.
+	if result.Portfolio.Yield != nil {
+		t.Errorf("summary yield = %v from part years only, want none", *result.Portfolio.Yield)
+	}
+}
+
+func TestYieldIsUnknownRatherThanZeroWithoutADividendFeed(t *testing.T) {
+	// A source with prices and no payouts. Reporting 0% would say every income
+	// fund on earth yields nothing.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	for _, year := range result.Annual {
+		if year.Yield != nil {
+			t.Errorf("%d reported a yield of %v from a source that has no dividend data",
+				year.Year, *year.Yield)
+		}
+	}
+	if result.Portfolio.Yield != nil {
+		t.Errorf("summary yield = %v, want none", *result.Portfolio.Yield)
+	}
+}
+
+func TestYieldOfSomethingThatPaysNothingIsZeroNotUnknown(t *testing.T) {
+	// The other half of the distinction: the feed works, this fund just doesn't
+	// distribute. That is a 0 worth printing.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{"GROWTH": flatWithRaw("2019-12", 13, 100, 100)},
+		map[string][]quotes.Distribution{"GROWTH": nil})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "GROWTH", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if len(result.Annual) != 1 || result.Annual[0].Yield == nil {
+		t.Fatalf("yield went missing for a working feed: %+v", result.Annual)
+	}
+	if *result.Annual[0].Yield != 0 {
+		t.Errorf("yield = %v, want 0", *result.Annual[0].Yield)
+	}
+}
+
+func TestYieldWeighsHoldingsByWhatIsActuallyHeld(t *testing.T) {
+	// Two halves, one of which triples over the first year while the other is
+	// flat. By 2021 the payer is three quarters of the portfolio, and its
+	// income counts for what it grew into rather than for its target weight.
+	payer := monthlyBars("2019-12", 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+		100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100)
+	for i := range payer {
+		payer[i].Raw = payer[i].Close
+	}
+	// Triple it across 2020 so the weights have genuinely drifted by 2021.
+	for i := 1; i <= 12; i++ {
+		payer[i].Close = 100 + float64(i)*200/12
+		payer[i].Raw = payer[i].Close
+	}
+	for i := 13; i < len(payer); i++ {
+		payer[i].Close, payer[i].Raw = 300, 300
+	}
+
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{
+			"PAYER": payer,
+			"FLAT":  flatWithRaw("2019-12", 25, 100, 100),
+		},
+		map[string][]quotes.Distribution{"PAYER": {{Date: "2021-06-15", Amount: 30}}})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "PAYER", Weight: 50}, {Symbol: "FLAT", Weight: 50}},
+		InitialAmount: 1000,
+		Rebalance:     store.RebalanceNone,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	var yield2021 *float64
+	for _, year := range result.Annual {
+		if year.Year == 2021 {
+			yield2021 = year.Yield
+		}
+	}
+	if yield2021 == nil {
+		t.Fatalf("no 2021 yield: %+v", result.Annual)
+	}
+	// Entering 2021 the payer is worth 1,500 of a 2,000 portfolio: 5 shares at
+	// 300, collecting 30 each is 150, which is 7.5% of 2,000. Using the 50%
+	// target weight instead would give 5%.
+	if math.Abs(*yield2021-7.5) > 1e-6 {
+		t.Errorf("2021 yielded %.4f%%, want 7.5 — income follows what was held, not what was aimed at",
+			*yield2021)
 	}
 }
 

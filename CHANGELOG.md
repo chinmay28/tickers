@@ -31,8 +31,30 @@ initial amount, a rebalancing cadence, and an optional benchmark.
   with the performance sheet — a portfolio over funds you also chart costs no
   extra requests.
 
-Nothing models fees, taxes, spreads, contributions or inflation. It is what the
-allocation did, not what an account holding it would have.
+Nothing models fees, taxes or spreads, and there is no inflation adjustment. It
+is what the allocation did, not what an account holding it would have.
+
+### Contributions, risk-adjusted returns and yield
+
+- **Pay into a portfolio** on a cadence. Money paid in is not growth, so every
+  percentage — total, CAGR, volatility, drawdown, the yearly table — is now
+  **time-weighted**: measured on the growth of a single unit with the cash flows
+  removed, while the balances keep showing the money. What went in appears as
+  its own summary row, so a balance four times the initial amount beside a
+  return of 40% is no longer a puzzle. Drawdown moved too — a portfolio paid
+  into every month can be halving while its balance climbs.
+- **Sharpe and Sortino**, against `^IRX`, the 13-week Treasury bill. The pair is
+  worth having together: a strategy whose swings are mostly upward is punished
+  by Sharpe and left alone by Sortino. Both are omitted rather than quietly
+  computed against 0% when the bill can't be fetched.
+- **Dividend yield per calendar year**, and a mean across the full ones. It is
+  the cash actually distributed divided by what the portfolio was worth when the
+  year opened, using each holding's real drifted value — income depends on what
+  a portfolio held, not on what it was aiming at. A source with no payout feed
+  leaves the column absent; a fund that pays nothing shows 0%.
+- Quote sources can now report **unadjusted closes and dividends** — `Bar.Raw`
+  and a new optional `Distributor` interface, both implemented for Yahoo.
+  Nothing that only prices today is affected.
 
 ### Activity folded into Publishing
 
