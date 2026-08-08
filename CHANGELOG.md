@@ -36,6 +36,21 @@ a ratio — stocks against gold — recomputed every cycle from both legs.
 Schema migration `003_composite_expression` adds one defaulted column, so an
 older binary rolled back onto the new database keeps running.
 
+### Adding a ticker moved to a floating button
+
+The add-a-ticker card that sat above the watchlist is now a floating **+** in
+the bottom-right corner, the way CountRoster's create action works — so the
+list starts at the top of the page instead of a form you had already used. It
+opens a sheet (a bottom sheet on a phone, a centred dialog on desktop) with the
+same fields and the same **Search by name**.
+
+It is a real `<dialog>`, which brings the focus trap, the Escape key and an
+inert background with it, and it lives outside the ten-second redraw — so what
+you type stays typed with no draft machinery involved. Closing it resets the
+form; a rejected add (a duplicate, a formula that won't parse) deliberately
+keeps it open on what you typed so the fix is an edit rather than a retype.
+Toasts now stack above the button rather than landing on it.
+
 ### The script becomes an application
 
 Tickers is `update_minion_quotes.py` — a cron script that fetched seven

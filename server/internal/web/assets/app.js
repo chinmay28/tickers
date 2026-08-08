@@ -184,8 +184,9 @@ const state = {
   editingSinks: new Set(),
   /** Sparkline points by ticker ID, fetched lazily per row. */
   history: new Map(),
-  /** Symbol-search results, held here rather than poked straight into the DOM
-   *  so a redraw doesn't throw them away between the search and the tap. */
+  /** Symbol-search results. They live in the add dialog, which is outside the
+   *  redrawn view, so this is the render state for one small painted region
+   *  rather than something the routed render has to carry. */
   matches: null,
   runs: [],
   busy: false,
@@ -373,6 +374,9 @@ function syncNav() {
   for (const link of $$('[data-route]')) {
     link.classList.toggle('is-active', link.dataset.route === current);
   }
+  // The floating button is the watchlist's create action; on Publishing,
+  // Activity or Settings there is nothing for it to add.
+  $('#add-fab').hidden = current !== 'watchlist';
 }
 
 /* ------------------------------------------------------------------ *
@@ -462,42 +466,13 @@ function renderWatchlist(data) {
                 } pinned to the top — edit the list in <a href="#/settings">Settings</a>.`
               : 'Nothing is pinned; <a href="#/settings">Settings</a> is where you choose what stays on top.'
           }
+          Use <strong>+</strong> to add a symbol, or a ratio like
+          <code>VTI/GLD</code>.
         </p>
       </div>
     </div>
 
     <div class="card">
-      <div class="card__head">
-        <h2 class="card__title">Add a ticker or a ratio</h2>
-      </div>
-      <div class="card__body">
-        <form class="add-row" id="add-form" data-form-key="add-form" autocomplete="off">
-          <div class="field">
-            <label class="field__label" for="add-symbol">Symbol or formula</label>
-            <input class="input input--mono" id="add-symbol" name="symbol"
-                   placeholder="AAPL, BTC-USD, VTI/GLD" required />
-          </div>
-          <div class="field">
-            <label class="field__label" for="add-label">Label <span style="text-transform:none">(optional)</span></label>
-            <input class="input" id="add-label" name="label" placeholder="Rainy-day fund" />
-          </div>
-          <button class="btn btn--primary" type="submit">Add</button>
-          <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
-        </form>
-        <p class="field__hint" style="margin:0.55rem 0 0">
-          A formula makes a <strong>composite</strong> — a row priced from other
-          symbols instead of fetched. <code>VTI/GLD</code>, <code>P/VTI</code>,
-          <code>(VTI+GLD)/2</code> all work, with <code>+ − × ÷</code> and
-          brackets. Composites are outlined in violet and behave like any other
-          row: chart, change, pin, publish. Write a subtraction with spaces
-          (<code>VTI - GLD</code>) — an unspaced hyphen belongs to symbols like
-          <code>BTC-USD</code>.
-        </p>
-        <div class="matches" id="matches">${renderMatches()}</div>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:1rem">
       <div class="card__head">
         <h2 class="card__title">${data.tickers.length} ${
           data.tickers.length === 1 ? 'symbol' : 'symbols'
@@ -507,7 +482,7 @@ function renderWatchlist(data) {
       <div class="card__body">
         ${
           data.tickers.length === 0
-            ? `<div class="empty"><strong>Nothing on the watchlist</strong>Add a symbol above and it will be priced immediately.</div>`
+            ? `<div class="empty"><strong>Nothing on the watchlist</strong>Press the <strong>+</strong> button to add a symbol; it will be priced immediately.</div>`
             : `<div class="quotes" id="quotes">${data.tickers.map(renderQuote).join('')}</div>`
         }
       </div>
@@ -515,9 +490,14 @@ function renderWatchlist(data) {
   `;
 }
 
-/** The "Search by name" results. Rendered from state rather than written
- *  straight into #matches, so the next redraw doesn't take the list away
- *  from under a finger reaching for one of the rows. */
+/** Paint the "Search by name" results into the add dialog. The dialog is
+ *  outside the routed view and never re-rendered, so this one region updates
+ *  itself rather than riding along with a full redraw. */
+function paintMatches() {
+  $('#matches').innerHTML = renderMatches();
+}
+
+/** The "Search by name" results as HTML. */
 function renderMatches() {
   const m = state.matches;
   if (!m) return '';
@@ -1156,28 +1136,6 @@ $('#view').addEventListener('submit', (event) => {
   event.preventDefault();
   const values = Object.fromEntries(new FormData(form).entries());
 
-  if (form.id === 'add-form') {
-    const symbol = (values.symbol || '').trim();
-    if (!symbol) return;
-    act(
-      async () => {
-        await post('/tickers', { symbol, label: (values.label || '').trim() });
-        form.reset();
-        // Saved input is no longer a draft to protect; leaving it stashed
-        // would put the symbol straight back into the emptied field.
-        clearDraft('add-form');
-        state.matches = null;
-        state.history.clear();
-      },
-      {
-        success: `Added ${symbol.toUpperCase().replace(/\s+/g, '')}${
-          looksComposite(symbol) ? ' (composite)' : ''
-        }`,
-      },
-    );
-    return;
-  }
-
   if (form.dataset.edit) {
     const id = form.dataset.edit;
     // A composite's form carries `expression`, a plain row's carries `symbol`.
@@ -1263,46 +1221,9 @@ $('#view').addEventListener('focusout', () => {
   }, 0);
 });
 
-// "Search by name" and "Publish now" / "Reload" live in the routed view, so
-// they are wired by delegation on the same container as everything else.
+// "Publish now" and "Reload" live in the routed view, so they are wired by
+// delegation on the same container as everything else.
 $('#view').addEventListener('click', async (event) => {
-  if (event.target.id === 'search-btn') {
-    const query = $('#add-symbol').value.trim();
-    if (!query) {
-      toast('Type a company or symbol first');
-      return;
-    }
-    if (looksComposite(query)) {
-      // The provider has no idea what a ratio is; searching for one returns
-      // nothing and reads as a broken search rather than a wrong button.
-      toast('That is a formula — press Add. Search looks up one symbol at a time.');
-      return;
-    }
-    state.matches = { status: 'loading', items: [] };
-    render({ force: true });
-    try {
-      const { matches, warning } = await api(`/search?q=${encodeURIComponent(query)}`);
-      if (warning) toast(warning, 'error');
-      state.matches = { status: 'done', items: matches ?? [] };
-    } catch (err) {
-      state.matches = { status: 'error', items: [], message: err.message || String(err) };
-    }
-    render({ force: true });
-    return;
-  }
-
-  const match = event.target.closest('[data-symbol]');
-  if (match) {
-    const input = $('#add-symbol');
-    input.value = match.dataset.symbol;
-    // Writing the field is only half of it: the draft is what a redraw reads
-    // back, so it has to learn about the pick too.
-    saveDraft(input.form);
-    state.matches = null;
-    render({ force: true });
-    return;
-  }
-
   if (event.target.id === 'publish-now') {
     act(
       async () => {
@@ -1340,7 +1261,6 @@ $('#view').addEventListener('click', async (event) => {
 
   if (event.target.id === 'test-provider') {
     const button = event.target;
-    const symbol = ($('#add-symbol')?.value || '').trim();
     button.disabled = true;
     const previous = button.textContent;
     button.textContent = 'Testing…';
@@ -1348,7 +1268,12 @@ $('#view').addEventListener('click', async (event) => {
     // mid-request and leave it looking idle while the test is still running.
     state.inlineBusy = true;
     try {
-      const { result } = await post('/provider/test', symbol ? { symbol } : {});
+      // No symbol: the server falls back to a known-good one. This used to
+      // read the add box, which only ever rendered on the Watchlist while this
+      // button only renders on Settings — so it always read nothing. Now that
+      // the add box lives in a dialog in the shell it would read a stale value
+      // instead, which is worse than the default it never actually replaced.
+      const { result } = await post('/provider/test', {});
       if (result.ok) {
         toast(
           `${result.provider}: ${result.symbol} = ${money(result.price, result.currency)} (${result.durationMs} ms)`,
@@ -1365,6 +1290,106 @@ $('#view').addEventListener('click', async (event) => {
       button.textContent = previous;
       if (state.renderPending && !isTyping()) render();
     }
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The add dialog
+ *
+ * It lives in the shell rather than in #view, so nothing here has to survive a
+ * redraw: no drafts, no focus capture, no deferral. What you typed stays typed
+ * because the elements are never replaced. `showModal` supplies the focus
+ * trap, Escape and the inert background.
+ * ------------------------------------------------------------------ */
+
+const addDialog = $('#add-dialog');
+
+function openAdd() {
+  if (addDialog.open) return;
+  addDialog.showModal();
+  $('#add-symbol').focus();
+}
+
+$('#add-fab').addEventListener('click', openAdd);
+$('#add-cancel').addEventListener('click', () => addDialog.close());
+
+/* Clicking the backdrop closes it. The backdrop is not a child, so it surfaces
+ * as a click on the dialog itself whose coordinates fall outside the panel. */
+addDialog.addEventListener('click', (event) => {
+  if (event.target !== addDialog) return;
+  const box = addDialog.getBoundingClientRect();
+  const outside =
+    event.clientX < box.left ||
+    event.clientX > box.right ||
+    event.clientY < box.top ||
+    event.clientY > box.bottom;
+  if (outside) addDialog.close();
+});
+
+/* Closing — by button, by backdrop or by Escape — resets the form. Reopening
+ * to a half-typed symbol from ten minutes ago is a puzzle, not a convenience. */
+addDialog.addEventListener('close', () => {
+  $('#add-form').reset();
+  state.matches = null;
+  paintMatches();
+});
+
+addDialog.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const form = $('#add-form');
+  const values = Object.fromEntries(new FormData(form).entries());
+  const symbol = (values.symbol || '').trim();
+  if (!symbol) return;
+
+  act(
+    async () => {
+      await post('/tickers', { symbol, label: (values.label || '').trim() });
+      // Only on success: a rejected symbol — a duplicate, a formula that
+      // won't parse — leaves the dialog open on what you typed, so the fix is
+      // an edit rather than a retype.
+      addDialog.close();
+      state.history.clear();
+    },
+    {
+      success: `Added ${symbol.toUpperCase().replace(/\s+/g, '')}${
+        looksComposite(symbol) ? ' (composite)' : ''
+      }`,
+    },
+  );
+});
+
+addDialog.addEventListener('click', async (event) => {
+  if (event.target.id === 'search-btn') {
+    const query = $('#add-symbol').value.trim();
+    if (!query) {
+      toast('Type a company or symbol first');
+      return;
+    }
+    if (looksComposite(query)) {
+      // The provider has no idea what a ratio is; searching for one returns
+      // nothing and reads as a broken search rather than a wrong button.
+      toast('That is a formula — press Add. Search looks up one symbol at a time.');
+      return;
+    }
+    state.matches = { status: 'loading', items: [] };
+    paintMatches();
+    try {
+      const { matches, warning } = await api(`/search?q=${encodeURIComponent(query)}`);
+      if (warning) toast(warning, 'error');
+      state.matches = { status: 'done', items: matches ?? [] };
+    } catch (err) {
+      state.matches = { status: 'error', items: [], message: err.message || String(err) };
+    }
+    paintMatches();
+    return;
+  }
+
+  const match = event.target.closest('[data-symbol]');
+  if (match) {
+    $('#add-symbol').value = match.dataset.symbol;
+    state.matches = null;
+    paintMatches();
+    $('#add-symbol').focus();
   }
 });
 
