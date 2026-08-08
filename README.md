@@ -145,20 +145,37 @@ set, not an order, so the watchlist's own sequence still applies within the
 pinned group.
 
 **History** — **double-tap (or double-click) a row** to open its performance
-sheet: a chart of the daily closes behind it, and a table of returns over a
-week, a month, three months, the year to date, and one, three and five years.
-Pick a range with the chips above the chart, and drag across the line to read
-any single day off it. Returns longer than a year also show a compound annual
-rate, and a period the symbol is too young for says so rather than quietly
-measuring from its first day.
+sheet: a chart of the daily closes behind it, and a table underneath. Pick a
+span with the chips above the chart — 1M through 10Y and All — and drag across
+the line to read any single day off it.
 
-This series comes from the quote source, not from the sparkline history stored
+For an ordinary symbol the table is **returns**: a week, a month, three months,
+the year to date, and one, three, five and ten years, plus all time. Anything
+measured over more than about a year also shows a compound annual rate, worked
+out from the dates the baseline actually has rather than the window's name.
+
+For a **composite** it is **highs and lows** instead — a ratio has no capital in
+it to have returned anything, but "it is at 22% of its all-time range" says
+something true about the same number. Each row gives the low and the high inside
+that window, the days they happened, and where the latest value sits between
+them: one month, three months, year to date, one year, five years, ten years,
+and all time.
+
+Either way, a period the series doesn't cover says **"not enough history"**
+rather than quietly measuring a young listing from its first day. A range is
+only reported once the symbol existed for the whole window — every close a
+symbol listed last month has falls inside the last ten years, and calling their
+high a ten-year high would be a fabrication.
+
+The series comes from the quote source, not from the sparkline history stored
 locally — that is pruned to a window measured in hours, so it can say what a
 symbol did today and nothing longer. Closes are adjusted for splits and
-dividends where the source reports them, and each period is measured from the
-last close *on or before* its start, because markets are shut at weekends.
-Composites get the same sheet, recomputed from the formula on every day all of
-its legs traded.
+dividends where the source reports them, and returns are measured from the last
+close *on or before* each period's start, because markets are shut at weekends.
+"All time" is as far back as the source goes; to keep a forty-year chart drawable
+on a phone, closes older than two years are thinned to one a week and then one a
+month, with the high and the low always kept so the chart never contradicts the
+table beside it.
 
 **Composites** — a row can be a *formula over other symbols* instead of a
 symbol. Type `VTI/GLD` into the same box you would type `AAPL` into and you get

@@ -871,11 +871,12 @@ func (h historianProvider) History(_ context.Context, symbol string, _ time.Time
 }
 
 func TestPerformanceEndpointServesTheChartAndTheReturns(t *testing.T) {
+	oldest := time.Now().UTC().AddDate(-2, 0, 0).Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	provider := historianProvider{
 		stubProvider: stubProvider{prices: map[string]float64{"VTI": 300}},
 		bars: map[string][]quotes.Bar{"VTI": {
-			{Date: time.Now().UTC().AddDate(-2, 0, 0).Format("2006-01-02"), Close: 100},
+			{Date: oldest, Close: 100},
 			{Date: time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02"), Close: 180},
 			{Date: yesterday, Close: 200},
 		}},
@@ -899,20 +900,37 @@ func TestPerformanceEndpointServesTheChartAndTheReturns(t *testing.T) {
 
 	// Every window comes back whether or not the series reaches it, so the
 	// table can say "not enough history" rather than quietly losing a row.
-	returns, _ := perf["returns"].([]any)
-	if len(returns) != 7 {
-		t.Fatalf("got %d return windows, want all 7: %v", len(returns), returns)
+	returns := byKey(t, perf["returns"])
+	if len(returns) != 9 {
+		t.Fatalf("got %d return windows, want all 9: %v", len(returns), returns)
 	}
-	byKey := map[string]map[string]any{}
-	for _, entry := range returns {
-		r, _ := entry.(map[string]any)
-		byKey[r["key"].(string)], _ = entry.(map[string]any)
-	}
-	if year := byKey["1y"]; year["available"] != true || year["changePercent"].(float64) != 100 {
+	if year := returns["1y"]; year["available"] != true || year["changePercent"].(float64) != 100 {
 		t.Errorf("1y = %v, want an available +100%% (100 → 200)", year)
 	}
-	if five := byKey["5y"]; five["available"] != false {
-		t.Errorf("5y = %v; a two-year series has no five-year return", five)
+	for _, key := range []string{"5y", "10y"} {
+		if r := returns[key]; r["available"] != false {
+			t.Errorf("%s = %v; a two-year series has no return that long", key, r)
+		}
+	}
+	// All time is the series' own first close — two years back here — so it is
+	// available whenever anything is.
+	if all := returns["all"]; all["available"] != true ||
+		all["from"] != oldest || all["fromValue"].(float64) != 100 {
+		t.Errorf("all-time = %v, want it measured from %s at 100", all, oldest)
+	}
+
+	// Ranges ride along for every ticker; the client shows them in place of
+	// returns for composites, where a return would be a category error.
+	ranges := byKey(t, perf["ranges"])
+	if len(ranges) != 7 {
+		t.Fatalf("got %d range windows, want all 7: %v", len(ranges), ranges)
+	}
+	all := ranges["all"]
+	if all["available"] != true || all["low"].(float64) != 100 || all["high"].(float64) != 200 {
+		t.Errorf("all-time range = %v, want 100–200", all)
+	}
+	if all["highDate"] != yesterday || all["position"].(float64) != 100 {
+		t.Errorf("all-time range = %v; the latest close is the high, so it sits at 100%% of it", all)
 	}
 
 	if rec, _ := h.do(t, http.MethodGet, "/api/tickers/nope/performance", nil); rec.Code != http.StatusNotFound {
@@ -935,6 +953,22 @@ func TestPerformanceSaysSoWhenTheProviderHasNoHistory(t *testing.T) {
 	if msg, _ := body["error"].(string); !strings.Contains(msg, "history") {
 		t.Errorf("error = %q, want it to name what is missing", msg)
 	}
+}
+
+// byKey indexes a decoded list of return or range windows by its "key" field.
+func byKey(t *testing.T, list any) map[string]map[string]any {
+	t.Helper()
+	entries, _ := list.([]any)
+	out := make(map[string]map[string]any, len(entries))
+	for _, entry := range entries {
+		row, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("window is not an object: %v", entry)
+		}
+		key, _ := row["key"].(string)
+		out[key] = row
+	}
+	return out
 }
 
 // findTicker pulls one row out of a /api/state body by symbol.

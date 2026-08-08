@@ -1461,15 +1461,19 @@ addDialog.addEventListener('click', async (event) => {
 
 const perfDialog = $('#perf-dialog');
 
-/** Ranges the chart can be narrowed to. The server always sends five years;
- *  these only decide how much of it is drawn, so switching is instant. */
-const PERF_RANGES = [
+/** Spans the chart can be narrowed to. The server sends the whole series; these
+ *  only decide how much of it is drawn, so switching is instant. `days` is null
+ *  where the start is computed rather than counted — YTD from the turn of the
+ *  year, All from whatever the source's first close is. */
+const PERF_SPANS = [
   { key: '1m', label: '1M', days: 31 },
   { key: '3m', label: '3M', days: 92 },
   { key: '6m', label: '6M', days: 183 },
   { key: 'ytd', label: 'YTD', days: null },
   { key: '1y', label: '1Y', days: 366 },
-  { key: '5y', label: '5Y', days: null },
+  { key: '5y', label: '5Y', days: 1827 },
+  { key: '10y', label: '10Y', days: 3653 },
+  { key: 'all', label: 'All', days: null },
 ];
 
 /** Chart geometry from the last paint, so the scrub handler can turn a pointer
@@ -1505,7 +1509,7 @@ async function openPerformance(id) {
 
   // The range is deliberately kept between openings: someone comparing two
   // rows over three months should not have to pick 3M twice.
-  state.perf = { id, ticker, status: 'loading', range: state.perf?.range ?? '1y' };
+  state.perf = { id, ticker, status: 'loading', span: state.perf?.span ?? '1y' };
   $('#perf-title').textContent = `${ticker.symbol}${ticker.label ? ` · ${ticker.label}` : ''}`;
   if (!perfDialog.open) perfDialog.showModal();
   paintPerf();
@@ -1526,7 +1530,7 @@ async function openPerformance(id) {
 /** The first date the selected range includes. Empty means "everything". */
 function perfCutoff(key) {
   if (key === 'ytd') return `${new Date().getUTCFullYear() - 1}-12-31`;
-  const days = PERF_RANGES.find((r) => r.key === key)?.days;
+  const days = PERF_SPANS.find((r) => r.key === key)?.days;
   if (!days) return '';
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 }
@@ -1553,7 +1557,7 @@ function paintPerf() {
   }
 
   if (perf.status === 'loading') {
-    body.innerHTML = `<div class="empty"><strong>Reading ${esc(perf.ticker.symbol)}’s history</strong>Five years of daily closes, straight from the quote source.</div>`;
+    body.innerHTML = `<div class="empty"><strong>Reading ${esc(perf.ticker.symbol)}’s history</strong>Every daily close the quote source has.</div>`;
     return;
   }
   if (perf.status === 'error') {
@@ -1570,23 +1574,35 @@ function paintPerf() {
     return;
   }
 
-  const visible = perfVisible(points, perf.range);
+  const visible = perfVisible(points, perf.span);
   body.innerHTML = `
     ${perfHeader(perf, visible, format, composite)}
-    <div class="presets perf-ranges">
-      ${PERF_RANGES.map(
+    <div class="presets perf-spans">
+      ${PERF_SPANS.map(
         (r) =>
           `<button class="btn btn--sm ${
-            r.key === perf.range ? 'btn--outline btn--active' : 'btn--ghost'
-          }" type="button" data-perf-range="${esc(r.key)}">${esc(r.label)}</button>`,
+            r.key === perf.span ? 'btn--outline btn--active' : 'btn--ghost'
+          }" type="button" data-perf-span="${esc(r.key)}">${esc(r.label)}</button>`,
       ).join('')}
     </div>
     ${perfChart(visible, format)}
-    <h3 class="card__subtitle">Returns</h3>
-    ${perfReturns(perf.data.returns ?? [], format)}
+    ${
+      // A composite gets highs and lows where a symbol gets returns. There is
+      // no capital in a ratio to have returned anything — "VTI/GLD made 8%"
+      // invites a reader to treat a ratio as a holding — but "it is near the
+      // top of its five-year range" says something true about the same number.
+      composite
+        ? `<h3 class="card__subtitle">Range</h3>${perfRanges(perf.data.ranges ?? [], format)}`
+        : `<h3 class="card__subtitle">Returns</h3>${perfReturns(perf.data.returns ?? [], format)}`
+    }
     <p class="field__hint perf-note">
-      Daily closes${composite ? ', recomputed from the formula on every day all of its legs traded' : ', adjusted for splits and dividends where the source reports them'}.
-      Measured from the last close on or before each period’s start.
+      ${
+        composite
+          ? 'Recomputed from the formula on every day all of its legs traded. A window is only reported once the series covers all of it.'
+          : 'Daily closes, adjusted for splits and dividends where the source reports them, measured from the last close on or before each period’s start.'
+      }
+      All time is as far back as the quote source goes; longer spans are thinned
+      to weekly and then monthly closes to draw.
     </p>
   `;
   wirePerfChart();
@@ -1598,7 +1614,10 @@ function perfHeader(perf, visible, format, composite) {
   const first = visible[0];
   const last = visible[visible.length - 1];
   const change = isFlat(first.value, last.value) ? 0 : last.value - first.value;
-  const pct = first.value > 0 ? (change / first.value) * 100 : null;
+  // A composite's move is shown as a move, not as a percentage. The percentage
+  // of a ratio is a real quantity, but it reads as a return, and a ratio has
+  // nothing invested in it to return anything.
+  const pct = composite || !(first.value > 0) ? null : (change / first.value) * 100;
   const dir = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
   const currency = composite ? '' : perf.ticker.quote?.currency ?? '';
 
@@ -1614,7 +1633,12 @@ function perfHeader(perf, visible, format, composite) {
       </div>
       <div class="perf-head__delta">
         <div class="perf-change perf-change--${dir}">${esc(
-          pct === null ? signed(change, 2) : `${signed(pct, 2)}%`,
+          // The move is shown to the same precision as the value it moved, so
+          // the two halves of the header never disagree about how exact they
+          // are — the watchlist row does the same.
+          pct === null
+            ? signed(change, composite ? ratioDigits(last.value) : 2)
+            : `${signed(pct, 2)}%`,
         )}</div>
         <div class="field__hint">since ${esc(first.date)}</div>
       </div>
@@ -1652,9 +1676,18 @@ function perfChart(points, format) {
   const widest = Math.max(...ticks.map((t) => t.length));
   const pad = { l: Math.min(130, 14 + widest * 6.7), r: 12, t: 12, b: 24 };
 
-  const x = (i) => pad.l + (i * (W - pad.l - pad.r)) / (points.length - 1);
+  // Points are placed by *date*, not by index. The series has mixed resolution
+  // — every session for the recent years, then one a week and one a month —
+  // so index spacing would hand the last two years a third of the width and
+  // squeeze thirty into the rest. It also closes the smaller version of the
+  // same lie: weekends are gaps in a daily series.
+  const days = points.map((p) => Date.parse(`${p.date}T00:00:00Z`) / 86_400_000);
+  const from = days[0];
+  const total = days[days.length - 1] - from || 1;
+
+  const x = (i) => pad.l + ((days[i] - from) / total) * (W - pad.l - pad.r);
   const y = (v) => pad.t + (1 - (v - min) / (max - min)) * (H - pad.t - pad.b);
-  perfGeom = { points, x, y, pad, width: W, format: tick };
+  perfGeom = { points, days, from, total, x, y, pad, width: W, format: tick };
 
   const line = points
     .map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(p.value).toFixed(1)}`)
@@ -1699,12 +1732,25 @@ function wirePerfChart() {
   const readout = $('#perf-readout');
   if (!svg || !cursor || !perfGeom) return;
 
+  /** The point nearest the pointer — by date, since that is what the x axis
+   *  measures. Binary search rather than a scan: this runs on every move, and
+   *  an all-time series is over a thousand points. */
   const at = (clientX) => {
     const box = svg.getBoundingClientRect();
-    const { points, pad, width } = perfGeom;
+    const { days, from, total, pad, width } = perfGeom;
     const sx = ((clientX - box.left) / box.width) * width;
-    const fraction = (sx - pad.l) / (width - pad.l - pad.r);
-    return Math.min(points.length - 1, Math.max(0, Math.round(fraction * (points.length - 1))));
+    const target = from + ((sx - pad.l) / (width - pad.l - pad.r)) * total;
+
+    let lo = 0;
+    let hi = days.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (days[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    // lo is the first point at or after the target; its predecessor may be closer.
+    if (lo > 0 && target - days[lo - 1] < days[lo] - target) return lo - 1;
+    return lo;
   };
 
   const rule = $('line', cursor);
@@ -1736,6 +1782,39 @@ function wirePerfChart() {
   svg.addEventListener('pointerdown', show);
   svg.addEventListener('pointerleave', hide);
   svg.addEventListener('pointercancel', hide);
+}
+
+/** The high/low table — what a composite gets instead of returns.
+ *
+ *  "Now" is where the latest value sits between the two, which is the column
+ *  that turns two numbers into a reading: a ratio at 4% of its five-year range
+ *  is saying something a low and a high on their own leave to the reader. */
+function perfRanges(ranges, format) {
+  if (!ranges.length) return '<div class="empty">No ranges could be computed.</div>';
+  return `<div class="table-scroll"><table class="table">
+      <thead><tr><th>Period</th><th>Low</th><th>High</th><th>Now</th></tr></thead>
+      <tbody>${ranges.map((r) => perfRangeRow(r, format)).join('')}</tbody>
+    </table></div>`;
+}
+
+function perfRangeRow(r, format) {
+  if (!r.available) {
+    return `<tr><th>${esc(r.label)}</th>
+      <td class="field__hint" colspan="3">not enough history</td></tr>`;
+  }
+  const position =
+    r.position === null || r.position === undefined
+      ? '<span class="field__hint">flat</span>'
+      : `${Math.round(r.position)}%`;
+
+  return `<tr>
+    <th>${esc(r.label)}</th>
+    <td><span class="perf-change perf-change--down">${esc(format(r.low))}</span>
+        <span class="perf-when">${esc(r.lowDate)}</span></td>
+    <td><span class="perf-change perf-change--up">${esc(format(r.high))}</span>
+        <span class="perf-when">${esc(r.highDate)}</span></td>
+    <td class="field__hint">${esc(position)}</td>
+  </tr>`;
 }
 
 function perfReturns(returns, format) {
@@ -1777,9 +1856,9 @@ $('#perf-close').addEventListener('click', () => perfDialog.close());
 /* Same backdrop-click close as the add dialog: the backdrop is not a child, so
  * it arrives as a click on the dialog whose coordinates fall outside it. */
 perfDialog.addEventListener('click', (event) => {
-  const range = event.target.closest('[data-perf-range]');
-  if (range) {
-    state.perf = { ...state.perf, range: range.dataset.perfRange };
+  const span = event.target.closest('[data-perf-span]');
+  if (span) {
+    state.perf = { ...state.perf, span: span.dataset.perfSpan };
     paintPerf();
     return;
   }
@@ -1798,7 +1877,7 @@ perfDialog.addEventListener('click', (event) => {
 /* Closing drops the row but keeps the range, so reopening on another symbol
  * lands on the same period. */
 perfDialog.addEventListener('close', () => {
-  state.perf = { range: state.perf?.range ?? '1y' };
+  state.perf = { span: state.perf?.span ?? '1y' };
   paintPerf();
 });
 
