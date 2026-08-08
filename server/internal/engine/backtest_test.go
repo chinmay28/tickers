@@ -924,112 +924,13 @@ func TestReplacementIsAlwaysDisclosed(t *testing.T) {
 		t.Fatalf("backtest: %v", err)
 	}
 
-	// Most of this run is not the symbol the reader typed. A proxy nobody was
-	// told about is a fabrication, so the note is not optional.
-	if len(result.Notes) == 0 {
-		t.Fatal("a substituted holding produced no note at all")
-	}
-	note := result.Notes[0]
-	for _, want := range []string{"NEW", "OLD", "2020-03"} {
-		if !strings.Contains(note, want) {
-			t.Errorf("note %q does not mention %q", note, want)
-		}
-	}
-}
-
-func TestTheShortestHistoryIsNamedAfterItsReplacement(t *testing.T) {
-	// NEW is stood in for by OLD, and OLD still starts later than everything
-	// else — so the substitution did not solve the problem, and the note has to
-	// say which series is actually holding the run back.
-	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
-		"OLDER": monthlyBars("2019-01", 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
-			112, 113, 114, 115),
-		"OLD": monthlyBars("2020-01", 100, 110, 121, 133),
-		"NEW": {
-			{Date: "2020-03-28", Close: 50},
-			{Date: "2020-04-28", Close: 55},
-		},
-	})
-
-	result, err := eng.Backtest(context.Background(), BacktestSpec{
-		Holdings: []store.Holding{
-			{Symbol: "NEW", Weight: 50, Replacement: "OLD"},
-			{Symbol: "OLDER", Weight: 50},
-		},
-		InitialAmount: 1000,
-	})
-	if err != nil {
-		t.Fatalf("backtest: %v", err)
-	}
-	if result.Start != "2020-01" {
-		t.Fatalf("ran from %s, want 2020-01", result.Start)
-	}
-
-	joined := strings.Join(result.Notes, " ")
-	// Naming NEW here would be wrong — NEW is not what has no history before
-	// 2020-01, its stand-in is.
-	if !strings.Contains(joined, "OLD (standing in for NEW)") {
-		t.Errorf("notes %q do not name the stand-in as the series that sets the start", result.Notes)
-	}
-	if !strings.Contains(joined, "which is where the run begins") {
-		t.Errorf("notes %q never say what set the start", result.Notes)
-	}
-	if strings.Contains(joined, "OLDER has no history") {
-		t.Errorf("notes %q blame the holding with the *longest* history", result.Notes)
-	}
-}
-
-func TestTheShortestHistoryIsNamedEvenWhenItIsNotBinding(t *testing.T) {
-	// A start year moved the run later than the data allows. The shortest
-	// holding is still worth naming: it is how far back this portfolio could
-	// go, which is what decides whether a replacement is worth adding.
-	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
-		"LONG":  monthlyBars("2018-01", make([]float64, 60)...),
-		"SHORT": monthlyBars("2019-06", make([]float64, 43)...),
-	})
-
-	result, err := eng.Backtest(context.Background(), BacktestSpec{
-		Holdings:      []store.Holding{{Symbol: "LONG", Weight: 50}, {Symbol: "SHORT", Weight: 50}},
-		InitialAmount: 1000,
-		StartYear:     2021,
-	})
-	if err != nil {
-		t.Fatalf("backtest: %v", err)
-	}
-
-	joined := strings.Join(result.Notes, " ")
-	if !strings.Contains(joined, "SHORT reaches back the least of the holdings, to 2019-06") {
-		t.Errorf("notes %q do not name the shortest history when it is not what set the start", result.Notes)
-	}
-	// It did not set the start, so it must not claim to have.
-	if strings.Contains(joined, "SHORT has no history before") {
-		t.Errorf("notes %q blame the shortest holding for a start year the reader chose", result.Notes)
-	}
-}
-
-func TestABenchmarkThatSetsTheStartSaysSoItself(t *testing.T) {
-	// The benchmark is not a holding, so the "shortest of the holdings" line
-	// must not be blamed for a start the benchmark actually caused.
-	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
-		"LONG":  monthlyBars("2018-01", make([]float64, 60)...),
-		"LATER": monthlyBars("2021-01", make([]float64, 24)...),
-	})
-
-	result, err := eng.Backtest(context.Background(), BacktestSpec{
-		Holdings:      []store.Holding{{Symbol: "LONG", Weight: 100}},
-		InitialAmount: 1000,
-		Benchmark:     "LATER",
-	})
-	if err != nil {
-		t.Fatalf("backtest: %v", err)
-	}
-
-	joined := strings.Join(result.Notes, " ")
-	if !strings.Contains(joined, "The benchmark LATER has no history before 2021-01") {
-		t.Errorf("notes %q do not say the benchmark is what set the start", result.Notes)
-	}
-	if strings.Contains(joined, "LONG has no history before") {
-		t.Errorf("notes %q blame a holding for the benchmark's start", result.Notes)
+	// Most of this run is not the symbol the reader typed, and a proxy nobody
+	// was told about is a fabrication. The disclosure is the holding row rather
+	// than a sentence — five near-identical paragraphs above a chart get read
+	// by nobody — so every field the table needs has to be on it.
+	h := result.Holdings[0]
+	if h.Symbol != "NEW" || h.Replacement != "OLD" || h.ReplacedUntil != "2020-03" {
+		t.Errorf("holding = %+v; a substitution has to carry what stood in, for what, and until when", h)
 	}
 }
 

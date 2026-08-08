@@ -744,7 +744,7 @@ function renderPortfolios(data) {
       <div class="card__body">
         ${
           portfolios.length === 0
-            ? `<div class="empty"><strong>No portfolios yet</strong>Add one to see what a mix of funds would have returned. Holdings don't have to be on the watchlist.</div>`
+            ? `<div class="empty"><strong>No portfolios yet</strong>Add one to see what a mix of funds would have returned. Holdings don't have to be on the watchlist — and the portfolio itself joins it automatically, priced live and published with everything else.</div>`
             : portfolios.map(portfolioRow).join('')
         }
       </div>
@@ -774,14 +774,6 @@ function portfolioRow(p) {
       <div class="card__head">
         <h3 class="card__title">
           ${esc(p.name)}
-          ${
-            // Every portfolio has a watchlist row, and this is the key it is
-            // published under — the thing a downstream dashboard reads it by,
-            // so it is worth saying here rather than only on the watchlist.
-            portfolioSymbol(p)
-              ? `<span class="chip chip--portfolio">${esc(portfolioSymbol(p))}</span>`
-              : ''
-          }
           ${p.benchmark ? `<span class="chip">vs ${esc(p.benchmark)}</span>` : ''}
         </h3>
         <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
@@ -815,6 +807,19 @@ function portfolioRow(p) {
           } · ${esc(period)} ·
           ${esc(REBALANCE_LABELS[p.rebalance] ?? p.rebalance)}
         </p>
+        ${
+          // Said in words rather than as a bare chip. The chip showed the same
+          // symbol and left "how do I put this on the watchlist?" a fair
+          // question to still be asking — the answer being that it already is,
+          // which a label has to actually say.
+          portfolioSymbol(p)
+            ? `<p class="field__hint" style="margin:0.3rem 0 0">
+                 On the watchlist as
+                 <a class="quote__formula" href="#/">${esc(portfolioSymbol(p))}</a>,
+                 priced every refresh and published with everything else.
+               </p>`
+            : ''
+        }
       </div>
     </div>
   `;
@@ -871,6 +876,7 @@ function renderBacktest(data) {
     </div>
 
     ${(b.notes ?? []).map((note) => `<p class="field__hint backtest-note">${esc(note)}</p>`).join('')}
+    ${replacementsTable(b)}
 
     <div class="card">
       <div class="card__body">
@@ -890,6 +896,40 @@ function renderBacktest(data) {
     </div>
 
   `;
+}
+
+/** Which holdings were stood in for, and until when.
+ *
+ *  A table rather than a paragraph each. One substitution reads fine as a
+ *  sentence; five read as five near-identical sentences filling the screen
+ *  above the chart, at which point nobody reads any of them — including the one
+ *  line beside them that is not boilerplate. The same facts, scannable, in a
+ *  fifth of the height. */
+function replacementsTable(b) {
+  const swapped = (b.holdings ?? []).filter((h) => h.replacedUntil);
+  if (!swapped.length) return '';
+
+  return `
+    <div class="card backtest-swaps">
+      <div class="card__head">
+        <h3 class="card__title">Replacements</h3>
+        <span class="field__hint">a stand-in's returns cover the months before the holding listed</span>
+      </div>
+      <div class="card__body" style="padding:0">
+        <div class="table-scroll"><table class="table">
+          <thead><tr><th>Holding</th><th>Stood in by</th><th>Own data from</th></tr></thead>
+          <tbody>${swapped
+            .map(
+              (h) => `<tr>
+                <th>${esc(h.symbol)}</th>
+                <td><span class="quote__formula">${esc(h.replacement)}</span></td>
+                <td class="field__hint">${esc(monthName(h.replacedUntil))}</td>
+              </tr>`,
+            )
+            .join('')}</tbody>
+        </table></div>
+      </div>
+    </div>`;
 }
 
 /** The growth curve, and the benchmark's alongside it when there is one.

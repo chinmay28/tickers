@@ -688,17 +688,15 @@ func window(months []string, startYear, endYear int) []string {
 func startNotes(start string, holdings []HoldingResult, benchmark, benchmarkFirst string) []string {
 	notes := []string{}
 
-	// Substitutions first, and one note each rather than a combined one. A
-	// stand-in is the strongest caveat on the page — most of the run may not be
-	// the holding the reader typed — so it is never compressed into a list.
-	for _, h := range holdings {
-		if h.ReplacedUntil == "" {
-			continue
-		}
-		notes = append(notes, fmt.Sprintf(
-			"%s has no history before %s, so %s stands in for every month before it.",
-			h.Symbol, h.ReplacedUntil, h.Replacement))
-	}
+	// Substitutions are *not* prose. Each one used to get its own sentence,
+	// which read fine for one and became five near-identical paragraphs above
+	// the chart for a portfolio that leans on them — at which point nobody
+	// reads any of them, including the one sentence here that is not
+	// boilerplate. They are disclosed as a table instead, built by the client
+	// from the Holdings rows, which carry every field those sentences did.
+	//
+	// What stays prose is the fact that is different every time and that the
+	// numbers depend on: where the run starts, and what decided that.
 
 	// Which holding reaches back the least, *after* any substitution — a
 	// stand-in changes the answer, and the answer people want is about the
