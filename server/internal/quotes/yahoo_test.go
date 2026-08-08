@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +44,39 @@ const metaOnlyJSON = `{
     "result": [{
       "meta": { "currency": "EUR", "symbol": "VWRL.AS", "regularMarketPrice": 123.45, "previousClose": 120.00 },
       "indicators": { "quote": [{ "close": [null, null] }] }
+    }],
+    "error": null
+  }
+}`
+
+// historyJSON is a daily /v8/finance/chart response.
+//
+// The three details that matter, all of them real: the timestamps are the
+// session's own open in UTC (21:00 the previous day for an exchange 13 hours
+// ahead), there is an adjusted series alongside the raw closes, and one of its
+// entries is null — a session that produced no trade.
+const historyJSON = `{
+  "chart": {
+    "result": [{
+      "meta": { "currency": "NZD", "symbol": "AIR.NZ", "gmtoffset": 46800 },
+      "timestamp": [1704229200, 1704315600, 1704402000],
+      "indicators": {
+        "quote": [{ "close": [10.0, 11.0, 12.0] }],
+        "adjclose": [{ "adjclose": [9.5, null, 11.5] }]
+      }
+    }],
+    "error": null
+  }
+}`
+
+// rawOnlyHistoryJSON is what comes back for an instrument with no adjustments
+// to make — a currency pair, a crypto ticker.
+const rawOnlyHistoryJSON = `{
+  "chart": {
+    "result": [{
+      "meta": { "currency": "USD", "symbol": "BTC-USD", "gmtoffset": 0 },
+      "timestamp": [1704153600, 1704240000],
+      "indicators": { "quote": [{ "close": [42000.0, 43000.0] }] }
     }],
     "error": null
   }
@@ -204,6 +239,66 @@ func TestFetchHonoursCancelledContext(t *testing.T) {
 	}
 	if failures["VTI"] == nil {
 		t.Error("cancellation was not reported as a per-symbol failure")
+	}
+}
+
+func TestHistoryPrefersAdjustedClosesAndDropsGaps(t *testing.T) {
+	var query url.Values
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		w.Write([]byte(historyJSON))
+	})
+
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	bars, err := y.History(context.Background(), "air.nz", since)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+
+	// Explicit epochs, not a named range: a five-year return needs a close from
+	// before five years ago, which "range=5y" cannot be asked for.
+	if got := query.Get("period1"); got != strconv.FormatInt(since.Unix(), 10) {
+		t.Errorf("period1 = %q, want the requested start %d", got, since.Unix())
+	}
+	if query.Get("interval") != "1d" {
+		t.Errorf("interval = %q, want 1d", query.Get("interval"))
+	}
+
+	if len(bars) != 2 {
+		t.Fatalf("got %d bars, want 2 — the null adjusted close is a session with no trade and must be dropped", len(bars))
+	}
+	// 9.5, not the raw 10.0: an unadjusted five-year chart of a stock that has
+	// split shows a crash nobody experienced.
+	if bars[0].Close != 9.5 || bars[1].Close != 11.5 {
+		t.Errorf("closes = %v, want the adjusted series", bars)
+	}
+	// 21:00 UTC on 2 January is the 3rd in Auckland, and the exchange's day is
+	// what a composite aligns its legs on.
+	if bars[0].Date != "2024-01-03" || bars[1].Date != "2024-01-05" {
+		t.Errorf("dates = %q/%q, want the exchange's own calendar days", bars[0].Date, bars[1].Date)
+	}
+}
+
+func TestHistoryFallsBackToRawCloses(t *testing.T) {
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(rawOnlyHistoryJSON))
+	})
+
+	bars, err := y.History(context.Background(), "BTC-USD", time.Now().AddDate(-1, 0, 0))
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(bars) != 2 || bars[0].Close != 42000 || bars[1].Date != "2024-01-03" {
+		t.Errorf("bars = %+v; an instrument with no adjusted series still has closes", bars)
+	}
+}
+
+func TestHistoryReportsUpstreamFailures(t *testing.T) {
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	if _, err := y.History(context.Background(), "NOPE", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("History error = %v, want ErrNotFound for a 404", err)
 	}
 }
 

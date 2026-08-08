@@ -3,6 +3,7 @@ package quotes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,32 +142,49 @@ func (y *Yahoo) Fetch(ctx context.Context, symbols []string) (map[string]Quote, 
 	return quotes, failures
 }
 
-// chartResponse is the slice of Yahoo's /v8/finance/chart payload we use.
+// chartResponse is the slice of Yahoo's /v8/finance/chart payload we use. The
+// same shape answers both the 1-minute quote request and the daily history
+// request; which fields are populated is the only difference.
 type chartResponse struct {
 	Chart struct {
-		Result []struct {
-			Meta struct {
-				Currency           string  `json:"currency"`
-				Symbol             string  `json:"symbol"`
-				ExchangeName       string  `json:"exchangeName"`
-				ShortName          string  `json:"shortName"`
-				LongName           string  `json:"longName"`
-				MarketState        string  `json:"marketState"`
-				RegularMarketPrice float64 `json:"regularMarketPrice"`
-				PreviousClose      float64 `json:"previousClose"`
-				ChartPreviousClose float64 `json:"chartPreviousClose"`
-			} `json:"meta"`
-			Indicators struct {
-				Quote []struct {
-					Close []*float64 `json:"close"`
-				} `json:"quote"`
-			} `json:"indicators"`
-		} `json:"result"`
-		Error *struct {
+		Result []chartResult `json:"result"`
+		Error  *struct {
 			Code        string `json:"code"`
 			Description string `json:"description"`
 		} `json:"error"`
 	} `json:"chart"`
+}
+
+type chartResult struct {
+	Meta struct {
+		Currency           string  `json:"currency"`
+		Symbol             string  `json:"symbol"`
+		ExchangeName       string  `json:"exchangeName"`
+		ShortName          string  `json:"shortName"`
+		LongName           string  `json:"longName"`
+		MarketState        string  `json:"marketState"`
+		RegularMarketPrice float64 `json:"regularMarketPrice"`
+		PreviousClose      float64 `json:"previousClose"`
+		ChartPreviousClose float64 `json:"chartPreviousClose"`
+		// GMTOffset turns a bar's timestamp into the exchange's own calendar
+		// day. Without it a Tokyo close lands on the wrong side of midnight
+		// UTC.
+		GMTOffset int64 `json:"gmtoffset"`
+	} `json:"meta"`
+	// Timestamp is one epoch second per bar, parallel to the close series.
+	Timestamp  []int64 `json:"timestamp"`
+	Indicators struct {
+		Quote    []closeSeries    `json:"quote"`
+		AdjClose []adjCloseSeries `json:"adjclose"`
+	} `json:"indicators"`
+}
+
+type closeSeries struct {
+	Close []*float64 `json:"close"`
+}
+
+type adjCloseSeries struct {
+	AdjClose []*float64 `json:"adjclose"`
 }
 
 func (y *Yahoo) fetchOne(ctx context.Context, symbol string) (Quote, error) {
@@ -218,6 +236,72 @@ func (y *Yahoo) fetchOne(ctx context.Context, symbol string) (Quote, error) {
 		return Quote{}, fmt.Errorf("%s: %w", symbol, ErrNotFound)
 	}
 	return q, nil
+}
+
+// History implements Historian, reading daily bars from the same chart
+// endpoint the quote path uses.
+//
+// It asks with explicit period1/period2 epochs rather than one of Yahoo's named
+// ranges ("5y", "1y"). A five-year return needs the close from *before* five
+// years ago, and a named range starts on that boundary at best — so the caller
+// has to be able to ask for its own margin.
+func (y *Yahoo) History(ctx context.Context, symbol string, since time.Time) ([]Bar, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return nil, errors.New("a symbol is required")
+	}
+	settings, _ := y.current()
+	// period2 is a day out rather than now: the bar for a session still in
+	// progress is the one the user is looking at, and an exchange west of here
+	// can be trading on tomorrow's date already.
+	endpoint := fmt.Sprintf("%s/v8/finance/chart/%s?period1=%d&period2=%d&interval=1d&includePrePost=false",
+		settings.BaseURL, url.PathEscape(symbol), since.Unix(), time.Now().Add(24*time.Hour).Unix())
+
+	body, err := y.get(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed chartResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("decode history for %s: %w", symbol, err)
+	}
+	if parsed.Chart.Error != nil {
+		return nil, fmt.Errorf("%s: %s", symbol, parsed.Chart.Error.Description)
+	}
+	if len(parsed.Chart.Result) == 0 {
+		return nil, fmt.Errorf("%s: %w", symbol, ErrNotFound)
+	}
+
+	res := parsed.Chart.Result[0]
+	closes := historyCloses(res)
+	bars := make([]Bar, 0, len(res.Timestamp))
+	for i, ts := range res.Timestamp {
+		// A null close is a session with no trade — a holiday Yahoo still
+		// emits a slot for. Dropping it is right: a chart that interpolates
+		// across a gap and a return computed off a phantom close both lie.
+		if i >= len(closes) || closes[i] == nil {
+			continue
+		}
+		bars = append(bars, Bar{
+			Date:  time.Unix(ts+res.Meta.GMTOffset, 0).UTC().Format("2006-01-02"),
+			Close: *closes[i],
+		})
+	}
+	return bars, nil
+}
+
+// historyCloses prefers the split- and dividend-adjusted series and falls back
+// to the raw closes, which is all Yahoo returns for instruments that have
+// neither (currencies, crypto).
+func historyCloses(res chartResult) []*float64 {
+	if len(res.Indicators.AdjClose) > 0 && len(res.Indicators.AdjClose[0].AdjClose) > 0 {
+		return res.Indicators.AdjClose[0].AdjClose
+	}
+	if len(res.Indicators.Quote) > 0 {
+		return res.Indicators.Quote[0].Close
+	}
+	return nil
 }
 
 // searchResponse is the slice of Yahoo's /v1/finance/search payload we use.
@@ -303,9 +387,7 @@ func (y *Yahoo) get(ctx context.Context, endpoint string) ([]byte, error) {
 	return body, nil
 }
 
-func lastClose(series []struct {
-	Close []*float64 `json:"close"`
-}) (float64, bool) {
+func lastClose(series []closeSeries) (float64, bool) {
 	if len(series) == 0 {
 		return 0, false
 	}

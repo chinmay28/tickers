@@ -444,6 +444,10 @@ svg {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+  /* Double-tapping a row opens its performance sheet, and the browser's own
+     double-tap gesture is page zoom. `manipulation` gives up that gesture (and
+     with it the 300ms click delay) so the second tap reaches the handler. */
+  touch-action: manipulation;
 }
 .quote--disabled {
   opacity: 0.55;
@@ -841,6 +845,93 @@ svg {
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
+/* The performance sheet is a chart plus a table, and both want more width than
+   a form does. */
+.sheet--wide {
+  width: min(46rem, calc(100vw - 1.5rem));
+}
+
+.perf-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.perf-head__value {
+  font-family: var(--mono);
+  font-size: 1.5rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.perf-head__ccy {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.perf-head__delta {
+  text-align: right;
+}
+.perf-change {
+  font-family: var(--mono);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.perf-head__delta .perf-change {
+  font-size: 1.1rem;
+}
+.perf-change--up {
+  color: var(--up);
+}
+.perf-change--down {
+  color: var(--down);
+}
+.perf-change--flat {
+  color: var(--muted);
+}
+/* The compound annual rate, beside the total it is derived from. */
+.perf-annual {
+  margin-left: 0.45rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.perf-ranges {
+  margin: 0.8rem 0 0.2rem;
+}
+
+/* One line of scrub output, given its own row so the chart never reflows as
+   the value under the finger changes width. */
+.perf-readout {
+  min-height: 1.25rem;
+  margin-top: 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.perf-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* Pinned to the viewBox, because the scrub handler maps a pointer's x
+     straight back to a point index — letterboxing would put the crosshair
+     under the wrong day at every width but one. */
+  aspect-ratio: 640 / 240;
+  /* A sideways drag reads the line; an up-and-down one still scrolls the
+     sheet it sits in. */
+  touch-action: pan-y;
+}
+.perf-chart__tick {
+  fill: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.perf-note {
+  margin: 0.8rem 0 0;
+}
+
 .hint-more {
   margin-top: 0.35rem;
 }

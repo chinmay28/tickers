@@ -95,8 +95,39 @@ type Match struct {
 	Type     string `json:"type"`
 }
 
+// Bar is one day's closing value, adjusted for splits and dividends where the
+// provider reports an adjusted series. Adjusted is what a return wants: an
+// unadjusted five-year chart of a stock that split 4:1 shows a 75% crash that
+// nobody experienced.
+//
+// Date is the exchange's own calendar day rather than an instant, because that
+// is the key a composite's legs are aligned on — a close in Auckland stamped in
+// UTC lands on the previous day and would never line up with a US leg.
+type Bar struct {
+	// Date is YYYY-MM-DD in the exchange's timezone.
+	Date  string
+	Close float64
+}
+
+// Historian is a provider that can also return past closes, for the
+// performance view.
+//
+// It is optional for the same reason Configurable is: the refresh loop only
+// ever needs today's price, so a provider that knows nothing else is still a
+// complete Provider. Callers type-assert, and say so when the assertion fails.
+type Historian interface {
+	// History returns daily bars from since until now, oldest first. A symbol
+	// the provider has no data for in that window comes back empty rather than
+	// as an error — "nothing traded" is an answer.
+	History(ctx context.Context, symbol string, since time.Time) ([]Bar, error)
+}
+
 // ErrNoSearch is returned by providers that can only price a known symbol.
 var ErrNoSearch = errors.New("this quote provider does not support symbol search")
+
+// ErrNoHistory is what a caller gets when the quote source can only price
+// today — the performance view is unavailable rather than broken.
+var ErrNoHistory = errors.New("this quote provider does not supply price history")
 
 // ErrNotFound means the provider has no such symbol.
 var ErrNotFound = errors.New("no quote for that symbol")

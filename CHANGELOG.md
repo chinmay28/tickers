@@ -7,6 +7,34 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Historical performance, on a double-tap
+
+**Double-tap (or double-click) a watchlist row** and it opens a sheet with a
+chart of that symbol's daily closes and a table of its returns.
+
+- Returns over **1 week, 1 month, 3 months, year to date, 1 year, 3 years and
+  5 years**, each measured from the last close *on or before* the period's
+  start — markets are shut at weekends. The three- and five-year rows also show
+  a compound annual rate.
+- A period the series doesn't reach back to says **"not enough history"**
+  rather than quietly measuring a young listing from its first day.
+- Range chips (1M/3M/6M/YTD/1Y/5Y) re-slice the chart without another request,
+  and dragging across the line reads off any single day.
+- The series comes from the quote source, not from the stored sparkline
+  history: that is pruned to a window measured in hours and can only say what a
+  symbol did today. Closes are adjusted for splits and dividends where the
+  source reports them, and each bar is dated by its own exchange's calendar.
+- **Composites get the same sheet**, recomputed from the formula on every day
+  all of its legs traded. Days where a leg was shut are dropped rather than
+  carried forward — a ratio for a day one leg didn't trade never existed.
+- Series are cached per symbol for ten minutes, so a repeated double-tap costs
+  one fetch and a composite over symbols already on the watchlist costs none.
+
+New endpoint `GET /api/tickers/{id}/performance`. Past prices are an optional
+provider capability (`quotes.Historian`), so a quote source that can only price
+today keeps working and the sheet says what is missing instead of failing. No
+schema change: nothing about this is stored.
+
 ### Composite tickers
 
 A watchlist row can now be a **formula over other symbols** instead of a

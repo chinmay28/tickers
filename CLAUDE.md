@@ -110,6 +110,13 @@ returns everything the client renders in one round trip.
   working.
 - **History is keyed by symbol, not ticker ID,** so deleting a ticker leaves its
   series behind and re-adding brings the chart back.
+- **There are two histories, from two places.** `quote_history` is the
+  sparkline's — one point per cycle, pruned to a window measured in hours.
+  The performance sheet's five-year series is fetched from the provider through
+  `quotes.Historian`, an *optional* interface asserted at the call site like
+  `Configurable`; a provider without it gets `ErrNoHistory` and a 501, not a
+  failure. Composite series are the refresh cycle's pricing run once per day,
+  with the legs' dates intersected.
 - **Settings are a key/value table** so adding one never needs a migration. An
   unset key reads back as its default, not as zero — that distinction is what
   lets "unpin everything" differ from "never configured".

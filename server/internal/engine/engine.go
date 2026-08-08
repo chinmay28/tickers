@@ -39,6 +39,10 @@ type Engine struct {
 	running bool
 	nextRun time.Time
 	lastRun *store.Run
+	// historyCache holds fetched daily series by symbol, for the performance
+	// sheet. See performance.go — it is under this mutex because it is read
+	// from HTTP handlers while the loop is running.
+	historyCache map[string]historyEntry
 
 	// kick asks the loop to run now and then resume its schedule. Buffered by
 	// one: several nudges in quick succession collapse into a single run,
@@ -55,11 +59,12 @@ func New(st *store.Store, provider quotes.Provider, publisher *publish.Publisher
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Engine{
-		store:     st,
-		provider:  provider,
-		publisher: publisher,
-		log:       log,
-		kick:      make(chan struct{}, 1),
+		store:        st,
+		provider:     provider,
+		publisher:    publisher,
+		log:          log,
+		kick:         make(chan struct{}, 1),
+		historyCache: map[string]historyEntry{},
 	}
 }
 

@@ -859,6 +859,84 @@ func TestCompositeHistoryIsServedLikeAnyOther(t *testing.T) {
 	}
 }
 
+// historianProvider is a stubProvider that also has a past, for the
+// performance sheet.
+type historianProvider struct {
+	stubProvider
+	bars map[string][]quotes.Bar
+}
+
+func (h historianProvider) History(_ context.Context, symbol string, _ time.Time) ([]quotes.Bar, error) {
+	return h.bars[symbol], nil
+}
+
+func TestPerformanceEndpointServesTheChartAndTheReturns(t *testing.T) {
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	provider := historianProvider{
+		stubProvider: stubProvider{prices: map[string]float64{"VTI": 300}},
+		bars: map[string][]quotes.Bar{"VTI": {
+			{Date: time.Now().UTC().AddDate(-2, 0, 0).Format("2006-01-02"), Close: 100},
+			{Date: time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02"), Close: 180},
+			{Date: yesterday, Close: 200},
+		}},
+	}
+	h := newHarness(t, provider)
+
+	_, state := h.do(t, http.MethodGet, "/api/state", nil)
+	id, _ := findTicker(t, state, "VTI")["id"].(string)
+
+	rec, body := h.do(t, http.MethodGet, "/api/tickers/"+id+"/performance", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+	perf, _ := body["performance"].(map[string]any)
+	if perf["symbol"] != "VTI" {
+		t.Fatalf("performance = %v", perf)
+	}
+	if points, _ := perf["points"].([]any); len(points) != 3 {
+		t.Errorf("got %d points, want the 3 daily closes the provider has", len(points))
+	}
+
+	// Every window comes back whether or not the series reaches it, so the
+	// table can say "not enough history" rather than quietly losing a row.
+	returns, _ := perf["returns"].([]any)
+	if len(returns) != 7 {
+		t.Fatalf("got %d return windows, want all 7: %v", len(returns), returns)
+	}
+	byKey := map[string]map[string]any{}
+	for _, entry := range returns {
+		r, _ := entry.(map[string]any)
+		byKey[r["key"].(string)], _ = entry.(map[string]any)
+	}
+	if year := byKey["1y"]; year["available"] != true || year["changePercent"].(float64) != 100 {
+		t.Errorf("1y = %v, want an available +100%% (100 → 200)", year)
+	}
+	if five := byKey["5y"]; five["available"] != false {
+		t.Errorf("5y = %v; a two-year series has no five-year return", five)
+	}
+
+	if rec, _ := h.do(t, http.MethodGet, "/api/tickers/nope/performance", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("performance for an unknown ticker returned %d, want 404", rec.Code)
+	}
+}
+
+func TestPerformanceSaysSoWhenTheProviderHasNoHistory(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+
+	_, state := h.do(t, http.MethodGet, "/api/state", nil)
+	id, _ := findTicker(t, state, "VTI")["id"].(string)
+
+	// A provider that can only price today is a choice, not a fault: the sheet
+	// gets a sentence it can show rather than a 500 and a log line.
+	rec, body := h.do(t, http.MethodGet, "/api/tickers/"+id+"/performance", nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status %d, want 501", rec.Code)
+	}
+	if msg, _ := body["error"].(string); !strings.Contains(msg, "history") {
+		t.Errorf("error = %q, want it to name what is missing", msg)
+	}
+}
+
 // findTicker pulls one row out of a /api/state body by symbol.
 func findTicker(t *testing.T, state map[string]any, symbol string) map[string]any {
 	t.Helper()
