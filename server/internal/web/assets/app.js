@@ -467,7 +467,6 @@ function renderWatchlist(data) {
         <h2 class="card__title">${data.tickers.length} ${
           data.tickers.length === 1 ? 'symbol' : 'symbols'
         }</h2>
-        <span class="field__hint">Drag to reorder — the order is the payload's order. Pinned symbols stay on top.</span>
       </div>
       <div class="card__body">
         ${
