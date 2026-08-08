@@ -239,8 +239,12 @@ reinvested — this is a total return, not a price chart.
 - **Every calendar year**, with the first and last labelled *part year* where
   the run doesn't cover them end to end.
 - The run starts at the latest month all of its holdings have data for, whatever
-  start year you ask for, and **says which holding set that date**. A four-fund
-  portfolio asked for 1985 will start in 1996 if one of its funds launched then.
+  start year you ask for, and **names the holding that reaches back the least**
+  — after any replacement, since a stand-in changes the answer. A four-fund
+  portfolio asked for 1985 will start in 1996 and say which fund launched then.
+  The shortest holding is named even when it isn't what set the start, because
+  it is how far back the portfolio *could* go and so what decides whether
+  another replacement is worth adding.
 - **Replacements for historical data** — give a holding a stand-in symbol and
   the stand-in's returns cover every month before the holding's own history
   begins. `QQQ` behind `HOOD` turns a five-year run into a twenty-five-year one.

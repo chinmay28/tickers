@@ -84,6 +84,13 @@ listing truncate the whole portfolio.
 - A stand-in with no data at the splice month is **ignored rather than guessed
   at**: there is nothing to anchor the scale to, and the run falls back to the
   holding's own history.
+- The result **names the holding that reaches back the least, after any
+  replacement** — "QQQ (standing in for HOOD) has no history before 1999-03"
+  rather than a note about HOOD, which is not what runs out in 1999. It is named
+  even when something else set the start, because it is how far back the
+  portfolio could go and so what decides whether another replacement is worth
+  adding. A benchmark that sets the start says so in its own sentence, since it
+  is not a holding.
 
 ### Portfolios on a phone
 
