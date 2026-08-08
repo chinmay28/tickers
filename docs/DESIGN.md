@@ -469,6 +469,40 @@ in. Its distance from the bottom is a token (`--fab-inset`) because the toasts
 read it too and stack above the button rather than landing on it, and because
 the phone layout has to lift both clear of the tab bar.
 
+### The on-screen keyboard
+
+A bottom sheet and a soft keyboard fight over the same edge of the screen, and
+the keyboard wins by default. **A modal dialog is positioned against the
+*layout* viewport, which the keyboard does not shrink** — so a sheet pinned to
+the bottom puts its Add button behind the keyboard the instant you tap the
+field above it. The field stays visible (the browser scrolls it into view); the
+button you need next does not.
+
+The *visual* viewport does shrink, so the difference between the two is how
+much the keyboard is covering. `trackKeyboard` publishes it as
+`--keyboard-inset`, and the phone layout sits the sheet on top of that and
+takes the same height out of its `max-height`. It degrades to `0px` everywhere
+it doesn't apply — desktop, keyboard down, or a browser without
+`visualViewport` — so nothing reading it needs a fallback branch.
+
+Two details that are easy to get wrong:
+
+- **The actions live outside the scrolling body**, in a `.sheet__foot` pinned
+  to the bottom of the sheet, attached to the form by the `form` attribute.
+  When the keyboard takes half the screen the sheet shrinks to fit above it,
+  and a submit button that scrolled with the fields would be exactly the thing
+  that disappeared.
+- **A collapsing URL bar is not a keyboard.** It moves the visual viewport by
+  60–100px, so the class that hides the tab bar and the FAB is gated at 150px;
+  without the threshold the bottom chrome flickers away as you scroll the
+  watchlist.
+
+The same media query also puts every input on a phone at `font-size: 16px`.
+Below 16px, iOS Safari zooms the page in the moment a field is tapped, and
+leaves you zoomed and scrolled sideways with no obvious way back. The
+`min-height` alongside it takes those fields, the sheet's buttons, its close
+button and the formula disclosure past the 44px touch target.
+
 Caching is split on purpose: the shell, `app.js`, `styles.css` and the manifest
 are `no-cache`, while icons and the badge get a day. An upgrade that left a
 cached `app.js` talking to a new API is exactly the failure the non-disruptive

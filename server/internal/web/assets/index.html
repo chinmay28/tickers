@@ -120,23 +120,35 @@
                    placeholder="AAPL, BTC-USD, VTI/GLD" required />
             <span class="field__hint">
               A formula makes a <strong>composite</strong> — a row priced from
-              other symbols instead of fetched. <code>VTI/GLD</code>,
-              <code>P/VTI</code>, <code>(VTI+GLD)/2</code> all work, with
-              <code>+ − × ÷</code> and brackets. Write a subtraction with spaces
-              (<code>VTI - GLD</code>); an unspaced hyphen belongs to symbols
-              like <code>BTC-USD</code>.
+              other symbols: <code>VTI/GLD</code>, <code>P/VTI</code>.
             </span>
+            <!-- The rest is worth having and not worth a quarter of a phone
+                 screen every time the sheet opens, so it folds away. -->
+            <details class="hint-more">
+              <summary>More about formulas</summary>
+              <span class="field__hint">
+                <code>+ − × ÷</code>, brackets and plain numbers all work, so
+                <code>(VTI+GLD)/2</code> is a row too. Write a subtraction with
+                spaces (<code>VTI - GLD</code>) — an unspaced hyphen belongs to
+                symbols like <code>BTC-USD</code>.
+              </span>
+            </details>
           </div>
           <div class="field" style="margin-top:0.8rem">
             <label class="field__label" for="add-label">Label <span style="text-transform:none">(optional)</span></label>
             <input class="input" id="add-label" name="label" placeholder="Rainy-day fund" />
           </div>
-          <div class="form-actions">
-            <button class="btn btn--primary" type="submit">Add</button>
-            <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
-          </div>
         </form>
         <div class="matches" id="matches"></div>
+      </div>
+      <!-- The actions sit outside the scrolling body so they are pinned to the
+           bottom of the sheet, always in view. When the keyboard takes half the
+           screen the sheet shrinks to fit above it, and a submit button that
+           scrolled with the fields would be the thing that disappeared. The
+           `form` attribute is what lets them stay attached from out here. -->
+      <div class="sheet__foot">
+        <button class="btn btn--primary" type="submit" form="add-form">Add</button>
+        <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
       </div>
     </dialog>
 
