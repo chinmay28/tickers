@@ -50,6 +50,10 @@ type Settings struct {
 	// services, and an install that can reach one this binary has never heard
 	// of should not have to wait for a release to use it.
 	LogoURL string `json:"logoUrl"`
+	// LogoKey authenticates the logo request. It never appears in the settings
+	// the UI is served — see store.Config — and this struct's own JSON drops it
+	// too, because Effective() is what the Settings page renders.
+	LogoKey string `json:"-"`
 }
 
 // Merge overlays the non-zero fields of override onto s.
@@ -65,6 +69,9 @@ func (s Settings) Merge(override Settings) Settings {
 	}
 	if override.LogoURL != "" {
 		s.LogoURL = override.LogoURL
+	}
+	if override.LogoKey != "" {
+		s.LogoKey = override.LogoKey
 	}
 	return s
 }
@@ -167,6 +174,17 @@ type Distributor interface {
 	Dividends(ctx context.Context, symbol string, since time.Time) ([]Distribution, error)
 }
 
+// LogoValidators is what a previous fetch left behind so the next one can be
+// conditional: an ETag, a Last-Modified date, or neither.
+//
+// They travel back to the provider rather than being interpreted here — their
+// only meaning is "what the source said last time", and only the source knows
+// whether that is still true.
+type LogoValidators struct {
+	ETag         string
+	LastModified string
+}
+
 // Logo is one symbol's brand image, as bytes. It is bytes rather than a URL
 // because the caller caches it: the point of the feature is that a browser
 // never talks to whoever drew it, and a URL handed to the client would defeat
@@ -174,6 +192,8 @@ type Distributor interface {
 type Logo struct {
 	ContentType string
 	Bytes       []byte
+	// Validators are what to send on the next check.
+	Validators LogoValidators
 	// Source is the URL the image came from, kept for the record. Nothing
 	// reads it at runtime — it is there so "where did this picture come from?"
 	// is answerable from the database.
@@ -187,10 +207,14 @@ type Logo struct {
 // provider that would rather not do that simply doesn't implement it and the
 // feature disappears rather than half-works.
 type Iconographer interface {
-	// Logo returns the image for a symbol, or ErrNoLogo if the source knows
-	// the symbol and has no picture of it. Anything else is a real failure and
-	// is worth retrying later.
-	Logo(ctx context.Context, symbol string) (Logo, error)
+	// Logo returns the image for a symbol, or ErrNoLogo if the source knows the
+	// symbol and has no picture of it. Anything else is a real failure and is
+	// worth retrying later.
+	//
+	// `known` is what the last fetch of this symbol left behind, zero if there
+	// wasn't one. A provider that can make the request conditional should, and
+	// returns ErrLogoUnchanged when the source says nothing has moved.
+	Logo(ctx context.Context, symbol string, known LogoValidators) (Logo, error)
 }
 
 // ErrNoSearch is returned by providers that can only price a known symbol.
@@ -199,6 +223,11 @@ var ErrNoSearch = errors.New("this quote provider does not support symbol search
 // ErrNoLogos is what a caller gets when the quote source cannot supply logos
 // at all — the marks stay as they are drawn rather than anything being broken.
 var ErrNoLogos = errors.New("this quote provider does not supply logos")
+
+// ErrLogoUnchanged means the source was asked whether the image had changed and
+// said no. It is the good outcome of a re-check: nothing was transferred, and
+// the caller's stored copy is still current.
+var ErrLogoUnchanged = errors.New("that logo has not changed")
 
 // ErrNoLogo means the source looked and this particular symbol hasn't got one.
 // It is a durable answer, not a failure: an index fund has no logo today and
@@ -212,11 +241,16 @@ var ErrNoHistory = errors.New("this quote provider does not supply price history
 // ErrNotFound means the provider has no such symbol.
 var ErrNotFound = errors.New("no quote for that symbol")
 
-// LogoPlaceholders are what a logo URL template may contain. One of them has to
-// be there, or every symbol would be given the same picture.
+// What a logo URL template may contain. One of the symbol tokens has to be
+// there, or every symbol would be given the same picture.
 const (
 	LogoSymbolToken      = "{symbol}"
 	LogoSymbolLowerToken = "{symbol_lower}"
+	// LogoKeyToken is where the key goes when the service wants it in the URL.
+	// Its absence is meaningful: a key configured with no `{key}` in the
+	// template is sent as a bearer token instead, which is how the same field
+	// serves both kinds of credential these services hand out.
+	LogoKeyToken = "{key}"
 )
 
 // ExpandLogoURL fills a logo template in for one symbol.
@@ -224,8 +258,38 @@ const (
 // The symbol is path-escaped: a template can put it in a path segment or a
 // query, and `BRK-B` is fine in both but a symbol with a slash in it would
 // otherwise silently address a different path.
-func ExpandLogoURL(template, symbol string) string {
+func ExpandLogoURL(template, symbol, key string) string {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	out := strings.ReplaceAll(template, LogoSymbolToken, url.PathEscape(symbol))
-	return strings.ReplaceAll(out, LogoSymbolLowerToken, url.PathEscape(strings.ToLower(symbol)))
+	out = strings.ReplaceAll(out, LogoSymbolLowerToken, url.PathEscape(strings.ToLower(symbol)))
+	return strings.ReplaceAll(out, LogoKeyToken, url.QueryEscape(key))
+}
+
+// RedactLogoURL is that URL with the credential taken back out, for anywhere it
+// might be written down.
+//
+// A logo URL ends up in three places a key has no business being: an error
+// message, the `source` column of the cache, and — through the reason on a
+// tombstone — the Settings page of an app with no login on it. Redacting at
+// the point of use rather than remembering to do it at each of those is what
+// keeps a key out of all three.
+func RedactLogoURL(src, key string) string {
+	if key != "" {
+		src = strings.ReplaceAll(src, key, "…")
+		src = strings.ReplaceAll(src, url.QueryEscape(key), "…")
+	}
+	// Also by name, because a template can carry a token this build never saw:
+	// pasted straight into the URL rather than into the key field.
+	parsed, err := url.Parse(src)
+	if err != nil {
+		return src
+	}
+	query := parsed.Query()
+	for _, name := range []string{"token", "key", "apikey", "api_key", "access_token"} {
+		if query.Has(name) {
+			query.Set(name, "…")
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }

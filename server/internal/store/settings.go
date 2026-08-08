@@ -24,6 +24,7 @@ const (
 	SettingPinnedSymbols    = "pinned_symbols"
 	SettingLogos            = "logos_enabled"
 	SettingLogoURL          = "logo_url_template"
+	SettingLogoKey          = "logo_api_key"
 	SettingSeeded           = "seeded"
 )
 
@@ -42,6 +43,9 @@ const (
 	// the cap is what stops a paste from turning the setting into a second
 	// watchlist.
 	MaxPinnedSymbols = 50
+	// MaxLogoKeyLen bounds the logo credential. Generous, because these are
+	// opaque strings and some services issue long ones.
+	MaxLogoKeyLen = 256
 	// MaxLogoURLLen bounds the logo template. Long enough for a service URL
 	// with a token in it, short enough that the field is not a paste target.
 	MaxLogoURLLen = 512
@@ -100,6 +104,19 @@ type Config struct {
 	// the next cycles ask the new source rather than serving the old one's
 	// answers.
 	LogoURLTemplate string `json:"logoUrlTemplate"`
+
+	// LogoKey authenticates the logo request — a bearer token, or the value
+	// for `{key}` where the template carries one.
+	//
+	// It is `json:"-"` and that is the whole point. Config is what /api/state
+	// serves to every browser that loads the page, on an app with no login;
+	// a secret that rides along in it is a secret pasted into anyone's view
+	// source and into any screenshot of the Settings page. LogoKeySet below
+	// carries the only part the UI actually needs.
+	LogoKey string `json:"-"`
+	// LogoKeySet says whether one is stored, so the field can show that it is
+	// configured without showing what it is.
+	LogoKeySet bool `json:"logoKeySet"`
 }
 
 // DefaultConfig is what a fresh install runs with: a five-minute poll (the
@@ -187,6 +204,12 @@ func (s *Store) Config() (Config, error) {
 	} else {
 		cfg.LogoURLTemplate = v
 	}
+	if v, err := s.Setting(SettingLogoKey); err != nil {
+		return cfg, err
+	} else {
+		cfg.LogoKey = v
+		cfg.LogoKeySet = v != ""
+	}
 	return cfg, nil
 }
 
@@ -232,6 +255,10 @@ type ConfigPatch struct {
 	PinnedSymbols       *[]string `json:"pinnedSymbols"`
 	Logos               *bool     `json:"logos"`
 	LogoURLTemplate     *string   `json:"logoUrlTemplate"`
+	// LogoKey is write-only: a nil field leaves the stored key alone, which is
+	// what a settings form that cannot show the current value has to mean when
+	// its box is empty. Sending "" is how you delete it.
+	LogoKey *string `json:"logoKey"`
 }
 
 // UpdateConfig validates and persists a patch, returning the config as it now
@@ -310,6 +337,26 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		}
 		cfg.LogoURLTemplate = v
 	}
+	if patch.LogoKey != nil {
+		v := strings.TrimSpace(*patch.LogoKey)
+		if len(v) > MaxLogoKeyLen {
+			return cfg, fmt.Errorf("the logo key cannot be longer than %d characters", MaxLogoKeyLen)
+		}
+		if strings.ContainsAny(v, "\r\n") {
+			// It goes into a request header, where a newline would let the
+			// value append headers of its own.
+			return cfg, errors.New("the logo key cannot contain line breaks")
+		}
+		// A new credential invalidates the old one's answers the same way a new
+		// URL does — a key that was wrong yesterday left tombstones that say so.
+		if v != cfg.LogoKey {
+			if _, err := s.ForgetLogos(); err != nil {
+				return cfg, err
+			}
+		}
+		cfg.LogoKey = v
+		cfg.LogoKeySet = v != ""
+	}
 	if patch.Logos != nil {
 		// Turning it off empties the cache. A drawer of third-party images
 		// nobody wants any more should not outlive the setting that filled it,
@@ -333,6 +380,7 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		SettingPinnedSymbols:    strings.Join(cfg.PinnedSymbols, ","),
 		SettingLogos:            strconv.FormatBool(cfg.Logos),
 		SettingLogoURL:          cfg.LogoURLTemplate,
+		SettingLogoKey:          cfg.LogoKey,
 	}); err != nil {
 		return cfg, err
 	}
@@ -347,6 +395,7 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 const (
 	logoSymbolToken      = "{symbol}"
 	logoSymbolLowerToken = "{symbol_lower}"
+	logoKeyToken         = "{key}"
 )
 
 // validateLogoURLTemplate accepts an empty value (meaning "let the provider
@@ -374,6 +423,7 @@ func validateLogoURLTemplate(raw string) error {
 	// placeholder is gone — `{symbol}` in a host would parse as nothing useful.
 	filled := strings.ReplaceAll(raw, logoSymbolToken, "TEST")
 	filled = strings.ReplaceAll(filled, logoSymbolLowerToken, "test")
+	filled = strings.ReplaceAll(filled, logoKeyToken, "KEY")
 	parsed, err := url.Parse(filled)
 	if err != nil {
 		return errors.New("that logo URL is not a URL")

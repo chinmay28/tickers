@@ -143,13 +143,30 @@ function markInitials(symbol) {
   return (text.replace(/[^A-Za-z0-9]/g, '').slice(0, 2) || text.slice(0, 2)).toUpperCase();
 }
 
-/** Does the server hold a real logo for this symbol?
+/** The version of this symbol's logo, or undefined if it hasn't got one.
  *
- *  The list rides along with the state payload rather than being guessed at.
+ *  The map rides along with the state payload rather than being guessed at.
  *  Pointing an `<img>` at every symbol and letting the misses 404 would cost a
- *  failed request per fund, per crypto pair and per composite on every load. */
-function hasLogo(symbol) {
-  return Boolean(state.data?.logos?.includes(symbol));
+ *  failed request per fund, per crypto pair and per composite on every load.
+ *
+ *  The value is *when* the image was stored, and it goes in the URL: the bytes
+ *  are served with a day of browser caching, so without it a logo you just
+ *  replaced would keep showing the old one until tomorrow. */
+function logoVersion(symbol) {
+  return state.data?.logos?.[symbol]?.v;
+}
+
+/** Was this one uploaded? It decides what "remove" promises: deleting your own
+ *  picture, or throwing away a cached one that comes back tomorrow. */
+function isCustomLogo(symbol) {
+  return Boolean(state.data?.logos?.[symbol]?.custom);
+}
+
+/** The endpoint for one symbol's image. Symbols reach it as a single path
+ *  segment — a composite's `VTI/GLD` has to arrive as one, not as two. */
+function logoURL(symbol, version) {
+  const path = `/api/logos/${encodeURIComponent(symbol)}`;
+  return version ? `${path}?v=${encodeURIComponent(version)}` : path;
 }
 
 /** The square that sits in front of a symbol wherever one is listed.
@@ -160,18 +177,21 @@ function hasLogo(symbol) {
  *  puts it in the same box — the drawn mark stays underneath, so a picture
  *  that fails to load leaves the initials showing rather than a hole.
  *
- *  The two computed kinds take a glyph in their own hue instead, and never a
- *  logo. Neither is a symbol anyone issued, and a picture over `VTI/GLD` would
- *  claim otherwise; the obelus and the pie say "priced from a formula" and
- *  "priced from a basket", which is what the row's outline says too. */
+ *  The two computed kinds are *never fetched* a logo — neither is a symbol
+ *  anyone issued, so there is nothing upstream to ask for — and fall back to a
+ *  glyph in their own hue: the obelus and the pie say "priced from a formula"
+ *  and "priced from a basket", which is what the row's outline says too. An
+ *  uploaded picture still wins for them, because somebody choosing one for
+ *  their own portfolio knows better than this rule does. */
 function symbolMark(symbol, kind = '') {
-  if (kind === 'composite') {
+  const version = logoVersion(symbol);
+  if (!version && kind === 'composite') {
     return `<span class="mark mark--composite" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
         <path d="M5 12h14"/><circle cx="12" cy="7" r="1.1" fill="currentColor"/><circle cx="12" cy="17" r="1.1" fill="currentColor"/>
       </svg></span>`;
   }
-  if (kind === 'portfolio') {
+  if (!version && kind === 'portfolio') {
     return `<span class="mark mark--portfolio" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M14 3.2A9 9 0 0 1 20.8 10H14z"/>
@@ -180,8 +200,8 @@ function symbolMark(symbol, kind = '') {
   // The image sits on top of the initials rather than instead of them: with an
   // empty alt a picture that never arrives collapses to nothing and the drawn
   // mark is simply still there. No error handler, no second render pass.
-  const logo = hasLogo(symbol)
-    ? `<img class="mark__logo" src="/api/logos/${encodeURIComponent(symbol)}" alt="" loading="lazy" />`
+  const logo = version
+    ? `<img class="mark__logo" src="${esc(logoURL(symbol, version))}" alt="" loading="lazy" />`
     : '';
   return `<span class="mark${logo ? ' mark--logo' : ''}" style="--mark-h:${markHue(
     symbol,
@@ -380,7 +400,10 @@ function isTyping() {
 function readForm(form) {
   const values = {};
   for (const el of form.elements) {
-    if (!el.name || !isField(el)) continue;
+    // A file input is skipped rather than stashed: its value is not assignable,
+    // so putting one back after a redraw throws, and there is nothing to put
+    // back anyway — choosing a file uploads it there and then.
+    if (!el.name || !isField(el) || el.type === 'file') continue;
     values[el.name] = el.type === 'checkbox' ? el.checked : el.value;
   }
   return values;
@@ -607,6 +630,38 @@ function renderMatches() {
     .join('');
 }
 
+/** The logo control for one row: what it has, a way to replace it, and — for
+ *  an uploaded one — a way to take it back off.
+ *
+ *  Removing a *fetched* logo is deliberately not offered. It would come back
+ *  on the next daily pass, so the button would be a promise the app cannot
+ *  keep; uploading over it is the way to change what a row shows. */
+function logoField(symbol) {
+  const custom = isCustomLogo(symbol);
+  return `
+    <div class="field field--logo">
+      <label class="field__label">Logo</label>
+      <div class="logo-edit">
+        ${symbolMark(symbol)}
+        <label class="btn btn--sm btn--outline">
+          ${custom ? 'Replace image' : 'Upload an image'}
+          <input type="file" accept="image/png,image/jpeg,image/gif,image/webp"
+                 data-logo-upload="${esc(symbol)}" hidden />
+        </label>
+        ${
+          custom
+            ? `<button class="btn btn--sm btn--ghost" type="button"
+                       data-action="remove-logo" data-symbol="${esc(symbol)}">Remove image</button>`
+            : ''
+        }
+      </div>
+      <span class="field__hint">
+        PNG, JPEG, GIF or WebP, up to 256 KB. It is stored here and served from
+        this server, and the daily logo refresh leaves an uploaded image alone.
+      </span>
+    </div>`;
+}
+
 function renderQuote(t) {
   const q = t.quote;
   const editing = state.editing.has(t.id);
@@ -682,7 +737,8 @@ function renderQuote(t) {
       <div class="quote__actions">
         ${
           portfolio
-            ? `<a class="btn btn--sm btn--outline" href="#/portfolios">Open</a>`
+            ? `<a class="btn btn--sm btn--outline" href="#/portfolios">Open</a>
+               <button class="btn btn--sm btn--ghost" data-action="edit" data-id="${esc(t.id)}">Edit</button>`
             : `<button class="btn btn--sm btn--outline" data-action="edit" data-id="${esc(t.id)}">Edit</button>`
         }
         <button class="btn btn--sm btn--ghost" data-action="pin" data-id="${esc(t.id)}">
@@ -703,21 +759,31 @@ function renderQuote(t) {
       ${
         editing
           ? `<form class="quote__edit" data-edit="${esc(t.id)}" data-form-key="ticker:${esc(t.id)}" autocomplete="off">
-              <div class="field">
-                <label class="field__label">${composite ? 'Formula' : 'Symbol'}</label>
-                ${
-                  // The field's *name* is what tells the submit handler which
-                  // of the two this row is; the server re-derives the symbol
-                  // from the formula either way.
-                  composite
-                    ? `<input class="input input--mono" name="expression" value="${esc(t.expression)}" required />`
-                    : `<input class="input input--mono" name="symbol" value="${esc(t.symbol)}" required />`
-                }
-              </div>
+              ${
+                // A portfolio's symbol is its name and belongs to the
+                // Portfolios page, so its form offers the two things that are
+                // this row's own: what it is called here, and what it looks
+                // like. The absent field is also what the submit handler keys
+                // off to leave the symbol alone.
+                portfolio
+                  ? ''
+                  : `<div class="field">
+                      <label class="field__label">${composite ? 'Formula' : 'Symbol'}</label>
+                      ${
+                        // The field's *name* is what tells the submit handler
+                        // which of the two this row is; the server re-derives
+                        // the symbol from the formula either way.
+                        composite
+                          ? `<input class="input input--mono" name="expression" value="${esc(t.expression)}" required />`
+                          : `<input class="input input--mono" name="symbol" value="${esc(t.symbol)}" required />`
+                      }
+                    </div>`
+              }
               <div class="field">
                 <label class="field__label">Label</label>
                 <input class="input" name="label" value="${esc(t.label)}" placeholder="optional" />
               </div>
+              ${logoField(t.symbol)}
               <button class="btn btn--sm btn--primary" type="submit">Save</button>
               <button class="btn btn--sm btn--ghost" type="button" data-action="cancel-edit" data-id="${esc(t.id)}">Cancel</button>
             </form>`
@@ -1571,12 +1637,34 @@ function renderSettings(data) {
                    value="${esc(s.logoUrlTemplate)}" placeholder="the quote source's own" />
             <span class="field__hint">
               Where a logo comes from, with <code>{symbol}</code> standing in for
-              the ticker (<code>{symbol_lower}</code> for the lower-case form).
-              Leave it blank to use whatever the quote source itself offers —
-              which for Yahoo is a logo on some search results and nothing at
-              all for most symbols. Changing this clears the cache, so the next
-              few refreshes ask the new source.
+              the ticker (<code>{symbol_lower}</code> for the lower-case form,
+              <code>{key}</code> for the key below). Leave it blank to use
+              whatever the quote source itself offers — which for Yahoo is a
+              logo on some search results and nothing at all for most symbols.
+              Changing this clears the cache, so the next few refreshes ask the
+              new source.
             </span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="logoKey">Logo key</label>
+            <input class="input input--mono" id="logoKey" name="logoKey" type="password"
+                   autocomplete="off" spellcheck="false"
+                   placeholder="${s.logoKeySet ? 'stored — type to replace' : 'none'}" />
+            <span class="field__hint">
+              For a source that wants credentials. Put <code>{key}</code> in the
+              URL above and it goes there; leave it out and it is sent as a
+              bearer token instead — which is where a server-side secret
+              belongs. It is never sent back to this page, so an empty box means
+              "leave it as it is".
+            </span>
+            ${
+              s.logoKeySet
+                ? `<label class="checkbox">
+                     <input type="checkbox" name="forgetLogoKey" />
+                     Forget the stored key
+                   </label>`
+                : ''
+            }
           </div>
         </div>
 
@@ -1688,6 +1776,32 @@ function nudge(id, delta) {
   act(() => post('/tickers/reorder', { ids }));
 }
 
+/** Send a chosen file as one symbol's logo.
+ *
+ *  The file is the whole request body rather than a multipart form: the input
+ *  hands over a File, `fetch` sends it as-is, and the server has the bytes
+ *  without a form parser in between. The response is small; what matters is
+ *  reloading state afterwards, since the mark's URL carries a version that has
+ *  just changed. */
+async function uploadLogo(symbol, file) {
+  const res = await fetch(logoURL(symbol), { method: 'PUT', body: file });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.error || `upload failed (${res.status})`);
+  }
+}
+
+$('#view').addEventListener('change', (event) => {
+  const input = event.target.closest('[data-logo-upload]');
+  if (!input || !input.files?.length) return;
+  const symbol = input.dataset.logoUpload;
+  const file = input.files[0];
+  // Cleared straight away: leaving the file selected would re-upload it if the
+  // form were submitted, and the input is thrown away by the next redraw.
+  input.value = '';
+  act(() => uploadLogo(symbol, file), { success: `${symbol}'s logo updated` });
+});
+
 $('#view').addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
@@ -1697,6 +1811,11 @@ $('#view').addEventListener('click', (event) => {
     case 'edit':
       state.editing.add(id);
       render({ force: true });
+      break;
+    case 'remove-logo':
+      act(() => del(`/logos/${encodeURIComponent(button.dataset.symbol)}`), {
+        success: 'Logo removed',
+      });
       break;
     case 'cancel-edit':
       state.editing.delete(id);
@@ -1834,7 +1953,7 @@ $('#view').addEventListener('submit', (event) => {
     // reinterpreted as a symbol, and vice versa.
     const payload = { label: (values.label || '').trim() };
     if ('expression' in values) payload.expression = (values.expression || '').trim();
-    else payload.symbol = (values.symbol || '').trim();
+    else if ('symbol' in values) payload.symbol = (values.symbol || '').trim();
     act(
       async () => {
         await patch(`/tickers/${id}`, payload);
@@ -1882,6 +2001,15 @@ $('#view').addEventListener('submit', (event) => {
       // an empty list rather than being dropped from the payload.
       pinnedSymbols: symbolList(values.pinnedSymbols),
     };
+    // The key is the one field this page cannot show, so an empty box has to
+    // mean "unchanged" — sending "" on every save would wipe a stored key the
+    // moment anybody edited the refresh interval. Deleting it is therefore its
+    // own explicit tick rather than an empty box.
+    if (form.elements.forgetLogoKey?.checked) {
+      payload.logoKey = '';
+    } else if (values.logoKey) {
+      payload.logoKey = values.logoKey;
+    }
     // The quote-source fields only exist for a configurable provider. Send
     // them as strings so a cleared box reaches the server as "" — which is
     // how you ask for the default back — rather than being dropped.

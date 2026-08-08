@@ -85,7 +85,7 @@ tickers(id, symbol UNIQUE, expression, portfolio_id, label, position, enabled, o
 quotes(ticker_id PK → tickers, symbol, price, previous_close, currency,
        short_name, market_state, status, error, fetched_at)
 quote_history(id, symbol, price, at)
-logos(symbol PK, status, content_type, bytes, source, reason, fetched_at)
+logos(symbol PK, status, origin, content_type, bytes, source, reason, fetched_at)
 sinks(id, name, base_url, key, category, format, enabled, timeout_ms, …)
 portfolios(id, name, allocations, initial_amount, start_year, end_year,
            rebalance, benchmark, position, created_at, updated_at)
@@ -801,6 +801,31 @@ and an install that can reach a working source should not have to wait for a
 release. Changing the template **clears the cache**, because the previous
 source's answers, including everything it said had no logo, describe a source
 that is no longer being used.
+
+**A re-check asks whether anything changed.** The ETag and Last-Modified the
+last fetch returned are stored beside the image and sent back as
+`If-None-Match` and `If-Modified-Since`, so the usual outcome of a daily
+re-check is `304` and no body at all. A source offering neither is still
+handled: the bytes that come back are compared with the bytes already stored.
+Both paths end in the same place — the row's *checked* time moves and nothing
+else does.
+
+That distinction is why there are two timestamps. `fetched_at` answers "when did
+we last look?", which decides whether a symbol is due a check; `updated_at`
+answers "when did the picture last change?", which is what the client puts in
+the image URL to get past a day of browser caching. With one column the two
+uses fight: a re-check that found nothing new moved the version, and every
+browser re-downloaded an image it already had — turning a feature meant to save
+requests into one that generated them.
+
+**A fetched answer stands for a day.** Logos change when a company rebrands, so
+asking more often is wasted requests; but never re-asking — where this started —
+was worse than it looked, because it made a wrong URL, an expired key and a
+source that was down for an hour into permanent answers that only a manual
+cache clear could undo. A day is long enough to cost nothing and short enough
+that a mistake fixes itself overnight. The window covers the noes as well:
+those are most of the cache, and exactly the rows a corrected setting has to be
+able to overturn.
 
 Most symbols have no logo, which is why **"there isn't one" is stored** as a
 row with no image in it. Without that tombstone every fund, index and crypto

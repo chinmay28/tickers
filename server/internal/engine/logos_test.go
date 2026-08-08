@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -19,21 +20,33 @@ type iconProvider struct {
 	images map[string][]byte
 	broken map[string]bool
 	asked  []string
+	// conditional records the validators each call was made with, so a test can
+	// assert that a re-check actually asked "has it changed?".
+	conditional []quotes.LogoValidators
+	// unchanged makes the source answer a conditional request with "no".
+	unchanged map[string]bool
 }
 
-func (i *iconProvider) Logo(_ context.Context, symbol string) (quotes.Logo, error) {
+func (i *iconProvider) Logo(_ context.Context, symbol string, known quotes.LogoValidators) (quotes.Logo, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.asked = append(i.asked, symbol)
+	i.conditional = append(i.conditional, known)
 
 	if i.broken[symbol] {
 		return quotes.Logo{}, errors.New("the logo host is having a day")
+	}
+	if i.unchanged[symbol] && (known.ETag != "" || known.LastModified != "") {
+		return quotes.Logo{}, quotes.ErrLogoUnchanged
 	}
 	img, ok := i.images[symbol]
 	if !ok {
 		return quotes.Logo{}, quotes.ErrNoLogo
 	}
-	return quotes.Logo{ContentType: "image/png", Bytes: img, Source: "https://example.test/" + symbol}, nil
+	return quotes.Logo{
+		ContentType: "image/png", Bytes: img, Source: "https://example.test/" + symbol,
+		Validators: quotes.LogoValidators{ETag: `"v1-` + symbol + `"`},
+	}, nil
 }
 
 func (i *iconProvider) logoCalls() []string {
@@ -69,7 +82,7 @@ func TestCycleCachesLogosAndTombstones(t *testing.T) {
 		t.Errorf("GLD has no logo upstream but the cache serves one: %v", err)
 	}
 
-	asked, err := st.AskedAboutLogos()
+	asked, err := st.SettledLogos(time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("asked set: %v", err)
 	}
@@ -102,7 +115,7 @@ func TestLogoFailuresAreRetried(t *testing.T) {
 	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
-	asked, err := st.AskedAboutLogos()
+	asked, err := st.SettledLogos(time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("asked set: %v", err)
 	}
@@ -175,5 +188,192 @@ func TestProviderWithoutLogosIsFine(t *testing.T) {
 	}
 	if run.Error != "" {
 		t.Errorf("cycle reported %q; a missing optional capability is not a failure", run.Error)
+	}
+}
+
+func TestAnUploadedLogoIsNeverFetchedOver(t *testing.T) {
+	provider := &iconProvider{
+		fakeProvider: fakeProvider{prices: map[string]float64{"VTI": 300}},
+		images:       map[string][]byte{"VTI": []byte("from upstream")},
+	}
+	eng, st := newTestEngine(t, provider)
+	enableLogos(t, st)
+
+	mine := []byte("my own picture")
+	if err := st.SaveLogo(store.Logo{
+		Symbol: "VTI", Status: store.LogoOK, Origin: store.LogoCustom,
+		ContentType: "image/png", Bytes: mine,
+		// Old enough that a fetched one would be long overdue a refresh.
+		FetchedAt: time.Now().Add(-30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save upload: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	for _, symbol := range provider.logoCalls() {
+		if symbol == "VTI" {
+			t.Fatal("the cycle asked upstream about a symbol whose logo was uploaded")
+		}
+	}
+	got, err := st.Logo("VTI")
+	if err != nil {
+		t.Fatalf("read logo: %v", err)
+	}
+	if string(got.Bytes) != string(mine) {
+		t.Error("an uploaded image was replaced by whatever the source had")
+	}
+}
+
+func TestStaleAnswersAreAskedAgain(t *testing.T) {
+	provider := &iconProvider{
+		fakeProvider: fakeProvider{prices: map[string]float64{"VTI": 300}},
+		images:       map[string][]byte{"VTI": {0x89, 'P', 'N', 'G'}},
+	}
+	eng, st := newTestEngine(t, provider)
+	enableLogos(t, st)
+
+	// A "no" from before the source was configured properly, older than the TTL.
+	if err := st.SaveLogo(store.Logo{
+		Symbol: "VTI", Status: store.LogoNone, Reason: "rejected the request (HTTP 401)",
+		FetchedAt: time.Now().Add(-2 * logoTTL),
+	}); err != nil {
+		t.Fatalf("save tombstone: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if _, err := st.Logo("VTI"); err != nil {
+		t.Errorf("a day-old 'no' was never revisited, so a fixed setting could not take "+
+			"effect without clearing the cache by hand: %v", err)
+	}
+}
+
+func TestFreshAnswersAreLeftAlone(t *testing.T) {
+	provider := &iconProvider{
+		fakeProvider: fakeProvider{prices: map[string]float64{"VTI": 300}},
+		images:       map[string][]byte{"VTI": {0x89, 'P', 'N', 'G'}},
+	}
+	eng, st := newTestEngine(t, provider)
+	enableLogos(t, st)
+
+	if err := st.SaveLogo(store.Logo{
+		Symbol: "VTI", Status: store.LogoNone, Reason: "no logo here",
+		FetchedAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("save tombstone: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	for _, symbol := range provider.logoCalls() {
+		if symbol == "VTI" {
+			t.Error("an hour-old answer was asked again; logos change about never and the " +
+				"whole point of caching them is not to re-ask every cycle")
+		}
+	}
+}
+
+func TestADailyRecheckCostsNothingWhenNothingChanged(t *testing.T) {
+	provider := &iconProvider{
+		fakeProvider: fakeProvider{prices: map[string]float64{"VTI": 300}},
+		images:       map[string][]byte{"VTI": []byte("the original image")},
+	}
+	eng, st := newTestEngine(t, provider)
+	enableLogos(t, st)
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("first cycle: %v", err)
+	}
+	first, err := st.Logo("VTI")
+	if err != nil {
+		t.Fatalf("read logo: %v", err)
+	}
+	if first.ETag == "" {
+		t.Fatal("the validator was not stored, so tomorrow's check cannot be conditional")
+	}
+
+	// Age it past the TTL and let the source say it hasn't moved.
+	if err := st.TouchLogo("VTI", time.Now().Add(-2*logoTTL)); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+	provider.mu.Lock()
+	provider.unchanged = map[string]bool{"VTI": true}
+	provider.mu.Unlock()
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("second cycle: %v", err)
+	}
+
+	// It asked, and it asked conditionally.
+	var asked bool
+	provider.mu.Lock()
+	for i, symbol := range provider.asked {
+		if symbol == "VTI" && provider.conditional[i].ETag == first.ETag {
+			asked = true
+		}
+	}
+	provider.mu.Unlock()
+	if !asked {
+		t.Error("the re-check did not send the stored validator, so the source could not " +
+			"answer 'unchanged' and the image was downloaded again")
+	}
+
+	after, err := st.Logo("VTI")
+	if err != nil {
+		t.Fatalf("read logo: %v", err)
+	}
+	if string(after.Bytes) != string(first.Bytes) {
+		t.Error("an unchanged logo was rewritten")
+	}
+	if after.FetchedAt.Before(time.Now().Add(-time.Minute)) {
+		t.Errorf("fetched_at is %v; an unchanged answer still has to reset the clock, or the "+
+			"symbol is re-asked on every cycle from now on", after.FetchedAt)
+	}
+	if !after.UpdatedAt.Equal(first.UpdatedAt) {
+		t.Error("a 304 moved the image's version, so every browser re-downloads a picture " +
+			"that never changed")
+	}
+}
+
+func TestAnIdenticalImageIsNotRewritten(t *testing.T) {
+	// A source with no ETag and no Last-Modified: the only way to know whether
+	// anything changed is to look at what came back.
+	provider := &iconProvider{
+		fakeProvider: fakeProvider{prices: map[string]float64{"VTI": 300}},
+		images:       map[string][]byte{"VTI": []byte("byte for byte the same")},
+	}
+	eng, st := newTestEngine(t, provider)
+	enableLogos(t, st)
+
+	if err := st.SaveLogo(store.Logo{
+		Symbol: "VTI", Status: store.LogoOK, ContentType: "image/png",
+		Bytes:     []byte("byte for byte the same"),
+		FetchedAt: time.Now().Add(-2 * logoTTL),
+	}); err != nil {
+		t.Fatalf("seed the cache: %v", err)
+	}
+	before, _ := st.Logo("VTI")
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	after, err := st.Logo("VTI")
+	if err != nil {
+		t.Fatalf("read logo: %v", err)
+	}
+	if !after.FetchedAt.After(before.FetchedAt) {
+		t.Error("the row was not touched, so it stays stale and is re-asked on every cycle")
+	}
+	// UpdatedAt is what the client puts in the image URL. Moving it for an
+	// identical picture would make every browser re-download it once a day.
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("the version moved from %v to %v for a byte-identical image",
+			before.UpdatedAt, after.UpdatedAt)
 	}
 }

@@ -713,6 +713,26 @@ svg {
   flex: 1 1 9rem;
   min-width: 0;
 }
+/* The logo takes the whole width of the edit form rather than sharing a line
+   with the symbol and label: it is a preview plus two buttons plus a sentence
+   about file sizes, and squeezed into a third of a phone it wraps into a
+   column of fragments. */
+.quote__edit .field--logo {
+  flex: 1 1 100%;
+}
+/* The logo row: what the mark looks like now, beside the buttons that change
+   it, so the preview updates in the same place you are looking. */
+.logo-edit {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+/* The file input is hidden inside its own label, which is what makes the
+   label the button — so it has to look and behave like one. */
+.logo-edit .btn {
+  cursor: pointer;
+}
 
 /* Symbol-search results in the add dialog. */
 .matches {

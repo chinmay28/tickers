@@ -139,8 +139,10 @@ shows the last price, the move from the previous close, a sparkline from stored
 history, and when it was last read. Each carries a small **mark**: by default the
 symbol's initials over a colour derived from the symbol itself, drawn locally so
 rows are told apart at a glance without a logo service knowing what you track.
-Turn **Symbol logos** on in Settings and the server fetches a real logo for each
-symbol and caches it — see below. Pinned symbols carry a `pinned` chip and
+**Edit** a row to upload your own image for it — that works for a symbol, a
+composite and a portfolio alike, needs nothing configured, and is left alone by
+everything else. Turn **Symbol logos** on in Settings and the server also
+fetches a real logo for each symbol it can — see below. Pinned symbols carry a `pinned` chip and
 always sort above the rest;
 **Pin**/**Unpin** on a row edits the same list the Settings page shows as text.
 Drag to reorder on a desktop, or use ↑↓ on a phone; **the watchlist order is
@@ -301,11 +303,16 @@ here rather than on a page of its own because almost every question it answers
 - *Pinned tickers* — the comma-separated symbols that sort to the top of the
   watchlist, up to 50. A symbol that isn't on the watchlist is ignored, so
   removing a ticker never means editing this too.
-- *Symbol logos* — off by default. On, the **server** fetches a real logo per
-  symbol and caches the image in the database, so it is fetched once and your
-  browser never talks to anyone else. Symbols with no logo — funds, crypto
-  pairs, composites, portfolios — keep the drawn mark. Turning it off again
-  empties the cache.
+- *Symbol logos* — off by default, and only about *fetching*: uploading your own
+  image on a row never needs it. On, the **server** fetches a logo per symbol
+  and caches the image in the database, so it is fetched once and your browser
+  never talks to anyone else. Symbols with no logo — funds, crypto pairs,
+  composites, portfolios — keep the drawn mark. A cached answer is re-checked
+  **once a day**, and the check asks the source *whether the image has changed*
+  rather than downloading it again — so a day's re-checking of a whole watchlist
+  normally transfers nothing at all. Turning the setting off
+  empties the fetched cache; **uploads are never touched**, by that or by the
+  daily refresh.
 
   **Logo URL** is where the pictures come from, with `{symbol}` standing in for
   the ticker (`{symbol_lower}` for the lower-case form). Left blank it uses
