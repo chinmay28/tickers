@@ -26,11 +26,19 @@ type Performance struct {
 	// Composite says the series was computed from a formula, leg by leg and
 	// day by day, rather than fetched.
 	Composite bool `json:"composite"`
-	// Points is the daily series, oldest first. The client slices it for
-	// whichever range the reader picked; sending it once is cheaper than a
-	// round trip per chip.
-	Points  []Point  `json:"points"`
+	// Points is the series to chart, oldest first, thinned by chartPoints. The
+	// client slices it for whichever range the reader picked; sending it once
+	// is cheaper than a round trip per chip.
+	Points []Point `json:"points"`
+	// Returns and Ranges are both computed from the *full* series, before any
+	// thinning, so the numbers are exact whatever the chart is drawn from.
+	//
+	// Both are always sent. A return is the natural reading of a price and a
+	// dubious one of a ratio — a composite has no capital in it to return —
+	// while a high, a low and where today sits between them mean the same
+	// thing for either. The client picks; the payload does not have to guess.
 	Returns []Return `json:"returns"`
+	Ranges  []Range  `json:"ranges"`
 }
 
 // Point is one day's value. Date rather than a timestamp because the series is
@@ -58,9 +66,34 @@ type Return struct {
 	// formula is a difference can sit at or below zero, and a percentage of
 	// that is noise wearing a percent sign.
 	ChangePercent *float64 `json:"changePercent"`
-	// Annualized is the compound annual rate, set only for windows longer than
-	// a year — over a year or less it would merely restate ChangePercent.
+	// Annualized is the compound annual rate, set only where the baseline is
+	// far enough back for one to mean something — over a year or less it would
+	// merely restate ChangePercent.
 	Annualized *float64 `json:"annualizedPercent"`
+}
+
+// Range is the high and low over one window, and where the latest value sits
+// between them.
+//
+// This is what a composite has instead of a return. "VTI/GLD is at 1.62,
+// against a five-year low of 1.02 and a high of 2.14" says something a reader
+// can act on; "VTI/GLD returned 8%" invites them to read a ratio as a holding.
+type Range struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	// Available is false unless the series covers the whole window — see
+	// windowStart, where the difference between covering one and merely
+	// falling inside it is the whole point.
+	Available bool    `json:"available"`
+	Low       float64 `json:"low"`
+	LowDate   string  `json:"lowDate"`
+	High      float64 `json:"high"`
+	HighDate  string  `json:"highDate"`
+	Latest    float64 `json:"latest"`
+	// Position is where Latest sits between Low and High, 0 on the low and 100
+	// on the high. Nil when the window never moved, because everywhere in a
+	// band of zero width is equally the top and the bottom of it.
+	Position *float64 `json:"position"`
 }
 
 // historyTTL is how long a fetched daily series is reused. The series gains a
@@ -70,17 +103,20 @@ type Return struct {
 // registered.
 const historyTTL = 10 * time.Minute
 
-// historySince is how far back a series is fetched. Two months past the longest
-// window, so the five-year return has a close from *before* five years ago to
-// measure from even across a long holiday or a trading halt.
-func historySince(now time.Time) time.Time { return now.AddDate(-5, -2, 0) }
+// historyStart is how far back a series is fetched: everything the source will
+// give up. "All time" has to mean it, and asking for a bounded window instead
+// would make the longest row a restatement of wherever that boundary fell.
+//
+// It is a fixed value rather than a per-call argument, and that is what makes
+// caching a series by symbol alone correct.
+func historyStart() time.Time { return time.Unix(0, 0).UTC() }
 
 // Performance assembles the history sheet for one ticker.
 //
 // Composites are priced here the same way the refresh cycle prices them —
 // evaluate the formula against a map of symbol to value — only once per day
-// instead of once per cycle. That is why a ratio gets a five-year chart without
-// anything having stored one.
+// instead of once per cycle. That is why a ratio gets a decade-long chart
+// without anything having stored one.
 func (e *Engine) Performance(ctx context.Context, tickerID string) (Performance, error) {
 	historian, ok := e.provider.(quotes.Historian)
 	if !ok {
@@ -97,15 +133,21 @@ func (e *Engine) Performance(ctx context.Context, tickerID string) (Performance,
 	now := time.Now().UTC()
 	perf := Performance{Symbol: t.Symbol, Label: t.Label, Composite: t.IsComposite()}
 
+	var full []Point
 	if t.IsComposite() {
-		perf.Points, err = e.compositeSeries(ctx, historian, t.Expression, historySince(now))
+		full, err = e.compositeSeries(ctx, historian, t.Expression, historyStart())
 	} else {
-		perf.Points, err = e.symbolSeries(ctx, historian, t.Symbol, historySince(now))
+		full, err = e.symbolSeries(ctx, historian, t.Symbol, historyStart())
 	}
 	if err != nil {
 		return Performance{}, err
 	}
-	perf.Returns = computeReturns(perf.Points, now)
+	// Measure first, thin second: an all-time high dropped by the thinning
+	// would still have to be reported, and reporting one the chart cannot show
+	// is worse than either.
+	perf.Returns = computeReturns(full, now)
+	perf.Ranges = computeRanges(full, now)
+	perf.Points = chartPoints(full, now)
 	return perf, nil
 }
 
@@ -245,21 +287,32 @@ func (e *Engine) cachedHistory(symbol string) ([]quotes.Bar, bool) {
 // the first of January, which is a holiday in every market there is.
 var windows = []struct {
 	key, label string
-	start      func(now time.Time) time.Time
-	// years is the window's length for annualising, and 0 for the windows
-	// short enough that a compound annual rate would be theatre.
-	years float64
+	// start is the day the window begins. Nil means the series' own beginning:
+	// "all time" is as far back as the source goes, which is the only honest
+	// definition available to something reading a third-party feed.
+	start func(now time.Time) time.Time
+	// ranged marks the windows that also get a high/low row. The very short
+	// ones don't: five sessions have a highest and a lowest close, but nobody
+	// calls that a range.
+	ranged bool
 }{
-	{"1w", "1 week", func(t time.Time) time.Time { return t.AddDate(0, 0, -7) }, 0},
-	{"1m", "1 month", func(t time.Time) time.Time { return t.AddDate(0, -1, 0) }, 0},
-	{"3m", "3 months", func(t time.Time) time.Time { return t.AddDate(0, -3, 0) }, 0},
+	{"1w", "1 week", func(t time.Time) time.Time { return t.AddDate(0, 0, -7) }, false},
+	{"1m", "1 month", func(t time.Time) time.Time { return t.AddDate(0, -1, 0) }, true},
+	{"3m", "3 months", func(t time.Time) time.Time { return t.AddDate(0, -3, 0) }, true},
 	{"ytd", "Year to date", func(t time.Time) time.Time {
 		return time.Date(t.Year()-1, time.December, 31, 0, 0, 0, 0, time.UTC)
-	}, 0},
-	{"1y", "1 year", func(t time.Time) time.Time { return t.AddDate(-1, 0, 0) }, 0},
-	{"3y", "3 years", func(t time.Time) time.Time { return t.AddDate(-3, 0, 0) }, 3},
-	{"5y", "5 years", func(t time.Time) time.Time { return t.AddDate(-5, 0, 0) }, 5},
+	}, true},
+	{"1y", "1 year", func(t time.Time) time.Time { return t.AddDate(-1, 0, 0) }, true},
+	{"3y", "3 years", func(t time.Time) time.Time { return t.AddDate(-3, 0, 0) }, false},
+	{"5y", "5 years", func(t time.Time) time.Time { return t.AddDate(-5, 0, 0) }, true},
+	{"10y", "10 years", func(t time.Time) time.Time { return t.AddDate(-10, 0, 0) }, true},
+	{"all", "All time", nil, true},
 }
+
+// annualiseAbove is how long a window has to be before a compound annual rate
+// is worth showing. Just over a year, so the "1 year" row doesn't print its own
+// total twice while an all-time row for a two-year-old listing still gets one.
+const annualiseAbove = 1.5
 
 // computeReturns measures every window against the latest point.
 //
@@ -272,7 +325,11 @@ func computeReturns(points []Point, now time.Time) []Return {
 		r := Return{Key: w.key, Label: w.label}
 		if len(points) > 0 {
 			latest := points[len(points)-1]
-			if base, ok := baseline(points, w.start(now)); ok && base.Date != latest.Date {
+			base, ok := points[0], true
+			if w.start != nil {
+				base, ok = baseline(points, w.start(now))
+			}
+			if ok && base.Date != latest.Date {
 				r.Available = true
 				r.From = base.Date
 				r.FromValue = base.Value
@@ -281,8 +338,12 @@ func computeReturns(points []Point, now time.Time) []Return {
 				if base.Value > 0 {
 					pct := r.Change / base.Value * 100
 					r.ChangePercent = &pct
-					if w.years > 0 && latest.Value > 0 {
-						annual := (math.Pow(latest.Value/base.Value, 1/w.years) - 1) * 100
+					// Annualised from the dates the baseline actually has, not
+					// from the window's nominal length: the "5 years" row is
+					// measured from a close five years and a few days back, and
+					// "all time" has no nominal length at all.
+					if years := yearsBetween(base.Date, latest.Date); years > annualiseAbove && latest.Value > 0 {
+						annual := (math.Pow(latest.Value/base.Value, 1/years) - 1) * 100
 						r.Annualized = &annual
 					}
 				}
@@ -293,12 +354,90 @@ func computeReturns(points []Point, now time.Time) []Return {
 	return out
 }
 
+// computeRanges finds the high and low inside each window, and where the latest
+// value sits between them.
+//
+// A range starts at the first close *inside* the window, where a return starts
+// at the last close *before* it. That is not an inconsistency: a return needs
+// something to measure from, and a high is only a high if it happened during
+// the period being claimed for it.
+func computeRanges(points []Point, now time.Time) []Range {
+	out := make([]Range, 0, len(windows))
+	for _, w := range windows {
+		if !w.ranged {
+			continue
+		}
+		r := Range{Key: w.key, Label: w.label}
+		if from, ok := windowStart(points, w.start, now); ok {
+			low, high := points[from], points[from]
+			for _, p := range points[from:] {
+				if p.Value < low.Value {
+					low = p
+				}
+				if p.Value > high.Value {
+					high = p
+				}
+			}
+			latest := points[len(points)-1]
+
+			r.Available = true
+			r.Low, r.LowDate = low.Value, low.Date
+			r.High, r.HighDate = high.Value, high.Date
+			r.Latest = latest.Value
+			if span := high.Value - low.Value; span > 0 {
+				position := (latest.Value - low.Value) / span * 100
+				r.Position = &position
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// windowStart is the index a window's data begins at, and whether the window is
+// reportable at all.
+//
+// The test is coverage, not overlap. Every close a symbol listed three weeks ago
+// has falls inside the last ten years, but calling their high a ten-year high is
+// the same fabrication as quoting that symbol a ten-year return — so a window is
+// only available when the series was already running when it opened.
+func windowStart(points []Point, start func(time.Time) time.Time, now time.Time) (int, bool) {
+	if len(points) == 0 {
+		return 0, false
+	}
+	if start == nil {
+		return 0, true
+	}
+	opened := start(now)
+	if points[0].Date > opened.UTC().Format("2006-01-02") {
+		return 0, false
+	}
+	from := firstOnOrAfter(points, opened)
+	// A series that stops before the window opens — a delisted symbol still on
+	// the watchlist — has no range inside it either.
+	return from, from < len(points)
+}
+
 // baseline is the last point on or before target — the close a return is
 // measured from. Weekends, holidays and halts all mean the window's nominal
 // start is usually not a trading day, so "on or before" is the whole job.
 func baseline(points []Point, target time.Time) (Point, bool) {
+	i := firstOnOrAfter(points, target)
+	// BinarySearchFunc lands on an exact match when there is one; otherwise on
+	// the insertion point, whose predecessor is the last earlier day.
+	if i < len(points) && points[i].Date == target.UTC().Format("2006-01-02") {
+		return points[i], true
+	}
+	if i == 0 {
+		return Point{}, false
+	}
+	return points[i-1], true
+}
+
+// firstOnOrAfter is the index of the earliest point dated on or after target,
+// or len(points) when the series ends before it.
+func firstOnOrAfter(points []Point, target time.Time) int {
 	date := target.UTC().Format("2006-01-02")
-	// The first point *after* the target, so the one before it is the answer.
 	i, _ := slices.BinarySearchFunc(points, date, func(p Point, date string) int {
 		switch {
 		case p.Date < date:
@@ -309,13 +448,86 @@ func baseline(points []Point, target time.Time) (Point, bool) {
 			return 0
 		}
 	})
-	// BinarySearchFunc lands on an exact match when there is one; otherwise on
-	// the insertion point, whose predecessor is the last earlier day.
-	if i < len(points) && points[i].Date == date {
-		return points[i], true
+	return i
+}
+
+// yearsBetween is the span between two YYYY-MM-DD dates in years, for
+// annualising. Zero if either won't parse, which reads as "don't annualise".
+func yearsBetween(from, to string) float64 {
+	start, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return 0
 	}
-	if i == 0 {
-		return Point{}, false
+	end, err := time.Parse("2006-01-02", to)
+	if err != nil {
+		return 0
 	}
-	return points[i-1], true
+	return end.Sub(start).Hours() / 24 / 365.25
+}
+
+// ---------------------------------------------------------------------------
+// Thinning the chart
+// ---------------------------------------------------------------------------
+
+// How much of the series keeps its daily resolution, and how much is thinned to
+// one point a week before the rest drops to one a month.
+const (
+	chartDailyYears  = 2
+	chartWeeklyYears = 10
+)
+
+// chartPoints thins a long series down to something worth sending and drawing.
+//
+// A symbol listed in the eighties has ten thousand daily closes, which is a
+// quarter of a megabyte on the wire and ten thousand segments in an SVG for a
+// phone to rasterise — to draw a line a few hundred pixels wide. The recent
+// years keep every session, because that is what the short ranges show; older
+// stretches keep one close a week and then one a month, which is what a decade
+// chart is anyway.
+//
+// The high and the low always survive. They are named in the ranges table, and
+// a peak the chart doesn't reach beside a number that says it happened is the
+// kind of disagreement that makes a reader distrust both.
+func chartPoints(points []Point, now time.Time) []Point {
+	if len(points) == 0 {
+		return points
+	}
+	daily := now.AddDate(-chartDailyYears, 0, 0).Format("2006-01-02")
+	weekly := now.AddDate(-chartWeeklyYears, 0, 0).Format("2006-01-02")
+
+	// Points inside a bucket collapse to their last one — the bucket's close.
+	bucket := func(p Point) string {
+		switch {
+		case p.Date >= daily:
+			return p.Date
+		case p.Date >= weekly:
+			at, err := time.Parse("2006-01-02", p.Date)
+			if err != nil {
+				return p.Date
+			}
+			year, week := at.ISOWeek()
+			return fmt.Sprintf("%04d-W%02d", year, week)
+		default:
+			return p.Date[:len("2006-01")]
+		}
+	}
+
+	low, high := 0, 0
+	for i, p := range points {
+		if p.Value < points[low].Value {
+			low = i
+		}
+		if p.Value > points[high].Value {
+			high = i
+		}
+	}
+
+	out := make([]Point, 0, len(points))
+	for i, p := range points {
+		closes := i == len(points)-1 || bucket(points[i+1]) != bucket(p)
+		if closes || i == 0 || i == low || i == high {
+			out = append(out, p)
+		}
+	}
+	return out
 }

@@ -284,10 +284,11 @@ Four decisions inside it, each with a failure it prevents:
   five years". They are different questions with different sources, and
   conflating them would have meant retaining a year of one-minute samples on an
   SD card to answer a question the provider answers in one GET.
-- **`period1`/`period2`, not `range=5y`.** A five-year return is measured from
-  the close *before* five years ago, and a named range starts on that boundary
-  at best. The engine asks for five years and two months, which also survives a
-  long holiday or a trading halt at the boundary.
+- **`period1`/`period2`, not a named range.** A ten-year return is measured from
+  the close *before* ten years ago, and a named range starts on that boundary at
+  best. The engine asks from the epoch — everything the source has, because
+  "all time" has to mean it and a bounded window would make the longest row a
+  restatement of wherever that bound fell.
 - **Adjusted closes where they exist.** An unadjusted five-year chart of a stock
   that split 4:1 shows a crash nobody experienced. Raw closes are the fallback
   for instruments with no adjustments to make — currencies, crypto.
@@ -304,6 +305,52 @@ never existed, on exactly the days a reader is most likely to be squinting at.
 Series are cached by *symbol* for ten minutes, which is both what stops a
 repeated double-tap repeating the fetch and what makes a composite over symbols
 already on the watchlist cost no extra requests.
+
+### Returns, ranges, and what each is for
+
+One window list, two projections of it.
+
+A **return** is the natural reading of a price and a category error on a ratio:
+there is no capital in `VTI/GLD` to have returned 8%, and printing that invites
+someone to read a ratio as a holding. A **range** — the high, the low, and where
+the latest value sits between them — says something true about either. So both
+are computed for every ticker and the client picks: returns for a symbol, ranges
+for a composite. Making that a payload decision instead would have meant the
+API's shape depending on the row, for no gain.
+
+The two disagree about where a window starts, on purpose:
+
+- A return is measured from the **last close on or before** the start. It needs
+  something to measure *from*, and the nominal start is usually a weekend.
+- A range covers only closes **inside** the window. A high is only a high if it
+  happened during the period being claimed for it.
+- A range is reported only when the series was already running when the window
+  opened. Every close a symbol listed three weeks ago has falls inside the last
+  ten years; calling their high a ten-year high is the same fabrication as
+  quoting that symbol a ten-year return.
+
+Annualised rates come from the dates the baseline actually has, not from the
+window's name — the "5 years" row is measured from a close five years and a few
+days back, and "all time" has no nominal length to use.
+
+### Thinning the chart
+
+A symbol listed in the eighties has ten thousand daily closes: a quarter of a
+megabyte on the wire, and ten thousand segments for a phone to rasterise into a
+line a few hundred pixels wide. The last two years keep every session, because
+that is what the short spans show; older stretches keep one close a week and
+then one a month.
+
+Two things follow, and both are load-bearing:
+
+- **The high and the low always survive the thinning.** They are named in the
+  ranges table, and a peak the chart cannot reach beside a number saying it
+  happened is the kind of disagreement that makes a reader distrust both.
+- **The chart's x axis is time, not index.** Mixed resolution makes those two
+  wildly different — spacing by index would give the most recent two years a
+  third of the width and squeeze thirty into the rest. Returns and ranges are
+  computed from the *full* series before any of this, so thinning changes what
+  is drawn and never what is claimed.
 
 ## Configuration precedence
 
@@ -525,9 +572,9 @@ the handler at all. The gesture is undiscoverable on its own, so the watchlist's
 blurb names it; it is deliberately *not* a sixth button, because five already
 have to fit one line at 390px.
 
-The server sends five years and the chips re-slice it client-side, so changing
-range is instant and costs no request. Two things the chart does that a naive
-one doesn't, both found by pointing it at a ratio of two legs that move
+The server sends the whole series and the chips re-slice it client-side, so
+changing span is instant and costs no request. Two things the chart does that a
+naive one doesn't, both found by pointing it at a ratio of two legs that move
 together:
 
 - **A series flat to within floating-point residue is drawn flat.** Scaling by

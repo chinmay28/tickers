@@ -896,8 +896,16 @@ svg {
   color: var(--muted);
 }
 
-.perf-ranges {
+.perf-spans {
   margin: 0.8rem 0 0.2rem;
+}
+
+/* The date a high or a low happened on, beside it rather than under it — the
+   table's rows stay one line tall either way. */
+.perf-when {
+  margin-left: 0.4rem;
+  font-size: 0.76rem;
+  color: var(--muted);
 }
 
 /* One line of scrub output, given its own row so the chart never reflows as
@@ -1147,6 +1155,15 @@ svg {
   .quote__name {
     max-width: 20ch;
   }
+  /* The range table has four columns and a phone has 390px. Stacking each
+     high and low over its date is what keeps the last column — where the
+     value sits between them, the one that turns two numbers into a reading —
+     on screen instead of behind a horizontal scroll. */
+  .perf-when {
+    display: block;
+    margin-left: 0;
+  }
+
   /* Five actions have to fit one line at 390px, or Remove wraps onto a row of
      its own and every card grows by 2rem. Tighter than the desktop sizing, but
      still comfortably past the 44px touch target on the vertical axis. */

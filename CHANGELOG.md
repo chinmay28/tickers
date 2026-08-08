@@ -12,14 +12,22 @@ each heading must be `## <tag> — <title>`.
 **Double-tap (or double-click) a watchlist row** and it opens a sheet with a
 chart of that symbol's daily closes and a table of its returns.
 
-- Returns over **1 week, 1 month, 3 months, year to date, 1 year, 3 years and
-  5 years**, each measured from the last close *on or before* the period's
-  start — markets are shut at weekends. The three- and five-year rows also show
-  a compound annual rate.
-- A period the series doesn't reach back to says **"not enough history"**
-  rather than quietly measuring a young listing from its first day.
-- Range chips (1M/3M/6M/YTD/1Y/5Y) re-slice the chart without another request,
-  and dragging across the line reads off any single day.
+- For a symbol, **returns** over 1 week, 1 month, 3 months, year to date, and
+  1, 3, 5 and 10 years, plus **all time** — each measured from the last close
+  *on or before* the period's start, because markets are shut at weekends.
+  Anything longer than about a year also shows a compound annual rate, worked
+  out from the dates the baseline actually has rather than the window's name.
+- For a **composite**, **highs and lows** instead: the low, the high, the days
+  they happened, and where the latest value sits between them, over the same
+  windows down to **all-time high and all-time low**. A ratio has no capital in
+  it to have returned anything, but "at 22% of its all-time range" says
+  something true about the same number.
+- A period the series doesn't cover says **"not enough history"** rather than
+  quietly measuring a young listing from its first day. A range needs the whole
+  window covered: every close a symbol listed last month has falls inside the
+  last ten years, and calling their high a ten-year high would be a fabrication.
+- Span chips (1M/3M/6M/YTD/1Y/5Y/10Y/All) re-slice the chart without another
+  request, and dragging across the line reads off any single day.
 - The series comes from the quote source, not from the stored sparkline
   history: that is pruned to a window measured in hours and can only say what a
   symbol did today. Closes are adjusted for splits and dividends where the
@@ -29,6 +37,11 @@ chart of that symbol's daily closes and a table of its returns.
   carried forward — a ratio for a day one leg didn't trade never existed.
 - Series are cached per symbol for ten minutes, so a repeated double-tap costs
   one fetch and a composite over symbols already on the watchlist costs none.
+- Forty years of daily closes is a quarter of a megabyte and ten thousand SVG
+  segments, so closes older than two years are thinned to weekly and then
+  monthly for the chart — keeping the high and the low, so the chart never
+  contradicts the table beside it. Returns and ranges are computed from the
+  full series, and the chart's x axis is time rather than point index.
 
 New endpoint `GET /api/tickers/{id}/performance`. Past prices are an optional
 provider capability (`quotes.Historian`), so a quote source that can only price

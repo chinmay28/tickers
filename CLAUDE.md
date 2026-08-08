@@ -117,6 +117,13 @@ returns everything the client renders in one round trip.
   `Configurable`; a provider without it gets `ErrNoHistory` and a 501, not a
   failure. Composite series are the refresh cycle's pricing run once per day,
   with the legs' dates intersected.
+- **One window list, two projections.** `windows` in `performance.go` drives
+  both the returns table and the high/low ranges; the client shows returns for
+  a symbol and ranges for a composite, because a ratio has no capital in it to
+  have returned anything. A return starts at the last close *on or before* the
+  window; a range covers only closes *inside* it, and needs the whole window
+  covered to be reported at all. Both are computed from the full series — the
+  chart's points are thinned, the numbers never are.
 - **Settings are a key/value table** so adding one never needs a migration. An
   unset key reads back as its default, not as zero — that distinction is what
   lets "unpin everything" differ from "never configured".
