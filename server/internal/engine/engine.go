@@ -93,6 +93,7 @@ func (e *Engine) ApplyConfig(cfg store.Config) {
 		BaseURL:   cfg.QuoteBaseURL,
 		Timeout:   cfg.QuoteTimeout(),
 		UserAgent: cfg.QuoteUserAgent,
+		LogoURL:   cfg.LogoURLTemplate,
 	})
 }
 

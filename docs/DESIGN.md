@@ -85,7 +85,7 @@ tickers(id, symbol UNIQUE, expression, portfolio_id, label, position, enabled, o
 quotes(ticker_id PK → tickers, symbol, price, previous_close, currency,
        short_name, market_state, status, error, fetched_at)
 quote_history(id, symbol, price, at)
-logos(symbol PK, status, content_type, bytes, source, fetched_at)
+logos(symbol PK, status, content_type, bytes, source, reason, fetched_at)
 sinks(id, name, base_url, key, category, format, enabled, timeout_ms, …)
 portfolios(id, name, allocations, initial_amount, start_year, end_year,
            rebalance, benchmark, position, created_at, updated_at)
@@ -790,14 +790,33 @@ per load, and it leaves a dashboard with no internet full of broken images. So
 `/api/logos/{symbol}` serves them from this app's own origin. The image is
 fetched once per symbol, ever.
 
-Yahoo has no logo endpoint; what it has is a `logoUrl` on some search results,
-so the implementation looks the symbol up and fetches the image behind it. Most
-symbols have none, which is why **"there isn't one" is stored** as a row with
-no image in it. Without that tombstone every fund, index and crypto pair on the
-watchlist would be re-asked on every cycle for the life of the install. The
-distinction that makes it safe is between *that* answer and a failure: an
-`ErrNoLogo` is recorded, a timeout is not, so a network blink is retried and a
-durable answer is not.
+**Where the picture comes from is a setting, not a constant.** There is no
+standard way to get a logo from a ticker: Yahoo has no logo endpoint, what it
+has is a `logoUrl` on *some* search results and none at all for most symbols,
+and the free services that do answer by ticker come and go. So `Logo URL` takes
+a template with `{symbol}` in it and the provider fetches that directly; blank
+falls back to the search-result path. This is the same argument as the
+configurable user agent — the string that works upstream is a moving target,
+and an install that can reach a working source should not have to wait for a
+release. Changing the template **clears the cache**, because the previous
+source's answers, including everything it said had no logo, describe a source
+that is no longer being used.
+
+Most symbols have no logo, which is why **"there isn't one" is stored** as a
+row with no image in it. Without that tombstone every fund, index and crypto
+pair on the watchlist would be re-asked on every cycle for the life of the
+install. What makes that safe is the line between a durable answer and a
+transient one: no `logoUrl`, a 404, a body that isn't an image — all recorded,
+because none of them will be different next time. A timeout, a refused
+connection, a 502 — not recorded, so they are retried.
+
+**And every "no" carries its reason**, which the Settings page reports back as
+"3 of 7 symbols asked about have a logo. 4 came back without one: <why>".
+Without it the feature is untestable from the outside: logos on and no logos
+showing looks identical whether the symbols genuinely have none, the URL is
+mistyped, or the cycle simply hasn't reached them yet. The reason is what
+separates those, and "answered with text/html, not an image" is the whole
+diagnosis for the commonest mistake.
 
 Three smaller things the code would not explain on its own. A cycle fetches at
 most `maxLogosPerCycle` logos, so a first run on a long watchlist doesn't open

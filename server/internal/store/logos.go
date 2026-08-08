@@ -22,12 +22,17 @@ const MaxLogoBytes = 256 * 1024
 
 // Logo is one cached image, or the record that a symbol hasn't got one.
 type Logo struct {
-	Symbol      string    `json:"symbol"`
-	Status      string    `json:"status"`
-	ContentType string    `json:"contentType"`
-	Bytes       []byte    `json:"-"`
-	Source      string    `json:"source"`
-	FetchedAt   time.Time `json:"fetchedAt"`
+	Symbol      string `json:"symbol"`
+	Status      string `json:"status"`
+	ContentType string `json:"contentType"`
+	Bytes       []byte `json:"-"`
+	Source      string `json:"source"`
+	// Reason is why a symbol has no logo, in the provider's own words. It is
+	// the difference between "this fund hasn't got one" and "the URL you
+	// configured answers 404 for everything", which the Settings page shows
+	// rather than leaving to be dug out of the database.
+	Reason    string    `json:"reason"`
+	FetchedAt time.Time `json:"fetchedAt"`
 }
 
 // SaveLogo records what the source said about a symbol, image or not.
@@ -59,15 +64,16 @@ func (s *Store) SaveLogo(l Logo) error {
 	}
 
 	_, err := s.db.Exec(`
-		INSERT INTO logos (symbol, status, content_type, bytes, source, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO logos (symbol, status, content_type, bytes, source, reason, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (symbol) DO UPDATE SET
 		  status = excluded.status,
 		  content_type = excluded.content_type,
 		  bytes = excluded.bytes,
 		  source = excluded.source,
+		  reason = excluded.reason,
 		  fetched_at = excluded.fetched_at`,
-		symbol, l.Status, l.ContentType, l.Bytes, l.Source,
+		symbol, l.Status, l.ContentType, l.Bytes, l.Source, l.Reason,
 		l.FetchedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
@@ -81,10 +87,10 @@ func (s *Store) Logo(symbol string) (Logo, error) {
 		at string
 	)
 	err := s.db.QueryRow(`
-		SELECT symbol, status, content_type, bytes, source, fetched_at
+		SELECT symbol, status, content_type, bytes, source, reason, fetched_at
 		FROM logos WHERE symbol = ? AND status = ?`,
 		NormalizeSymbol(symbol), LogoOK).
-		Scan(&l.Symbol, &l.Status, &l.ContentType, &l.Bytes, &l.Source, &at)
+		Scan(&l.Symbol, &l.Status, &l.ContentType, &l.Bytes, &l.Source, &l.Reason, &at)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Logo{}, ErrNotFound
 	}
@@ -149,4 +155,45 @@ func (s *Store) ForgetLogos() (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// LogoStats is what the Settings page reports back: how many symbols have an
+// image, how many were answered "no", and the reason most of the noes gave.
+//
+// The reason is the useful part. A feature that fetches pictures and shows
+// none looks identical whether this symbol simply hasn't got one or the
+// configured URL answers 404 for everything, and without saying which, the
+// only way to tell them apart is to open the database.
+type LogoStats struct {
+	OK   int `json:"ok"`
+	None int `json:"none"`
+	// Reason is the most common explanation among the noes, empty if there
+	// aren't any.
+	Reason string `json:"reason"`
+}
+
+// LogoStats counts the cache.
+func (s *Store) LogoStats() (LogoStats, error) {
+	var stats LogoStats
+	if err := s.db.QueryRow(`
+		SELECT
+		  count(*) FILTER (WHERE status = ?),
+		  count(*) FILTER (WHERE status = ?)
+		FROM logos`, LogoOK, LogoNone).Scan(&stats.OK, &stats.None); err != nil {
+		return stats, err
+	}
+	if stats.None == 0 {
+		return stats, nil
+	}
+
+	var reason sql.NullString
+	err := s.db.QueryRow(`
+		SELECT reason FROM logos
+		WHERE status = ? AND reason <> ''
+		GROUP BY reason ORDER BY count(*) DESC LIMIT 1`, LogoNone).Scan(&reason)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return stats, err
+	}
+	stats.Reason = reason.String
+	return stats, nil
 }

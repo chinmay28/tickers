@@ -302,10 +302,19 @@ here rather than on a page of its own because almost every question it answers
   watchlist, up to 50. A symbol that isn't on the watchlist is ignored, so
   removing a ticker never means editing this too.
 - *Symbol logos* — off by default. On, the **server** fetches a real logo per
-  symbol from the quote source and caches the image in the database, so it is
-  fetched once and your browser never talks to anyone else. Symbols with no
-  logo — funds, crypto pairs, composites, portfolios — keep the drawn mark.
-  Turning it off again empties the cache.
+  symbol and caches the image in the database, so it is fetched once and your
+  browser never talks to anyone else. Symbols with no logo — funds, crypto
+  pairs, composites, portfolios — keep the drawn mark. Turning it off again
+  empties the cache.
+
+  **Logo URL** is where the pictures come from, with `{symbol}` standing in for
+  the ticker (`{symbol_lower}` for the lower-case form). Left blank it uses
+  whatever the quote source itself offers, which for Yahoo is a logo on *some*
+  search results and nothing at all for most symbols — so if you want logos on
+  everything, point this at a source that answers by ticker. Changing it clears
+  the cache. Under the checkbox, Settings reports how many symbols have a logo
+  and why the rest don't, which is how you tell "this fund hasn't got one" from
+  "that URL is wrong".
 - *Quote source* — the **server URL** prices come from, the request timeout,
   and the User-Agent sent upstream. Leave a field blank to fall back to the
   default, which the field shows as its placeholder. **Test connection** fetches

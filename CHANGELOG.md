@@ -166,6 +166,16 @@ symbol and shows it in the mark's place.
 - Composites and portfolios never get one, and the drawn mark stays underneath
   every logo, so anything missing or slow to load leaves initials rather than an
   empty square.
+- **Where the logos come from is a setting.** `Logo URL` takes a template with
+  `{symbol}` in it; blank means the quote source's own idea of a logo, which
+  for Yahoo is a picture on some search results and nothing for most symbols.
+  There is no standard way to get a logo from a ticker and the services that do
+  it come and go, so this is tunable for the same reason the user agent is.
+  Changing it clears the cache.
+- **Settings says how it is going** — "3 of 7 symbols asked about have a logo. 4
+  came back without one: <why>" — because logos on and no logos showing looks
+  the same whether the symbols haven't got any, the URL is wrong, or the cycle
+  hasn't got there yet.
 
 ### Contributions, risk-adjusted returns and yield
 
