@@ -483,3 +483,87 @@ func TestApplyIsSafeDuringFetch(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// onePixelPNG is a real, minimal PNG. It has to be real: the fetcher sniffs
+// the bytes rather than trusting the content type, so a fake would be rejected
+// for exactly the right reason and the test would prove nothing.
+var onePixelPNG = []byte{
+	0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+	0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+	0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
+	0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+	0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+	0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+	0x42, 0x60, 0x82,
+}
+
+// logoServer answers a symbol search with whatever logoUrl is asked for, and
+// serves images from /img/.
+func logoServer(t *testing.T, logoFor map[string]bool, body []byte, contentType string) *httptest.Server {
+	t.Helper()
+	// Declared before it is built so the search response can point its logoUrl
+	// at this same server — httptest only knows its address once it listens,
+	// and nothing serves a request until after that.
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/img/") {
+			w.Header().Set("Content-Type", contentType)
+			w.Write(body)
+			return
+		}
+		symbol := strings.ToUpper(r.URL.Query().Get("q"))
+		logo := ""
+		if logoFor[symbol] {
+			logo = `"logoUrl": "` + srv.URL + "/img/" + symbol + `.png",`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"quotes":[{"symbol":"` + symbol + `",` + logo +
+			`"shortname":"Test","exchDisp":"NMS","typeDisp":"Equity"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestLogoFetchesTheImageBehindTheSearchResult(t *testing.T) {
+	srv := logoServer(t, map[string]bool{"AAPL": true}, onePixelPNG, "image/png")
+
+	y := NewYahoo(Settings{BaseURL: srv.URL})
+	logo, err := y.Logo(context.Background(), "aapl")
+	if err != nil {
+		t.Fatalf("logo: %v", err)
+	}
+	if string(logo.Bytes) != string(onePixelPNG) {
+		t.Error("the bytes returned are not the image the search result pointed at")
+	}
+	if logo.ContentType != "image/png" {
+		t.Errorf("content type = %q, want image/png sniffed from the bytes", logo.ContentType)
+	}
+	if !strings.Contains(logo.Source, "/img/AAPL.png") {
+		t.Errorf("source = %q, want the URL it was fetched from recorded", logo.Source)
+	}
+}
+
+func TestLogoSaysSoWhenThereIsntOne(t *testing.T) {
+	srv := logoServer(t, nil, onePixelPNG, "image/png")
+
+	y := NewYahoo(Settings{BaseURL: srv.URL})
+	if _, err := y.Logo(context.Background(), "GLD"); !errors.Is(err, ErrNoLogo) {
+		t.Errorf("a search result without a logoUrl gave %v, want ErrNoLogo — "+
+			"the caller caches that answer and a plain error would be retried forever", err)
+	}
+}
+
+func TestLogoRejectsSomethingThatIsNotAnImage(t *testing.T) {
+	srv := logoServer(t, map[string]bool{"AAPL": true}, []byte("<html>gotcha</html>"), "image/png")
+
+	y := NewYahoo(Settings{BaseURL: srv.URL})
+	_, err := y.Logo(context.Background(), "AAPL")
+	if err == nil {
+		t.Fatal("markup labelled image/png was accepted; it would then be served from this app's own origin")
+	}
+	if errors.Is(err, ErrNoLogo) {
+		t.Error("a bad payload was cached as 'no logo'; it is a failure, not an answer")
+	}
+}

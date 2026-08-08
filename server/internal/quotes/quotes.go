@@ -153,8 +153,43 @@ type Distributor interface {
 	Dividends(ctx context.Context, symbol string, since time.Time) ([]Distribution, error)
 }
 
+// Logo is one symbol's brand image, as bytes. It is bytes rather than a URL
+// because the caller caches it: the point of the feature is that a browser
+// never talks to whoever drew it, and a URL handed to the client would defeat
+// that entirely.
+type Logo struct {
+	ContentType string
+	Bytes       []byte
+	// Source is the URL the image came from, kept for the record. Nothing
+	// reads it at runtime — it is there so "where did this picture come from?"
+	// is answerable from the database.
+	Source string
+}
+
+// Iconographer is a provider that can also supply a symbol's logo.
+//
+// Optional like Historian, and for a stronger reason than "not every source
+// has one": this is the capability that reaches outside the quote API, so a
+// provider that would rather not do that simply doesn't implement it and the
+// feature disappears rather than half-works.
+type Iconographer interface {
+	// Logo returns the image for a symbol, or ErrNoLogo if the source knows
+	// the symbol and has no picture of it. Anything else is a real failure and
+	// is worth retrying later.
+	Logo(ctx context.Context, symbol string) (Logo, error)
+}
+
 // ErrNoSearch is returned by providers that can only price a known symbol.
 var ErrNoSearch = errors.New("this quote provider does not support symbol search")
+
+// ErrNoLogos is what a caller gets when the quote source cannot supply logos
+// at all — the marks stay as they are drawn rather than anything being broken.
+var ErrNoLogos = errors.New("this quote provider does not supply logos")
+
+// ErrNoLogo means the source looked and this particular symbol hasn't got one.
+// It is a durable answer, not a failure: an index fund has no logo today and
+// will have none tomorrow, and a caller is meant to record it and stop asking.
+var ErrNoLogo = errors.New("that symbol has no logo")
 
 // ErrNoHistory is what a caller gets when the quote source can only price
 // today — the performance view is unavailable rather than broken.

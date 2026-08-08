@@ -386,6 +386,9 @@ type searchResponse struct {
 		ExchDisp  string `json:"exchDisp"`
 		TypeDisp  string `json:"typeDisp"`
 		QuoteType string `json:"quoteType"`
+		// LogoURL is present for some equities and absent for most everything
+		// else. An absent one is the normal case, not an error.
+		LogoURL string `json:"logoUrl"`
 	} `json:"quotes"`
 }
 
@@ -421,6 +424,117 @@ func (y *Yahoo) Search(ctx context.Context, query string) ([]Match, error) {
 		})
 	}
 	return out, nil
+}
+
+// maxLogoBytes caps one image. Yahoo's brand images are a few kilobytes; a
+// response past this is not a logo, whatever its content type claims.
+const maxLogoBytes = 256 << 10
+
+// Logo implements Iconographer.
+//
+// Yahoo has no logo endpoint. What it has is a `logoUrl` on some search
+// results, so the symbol is looked up and the image behind that URL fetched —
+// two requests, once per symbol ever, because the caller caches the answer
+// including the answer "there isn't one".
+//
+// Most symbols hit that last case: funds, indices and crypto pairs have no
+// brand image here at all. That is ErrNoLogo rather than a failure, and the
+// distinction is the whole reason this returns a sentinel — a caller that
+// treated "no logo" as an error would ask again forever.
+func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return Logo{}, errors.New("a symbol is required")
+	}
+	settings, _ := y.current()
+	endpoint := fmt.Sprintf("%s/v1/finance/search?q=%s&quotesCount=6&newsCount=0&listsCount=0",
+		settings.BaseURL, url.QueryEscape(symbol))
+
+	body, err := y.get(ctx, endpoint)
+	if err != nil {
+		// The symbol search not knowing a symbol says nothing about whether it
+		// has a logo, and the caller must not cache "none" off the back of it.
+		if errors.Is(err, ErrNotFound) {
+			return Logo{}, ErrNoLogo
+		}
+		return Logo{}, err
+	}
+	var parsed searchResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return Logo{}, fmt.Errorf("decode search results for %s: %w", symbol, err)
+	}
+
+	src := ""
+	for _, m := range parsed.Quotes {
+		// Only this symbol's own logo will do. Search is fuzzy — asking for
+		// GLD returns half a dozen funds — and taking the first result's
+		// picture would put another company's mark on the row.
+		if strings.EqualFold(m.Symbol, symbol) {
+			src = strings.TrimSpace(m.LogoURL)
+			break
+		}
+	}
+	if src == "" {
+		return Logo{}, ErrNoLogo
+	}
+	return y.image(ctx, src)
+}
+
+// image fetches one picture, given the URL a search result pointed at.
+func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
+	parsed, err := url.Parse(src)
+	if err != nil {
+		return Logo{}, fmt.Errorf("logo URL %q: %w", src, err)
+	}
+	// The URL comes from a third party's JSON and is fetched by the server, so
+	// it is checked before it is followed rather than after: file:// would make
+	// this a way to read the host's disk through the quote source.
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return Logo{}, fmt.Errorf("logo URL %q is not http(s)", src)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	if err != nil {
+		return Logo{}, err
+	}
+	settings, client := y.current()
+	req.Header.Set("User-Agent", settings.UserAgent)
+	req.Header.Set("Accept", "image/*")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return Logo{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return Logo{}, ErrNoLogo
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return Logo{}, fmt.Errorf("logo fetch returned HTTP %d", resp.StatusCode)
+	}
+
+	// One byte past the cap, so a file exactly at the limit is kept and a file
+	// over it is detected rather than silently truncated into a broken image.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLogoBytes+1))
+	if err != nil {
+		return Logo{}, err
+	}
+	if len(body) > maxLogoBytes {
+		return Logo{}, fmt.Errorf("logo at %s is larger than %d bytes", src, maxLogoBytes)
+	}
+	if len(body) == 0 {
+		return Logo{}, ErrNoLogo
+	}
+
+	// Sniffed rather than trusted: the content type is what the browser will
+	// be told, and a server that labels a PNG text/html would otherwise turn
+	// the cache into a way to serve markup from this app's own origin.
+	kind := http.DetectContentType(body)
+	if !strings.HasPrefix(kind, "image/") {
+		return Logo{}, fmt.Errorf("logo at %s is %s, not an image", src, kind)
+	}
+	return Logo{ContentType: kind, Bytes: body, Source: src}, nil
 }
 
 // maxBody caps how much of a response we will read. The endpoints return tens

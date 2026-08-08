@@ -22,6 +22,7 @@ const (
 	SettingQuoteTimeout     = "quote_timeout_seconds"
 	SettingQuoteUserAgent   = "quote_user_agent"
 	SettingPinnedSymbols    = "pinned_symbols"
+	SettingLogos            = "logos_enabled"
 	SettingSeeded           = "seeded"
 )
 
@@ -75,6 +76,14 @@ type Config struct {
 	// A pinned symbol that isn't on the watchlist is simply inert, so deleting
 	// a ticker never has to reach into settings to keep them consistent.
 	PinnedSymbols []string `json:"pinnedSymbols"`
+
+	// Logos turns on fetching a real logo per symbol from the quote source and
+	// caching it here. It is off by default and stays that way until somebody
+	// turns it on, because it is the one setting that makes this install talk
+	// to a host it otherwise wouldn't, about the symbols on its watchlist.
+	// Every symbol without one — every ETF, every crypto pair, every composite
+	// and portfolio — keeps the mark drawn from its name either way.
+	Logos bool `json:"logos"`
 }
 
 // DefaultConfig is what a fresh install runs with: a five-minute poll (the
@@ -152,6 +161,11 @@ func (s *Store) Config() (Config, error) {
 	} else {
 		cfg.PinnedSymbols = ParsePinnedSymbols(v)
 	}
+	if v, err := s.Setting(SettingLogos); err != nil {
+		return cfg, err
+	} else if v != "" {
+		cfg.Logos = v == "true"
+	}
 	return cfg, nil
 }
 
@@ -195,6 +209,7 @@ type ConfigPatch struct {
 	QuoteTimeoutSeconds *int      `json:"quoteTimeoutSeconds"`
 	QuoteUserAgent      *string   `json:"quoteUserAgent"`
 	PinnedSymbols       *[]string `json:"pinnedSymbols"`
+	Logos               *bool     `json:"logos"`
 }
 
 // UpdateConfig validates and persists a patch, returning the config as it now
@@ -258,6 +273,18 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		}
 		cfg.PinnedSymbols = pinned
 	}
+	if patch.Logos != nil {
+		// Turning it off empties the cache. A drawer of third-party images
+		// nobody wants any more should not outlive the setting that filled it,
+		// and it also makes turning the feature back on mean "go and look
+		// again" rather than "show me what you kept".
+		if !*patch.Logos && cfg.Logos {
+			if _, err := s.ForgetLogos(); err != nil {
+				return cfg, err
+			}
+		}
+		cfg.Logos = *patch.Logos
+	}
 
 	if err := s.SetSettings(map[string]string{
 		SettingRefreshSeconds:   strconv.Itoa(cfg.RefreshSeconds),
@@ -267,6 +294,7 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		SettingQuoteTimeout:     strconv.Itoa(cfg.QuoteTimeoutSeconds),
 		SettingQuoteUserAgent:   cfg.QuoteUserAgent,
 		SettingPinnedSymbols:    strings.Join(cfg.PinnedSymbols, ","),
+		SettingLogos:            strconv.FormatBool(cfg.Logos),
 	}); err != nil {
 		return cfg, err
 	}

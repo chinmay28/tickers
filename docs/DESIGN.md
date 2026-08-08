@@ -85,6 +85,7 @@ tickers(id, symbol UNIQUE, expression, portfolio_id, label, position, enabled, o
 quotes(ticker_id PK → tickers, symbol, price, previous_close, currency,
        short_name, market_state, status, error, fetched_at)
 quote_history(id, symbol, price, at)
+logos(symbol PK, status, content_type, bytes, source, fetched_at)
 sinks(id, name, base_url, key, category, format, enabled, timeout_ms, …)
 portfolios(id, name, allocations, initial_amount, start_year, end_year,
            rebalance, benchmark, position, created_at, updated_at)
@@ -755,12 +756,11 @@ every view rather than once in `render`.
 ### Symbol marks
 
 Wherever a symbol is listed — a watchlist row, a holding's chip, a search
-result — it is preceded by a small rounded square. The obvious implementation
-is a logo, and it is the wrong one here: it means a request per row to a third
-party from a box on someone's home network, telling that party what is being
-tracked, and one static binary has nowhere to cache the answers. So the mark is
-derived from the symbol instead — two initials over a hue hashed out of it —
-which is free, offline, and identical on every device.
+result — it is preceded by a small rounded square. By default it is *drawn*
+rather than fetched: two initials over a hue hashed out of the symbol, which is
+free, offline, identical on every device, and available for the rows no logo
+could ever cover. Real logos are an opt-in layer on top of it (below), not a
+replacement for it.
 
 The hue is drawn from a curated list rather than the whole wheel. Four hues are
 already spoken for within a row's width: `--up` and `--down` on the same card,
@@ -774,6 +774,45 @@ Composites and portfolios get a glyph in their own hue instead of initials. A
 composite's symbol is its formula and a portfolio's is its name; neither was
 issued by anyone, and initials would say otherwise. The obelus and the pie
 repeat what the row's outline already claims rather than making a new claim.
+
+#### Real logos, when they are asked for
+
+`Symbol logos` in Settings turns on fetching an actual logo per symbol. It is
+off until somebody turns it on, because it is the only feature here that makes
+an install talk to a host it otherwise wouldn't, about the symbols on its
+watchlist by name. That is a decision for whoever runs it, not a default.
+
+**The server fetches, never the browser.** A client-side `<img>` pointing at a
+logo host is twenty lines and the wrong twenty: it tells that host what you
+track from every browser that ever opens the page, it costs a request per row
+per load, and it leaves a dashboard with no internet full of broken images. So
+`quotes.Iconographer` returns *bytes*, the engine writes them into `logos`, and
+`/api/logos/{symbol}` serves them from this app's own origin. The image is
+fetched once per symbol, ever.
+
+Yahoo has no logo endpoint; what it has is a `logoUrl` on some search results,
+so the implementation looks the symbol up and fetches the image behind it. Most
+symbols have none, which is why **"there isn't one" is stored** as a row with
+no image in it. Without that tombstone every fund, index and crypto pair on the
+watchlist would be re-asked on every cycle for the life of the install. The
+distinction that makes it safe is between *that* answer and a failure: an
+`ErrNoLogo` is recorded, a timeout is not, so a network blink is retried and a
+durable answer is not.
+
+Three smaller things the code would not explain on its own. A cycle fetches at
+most `maxLogosPerCycle` logos, so a first run on a long watchlist doesn't open
+forty connections to a host that owes it nothing — the pictures arrive over the
+next few cycles and then the work stops entirely. The bytes are **sniffed, not
+trusted**: content type comes from `http.DetectContentType`, because these
+bytes get served back from our own origin and a "logo" that is really HTML
+would be a stored cross-site script. And turning the setting off **empties the
+cache**, since a drawer of third-party images should not outlive the feature
+that filled it.
+
+The drawn mark stays underneath the image rather than being replaced by it. An
+`<img>` with an empty `alt` that fails to load collapses to nothing, so a logo
+that 404s or a cache that was cleared mid-render leaves the initials showing —
+no error handler, no second render pass, no empty squares.
 
 ### The add dialog
 

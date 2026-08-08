@@ -169,4 +169,28 @@ ALTER TABLE tickers ADD COLUMN portfolio_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX tickers_portfolio_idx ON tickers (portfolio_id);
 `,
 	},
+	{
+		// Cached logos. A whole new table, so a binary rolled back onto this
+		// database never reads it and simply draws the derived marks again.
+		//
+		// Keyed by symbol rather than ticker ID, like quote_history and for the
+		// same two reasons: a portfolio's holding has a logo and no ticker row,
+		// and re-adding a removed symbol should not mean fetching its logo a
+		// second time.
+		//
+		// `status` is why the table has rows with no image in them. "We asked
+		// and this symbol has no logo" is an answer worth keeping — without it
+		// every ETF and every crypto pair is re-asked on every cycle, forever.
+		ID: "007_logos",
+		SQL: `
+CREATE TABLE logos (
+  symbol       TEXT PRIMARY KEY,
+  status       TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT '',
+  bytes        BLOB,
+  source       TEXT NOT NULL DEFAULT '',
+  fetched_at   TEXT NOT NULL
+);
+`,
+	},
 }
