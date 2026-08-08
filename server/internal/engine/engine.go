@@ -9,6 +9,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chinmay28/tickers/server/internal/expr"
 	"github.com/chinmay28/tickers/server/internal/publish"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -242,34 +244,21 @@ func (e *Engine) RunCycle(ctx context.Context, trigger string) (store.Run, error
 	}
 
 	if len(tickers) > 0 {
-		symbols := make([]string, 0, len(tickers))
-		for _, t := range tickers {
-			symbols = append(symbols, t.Symbol)
-		}
-
-		fetched, failures := e.provider.Fetch(ctx, symbols)
+		plan := newFetchPlan(tickers)
+		fetched, failures := e.provider.Fetch(ctx, plan.symbols)
 		now := time.Now().UTC()
+		prices, closes := readingMaps(fetched)
 
 		for _, t := range tickers {
-			q := store.Quote{TickerID: t.ID, Symbol: t.Symbol, FetchedAt: now}
-			if got, ok := fetched[t.Symbol]; ok {
-				q.Status = store.StatusOK
-				q.Price = got.Price
-				q.PreviousClose = got.PreviousClose
-				q.Currency = got.Currency
-				q.ShortName = got.ShortName
-				q.MarketState = got.MarketState
-				if !got.FetchedAt.IsZero() {
-					q.FetchedAt = got.FetchedAt
-				}
+			var q store.Quote
+			if t.IsComposite() {
+				q = compositeQuote(t, plan.formulas[t.ID], prices, closes, failures, now)
+			} else {
+				q = directQuote(t, fetched, failures, now)
+			}
+			if q.Status == store.StatusOK {
 				run.OKCount++
 			} else {
-				q.Status = store.StatusError
-				if err, ok := failures[t.Symbol]; ok && err != nil {
-					q.Error = err.Error()
-				} else {
-					q.Error = "no quote returned"
-				}
 				run.ErrorCount++
 			}
 			if err := e.store.SaveQuote(q); err != nil {
@@ -293,6 +282,153 @@ func (e *Engine) RunCycle(ctx context.Context, trigger string) (store.Run, error
 	e.log.Info("refresh complete",
 		"trigger", trigger, "ok", run.OKCount, "errors", run.ErrorCount, "publishes", len(run.Publishes))
 	return e.finish(run, nil)
+}
+
+// ---------------------------------------------------------------------------
+// Pricing one cycle's watchlist
+// ---------------------------------------------------------------------------
+
+// formula is a composite's parsed expression, or the reason it wouldn't parse.
+// A formula that has stopped parsing is reported on its own row rather than
+// failing the cycle — the rest of the watchlist is still perfectly priceable.
+type formula struct {
+	expr *expr.Expr
+	err  error
+}
+
+// fetchPlan is what one cycle asks the provider for, and how each composite
+// gets priced from the answer.
+type fetchPlan struct {
+	// symbols is every symbol that has to be fetched: the plain rows, plus the
+	// components of every composite, deduplicated. A ratio over a symbol that
+	// is already on the watchlist therefore costs no extra request, and a
+	// component that isn't on the watchlist is fetched without becoming a row.
+	symbols []string
+	// formulas is keyed by composite ticker ID.
+	formulas map[string]formula
+}
+
+func newFetchPlan(tickers []store.Ticker) fetchPlan {
+	plan := fetchPlan{symbols: []string{}, formulas: map[string]formula{}}
+	seen := map[string]bool{}
+	add := func(sym string) {
+		if sym == "" || seen[sym] {
+			return
+		}
+		seen[sym] = true
+		plan.symbols = append(plan.symbols, sym)
+	}
+
+	for _, t := range tickers {
+		if !t.IsComposite() {
+			add(t.Symbol)
+			continue
+		}
+		parsed, err := expr.Parse(t.Expression)
+		plan.formulas[t.ID] = formula{expr: parsed, err: err}
+		if err != nil {
+			continue
+		}
+		for _, sym := range parsed.Symbols() {
+			add(sym)
+		}
+	}
+	return plan
+}
+
+// readingMaps splits the fetched quotes into the two symbol → number maps a
+// formula is evaluated against: today's prices, and yesterday's closes.
+func readingMaps(fetched map[string]quotes.Quote) (prices, closes map[string]float64) {
+	prices = make(map[string]float64, len(fetched))
+	closes = make(map[string]float64, len(fetched))
+	for sym, q := range fetched {
+		if q.Price != nil {
+			prices[sym] = *q.Price
+		}
+		if q.PreviousClose != nil {
+			closes[sym] = *q.PreviousClose
+		}
+	}
+	return prices, closes
+}
+
+// directQuote is the reading for an ordinary symbol: whatever the provider
+// said, success or failure.
+func directQuote(t store.Ticker, fetched map[string]quotes.Quote, failures map[string]error, now time.Time) store.Quote {
+	q := store.Quote{TickerID: t.ID, Symbol: t.Symbol, FetchedAt: now}
+	got, ok := fetched[t.Symbol]
+	if !ok {
+		q.Status = store.StatusError
+		if err, ok := failures[t.Symbol]; ok && err != nil {
+			q.Error = err.Error()
+		} else {
+			q.Error = "no quote returned"
+		}
+		return q
+	}
+	q.Status = store.StatusOK
+	q.Price = got.Price
+	q.PreviousClose = got.PreviousClose
+	q.Currency = got.Currency
+	q.ShortName = got.ShortName
+	q.MarketState = got.MarketState
+	if !got.FetchedAt.IsZero() {
+		q.FetchedAt = got.FetchedAt
+	}
+	return q
+}
+
+// compositeQuote is the reading for a formula row: the same shape as any other
+// quote, which is what makes composites free everywhere downstream — history,
+// sparklines, change percentages, the published payload.
+//
+// Currency is deliberately left empty. A ratio is dimensionless, and a sum is
+// only meaningful in one currency if every leg shares it, which nothing here
+// can promise.
+func compositeQuote(t store.Ticker, f formula, prices, closes map[string]float64, failures map[string]error, now time.Time) store.Quote {
+	q := store.Quote{
+		TickerID: t.ID, Symbol: t.Symbol, FetchedAt: now,
+		Status: store.StatusError, Composite: true,
+	}
+	if f.err != nil {
+		q.Error = f.err.Error()
+		return q
+	}
+
+	price, err := f.expr.Eval(prices)
+	if err != nil {
+		q.Error = explainEval(err, failures)
+		return q
+	}
+	q.Status = store.StatusOK
+	q.Price = &price
+
+	// The previous close is best-effort. Without it the row still shows a
+	// price, just no change — which is better than failing the whole composite
+	// because one leg's provider didn't report a previous close.
+	if prev, err := f.expr.Eval(closes); err == nil {
+		q.PreviousClose = &prev
+	}
+	return q
+}
+
+// explainEval swaps "no price for GLD" for the provider's own reason that GLD
+// has no price — the difference between someone re-reading a formula that is
+// fine and someone seeing the typo in one of its legs.
+func explainEval(err error, failures map[string]error) string {
+	var missing *expr.MissingError
+	if errors.As(err, &missing) {
+		if cause, ok := failures[missing.Symbol]; ok && cause != nil {
+			reason := cause.Error()
+			// Providers vary on whether they name the symbol themselves;
+			// "NOPE: NOPE: no data found" helps nobody.
+			if strings.Contains(reason, missing.Symbol) {
+				return reason
+			}
+			return missing.Symbol + ": " + reason
+		}
+	}
+	return err.Error()
 }
 
 // Publish sends the current snapshot to every enabled sink, without refetching.
@@ -335,14 +471,19 @@ func (e *Engine) Snapshot() (publish.Snapshot, error) {
 	snap := publish.Snapshot{At: time.Now(), Quotes: make([]store.Quote, 0, len(tickers))}
 	for _, t := range tickers {
 		if q, ok := stored[t.ID]; ok {
+			// Composite-ness lives on the ticker, not on the quote row, so this
+			// join is where it gets stamped back on — it decides how many
+			// decimals the payload gives the value.
+			q.Composite = t.IsComposite()
 			snap.Quotes = append(snap.Quotes, q)
 			continue
 		}
 		snap.Quotes = append(snap.Quotes, store.Quote{
-			TickerID: t.ID,
-			Symbol:   t.Symbol,
-			Status:   store.StatusError,
-			Error:    "not fetched yet",
+			TickerID:  t.ID,
+			Symbol:    t.Symbol,
+			Status:    store.StatusError,
+			Error:     "not fetched yet",
+			Composite: t.IsComposite(),
 		})
 	}
 	return snap, nil

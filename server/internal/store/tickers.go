@@ -6,12 +6,18 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/chinmay28/tickers/server/internal/expr"
 )
+
+// tickerColumns is the one list of columns every ticker query selects, kept in
+// one place so adding a field can't leave a scan and a select disagreeing.
+const tickerColumns = `id, symbol, expression, label, position, enabled, origin, created_at, updated_at`
 
 // Tickers lists the whole watchlist in display order — pinned symbols first.
 func (s *Store) Tickers() ([]Ticker, error) {
 	rows, err := s.db.Query(`
-		SELECT id, symbol, label, position, enabled, origin, created_at, updated_at
+		SELECT ` + tickerColumns + `
 		FROM tickers ORDER BY position, symbol`)
 	if err != nil {
 		return nil, err
@@ -28,7 +34,7 @@ func (s *Store) Tickers() ([]Ticker, error) {
 // same display order — which is also the payload's order.
 func (s *Store) EnabledTickers() ([]Ticker, error) {
 	rows, err := s.db.Query(`
-		SELECT id, symbol, label, position, enabled, origin, created_at, updated_at
+		SELECT ` + tickerColumns + `
 		FROM tickers WHERE enabled = 1 ORDER BY position, symbol`)
 	if err != nil {
 		return nil, err
@@ -44,7 +50,7 @@ func (s *Store) EnabledTickers() ([]Ticker, error) {
 // Ticker looks one up by ID.
 func (s *Store) Ticker(id string) (Ticker, error) {
 	row := s.db.QueryRow(`
-		SELECT id, symbol, label, position, enabled, origin, created_at, updated_at
+		SELECT `+tickerColumns+`
 		FROM tickers WHERE id = ?`, id)
 	t, err := scanTicker(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -90,18 +96,23 @@ func applyPins(ts []Ticker, pinned []string) []Ticker {
 	return ts
 }
 
-// NewTicker is the input for adding a symbol to the watchlist.
+// NewTicker is the input for adding a row to the watchlist.
+//
+// Symbol and Expression are alternatives: give one or the other. Giving a
+// Symbol that reads as a formula ("VTI/GLD") is the same as giving an
+// Expression, which is what lets the add box take either without a mode switch.
 type NewTicker struct {
-	Symbol  string
-	Label   string
-	Enabled *bool // nil means enabled
+	Symbol     string
+	Expression string
+	Label      string
+	Enabled    *bool // nil means enabled
 }
 
-// CreateTicker appends a symbol to the end of the watchlist.
+// CreateTicker appends a row to the end of the watchlist.
 func (s *Store) CreateTicker(in NewTicker) (Ticker, error) {
-	sym := NormalizeSymbol(in.Symbol)
-	if sym == "" {
-		return Ticker{}, errors.New("symbol is required")
+	sym, formula, err := resolveIdentity(in.Symbol, in.Expression)
+	if err != nil {
+		return Ticker{}, err
 	}
 
 	enabled := true
@@ -114,10 +125,10 @@ func (s *Store) CreateTicker(in NewTicker) (Ticker, error) {
 	// Positions are dense-ish but never renumbered on insert: append past the
 	// current maximum and let ReorderTickers be the only thing that rewrites
 	// the sequence. COALESCE handles the empty-table case.
-	_, err := s.db.Exec(`
-		INSERT INTO tickers (id, symbol, label, position, enabled, origin, created_at, updated_at)
-		VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM tickers), ?, ?, ?, ?)`,
-		id, sym, strings.TrimSpace(in.Label), boolInt(enabled), OriginUser, now, now)
+	_, err = s.db.Exec(`
+		INSERT INTO tickers (id, symbol, expression, label, position, enabled, origin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM tickers), ?, ?, ?, ?)`,
+		id, sym, formula, strings.TrimSpace(in.Label), boolInt(enabled), OriginUser, now, now)
 	if isUniqueViolation(err) {
 		return Ticker{}, fmt.Errorf("%w: %s", ErrDuplicateSymbol, sym)
 	}
@@ -129,18 +140,19 @@ func (s *Store) CreateTicker(in NewTicker) (Ticker, error) {
 
 // TickerPatch is a partial update; a nil field is left alone.
 type TickerPatch struct {
-	Symbol  *string
-	Label   *string
-	Enabled *bool
+	Symbol     *string
+	Expression *string
+	Label      *string
+	Enabled    *bool
 }
 
 // UpdateTicker applies a patch.
 //
-// Changing the symbol does two extra things: it promotes the row out of `seed`
-// origin (it is the user's choice now, not the shipped default), and it drops
-// the stale quote, because a row showing the old symbol's price under the new
-// symbol's name for the seconds until the next refresh is worse than showing
-// nothing.
+// Changing what the row *is* — its symbol or its formula — does two extra
+// things: it promotes the row out of `seed` origin (it is the user's choice
+// now, not the shipped default), and it drops the stale quote, because a row
+// showing the old symbol's price under the new symbol's name for the seconds
+// until the next refresh is worse than showing nothing.
 //
 // It deliberately leaves the pinned list alone. Pins are configured in
 // Settings and keyed by symbol, so retyping a pinned row's symbol unpins it as
@@ -152,20 +164,35 @@ func (s *Store) UpdateTicker(id string, patch TickerPatch) (Ticker, error) {
 		return Ticker{}, err
 	}
 
+	// Symbol and formula are resolved as a pair, because either one can decide
+	// what the other becomes: clearing the formula turns a composite back into
+	// a plain symbol, and typing a formula into the symbol field turns a plain
+	// symbol into a composite.
+	symbolIn, formulaIn := existing.Symbol, existing.Expression
+	if patch.Symbol != nil {
+		symbolIn = *patch.Symbol
+	}
+	if patch.Expression != nil {
+		formulaIn = *patch.Expression
+		if strings.TrimSpace(formulaIn) == "" && existing.IsComposite() && patch.Symbol == nil {
+			// Otherwise the composite's own symbol ("VTI/GLD") would be re-read
+			// as a formula and nothing would change — silently, which is worse
+			// than saying what is missing.
+			return Ticker{}, errors.New("a symbol is required to turn a composite back into an ordinary ticker")
+		}
+	}
+	sym, formula, err := resolveIdentity(symbolIn, formulaIn)
+	if err != nil {
+		return Ticker{}, err
+	}
+
 	sets := []string{"updated_at = ?"}
 	args := []any{nowRFC3339()}
-	symbolChanged := false
 
-	if patch.Symbol != nil {
-		sym := NormalizeSymbol(*patch.Symbol)
-		if sym == "" {
-			return Ticker{}, errors.New("symbol is required")
-		}
-		if sym != existing.Symbol {
-			symbolChanged = true
-			sets = append(sets, "symbol = ?", "origin = ?")
-			args = append(args, sym, OriginUser)
-		}
+	identityChanged := sym != existing.Symbol || formula != existing.Expression
+	if identityChanged {
+		sets = append(sets, "symbol = ?", "expression = ?", "origin = ?")
+		args = append(args, sym, formula, OriginUser)
 	}
 	if patch.Label != nil {
 		sets = append(sets, "label = ?")
@@ -179,18 +206,49 @@ func (s *Store) UpdateTicker(id string, patch TickerPatch) (Ticker, error) {
 	args = append(args, id)
 	_, err = s.db.Exec(`UPDATE tickers SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	if isUniqueViolation(err) {
-		return Ticker{}, fmt.Errorf("%w: %s", ErrDuplicateSymbol, NormalizeSymbol(*patch.Symbol))
+		return Ticker{}, fmt.Errorf("%w: %s", ErrDuplicateSymbol, sym)
 	}
 	if err != nil {
 		return Ticker{}, err
 	}
 
-	if symbolChanged {
+	if identityChanged {
 		if _, err := s.db.Exec(`DELETE FROM quotes WHERE ticker_id = ?`, id); err != nil {
 			return Ticker{}, err
 		}
 	}
 	return s.Ticker(id)
+}
+
+// resolveIdentity works out what a row is from the two fields that can say so,
+// and returns its stored (symbol, expression) pair.
+//
+// An empty expression whose symbol reads as a formula is promoted to a
+// composite: someone typing "VTI/GLD" into the symbol box means the ratio, and
+// there is no other thing they could mean — no provider has a symbol with a
+// slash in it.
+func resolveIdentity(symbol, expression string) (sym string, formula string, err error) {
+	expression = strings.TrimSpace(expression)
+	if expression == "" && expr.Looks(symbol) {
+		expression = strings.TrimSpace(symbol)
+	}
+
+	if expression == "" {
+		sym = NormalizeSymbol(symbol)
+		if sym == "" {
+			return "", "", errors.New("symbol is required")
+		}
+		return sym, "", nil
+	}
+
+	parsed, err := expr.Parse(expression)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: %s", ErrInvalidExpression, err)
+	}
+	if parsed.Operators() == 0 {
+		return "", "", fmt.Errorf("%w: a composite has to combine values, for example VTI/GLD", ErrInvalidExpression)
+	}
+	return parsed.Key(), parsed.String(), nil
 }
 
 // DeleteTicker removes a symbol from the watchlist. Its quote goes with it via
@@ -277,7 +335,7 @@ func scanTicker(row scannable) (Ticker, error) {
 		enabled              int
 		createdAt, updatedAt string
 	)
-	if err := row.Scan(&t.ID, &t.Symbol, &t.Label, &t.Position, &enabled, &t.Origin, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Symbol, &t.Expression, &t.Label, &t.Position, &enabled, &t.Origin, &createdAt, &updatedAt); err != nil {
 		return Ticker{}, err
 	}
 	t.Enabled = enabled != 0

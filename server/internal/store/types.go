@@ -19,14 +19,20 @@ const (
 
 // Ticker is one symbol on the watchlist.
 type Ticker struct {
-	ID        string    `json:"id"`
-	Symbol    string    `json:"symbol"`
-	Label     string    `json:"label"`
-	Position  int       `json:"position"`
-	Enabled   bool      `json:"enabled"`
-	Origin    string    `json:"origin"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID     string `json:"id"`
+	Symbol string `json:"symbol"`
+	// Expression is the formula behind a composite row — "VTI/GLD", "P/VTI" —
+	// and empty for an ordinary symbol, which is the only thing that
+	// distinguishes the two. A composite's Symbol is derived from it (the same
+	// formula with the spaces taken out), so a composite still has one stable,
+	// unique, publishable key like every other row.
+	Expression string    `json:"expression"`
+	Label      string    `json:"label"`
+	Position   int       `json:"position"`
+	Enabled    bool      `json:"enabled"`
+	Origin     string    `json:"origin"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 
 	// Pinned is derived, not stored: it says whether this row's symbol is on
 	// the pinned list in Settings. Every query that returns a Ticker stamps it,
@@ -34,6 +40,10 @@ type Ticker struct {
 	// know which rows carry the chip.
 	Pinned bool `json:"pinned"`
 }
+
+// IsComposite reports whether this row is priced from a formula rather than
+// fetched from the provider.
+func (t Ticker) IsComposite() bool { return t.Expression != "" }
 
 // Quote is the most recent reading for a ticker. A failed fetch is still a
 // quote — status "error" with the reason — because "we tried and it didn't
@@ -50,6 +60,14 @@ type Quote struct {
 	Status        string    `json:"status"`
 	Error         string    `json:"error"`
 	FetchedAt     time.Time `json:"fetchedAt"`
+
+	// Composite says this reading was computed from a formula rather than
+	// fetched. It is derived from the ticker, not stored on the quote — the
+	// join that produces a snapshot stamps it — and it exists so the published
+	// payload can give a ratio enough decimal places to mean something. A
+	// P/VTI of 0.0335 published as the legacy "0.03" is not a number anyone
+	// downstream can use.
+	Composite bool `json:"composite"`
 }
 
 // Change is the absolute move from the previous close, and ok reports whether

@@ -647,3 +647,194 @@ func TestQuoteSourceSettingsRejectBadInput(t *testing.T) {
 		t.Errorf("a rejected patch still changed stored settings: %+v", cfg)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Composites
+// ---------------------------------------------------------------------------
+
+func TestCreateCompositeTicker(t *testing.T) {
+	st := newTestStore(t)
+
+	ratio, err := st.CreateTicker(NewTicker{Expression: " vti / gld ", Label: "Stocks vs gold"})
+	if err != nil {
+		t.Fatalf("create composite: %v", err)
+	}
+	if !ratio.IsComposite() {
+		t.Fatal("a row created from a formula is not composite")
+	}
+	if ratio.Expression != "VTI/GLD" {
+		t.Errorf("expression stored as %q, want the canonical VTI/GLD", ratio.Expression)
+	}
+	// The symbol is derived, so a composite has one stable key for the payload,
+	// for history, and for the pinned list — like any other row.
+	if ratio.Symbol != "VTI/GLD" {
+		t.Errorf("symbol is %q, want VTI/GLD", ratio.Symbol)
+	}
+	if ratio.Label != "Stocks vs gold" {
+		t.Errorf("label is %q", ratio.Label)
+	}
+}
+
+// Typing a formula into the symbol field is the same as giving an expression:
+// no provider has a symbol with a slash in it, so there is nothing else it
+// could mean, and requiring a mode switch first would be ceremony.
+func TestCreateTickerPromotesAFormulaTypedAsASymbol(t *testing.T) {
+	st := newTestStore(t)
+
+	ratio, err := st.CreateTicker(NewTicker{Symbol: "P/VTI"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if ratio.Expression != "P/VTI" || ratio.Symbol != "P/VTI" {
+		t.Errorf("got symbol %q / expression %q, want both P/VTI", ratio.Symbol, ratio.Expression)
+	}
+
+	// A hyphen alone is not a formula — BTC-USD has to stay a plain symbol.
+	plain, err := st.CreateTicker(NewTicker{Symbol: "eth-usd"})
+	if err != nil {
+		t.Fatalf("create plain: %v", err)
+	}
+	if plain.IsComposite() {
+		t.Errorf("ETH-USD was read as a formula (%q)", plain.Expression)
+	}
+}
+
+func TestCreateCompositeRejectsBadFormulas(t *testing.T) {
+	st := newTestStore(t)
+
+	for _, formula := range []string{"VTI/", "(VTI/GLD", "VTI $ GLD", "VTI", "(VTI)"} {
+		_, err := st.CreateTicker(NewTicker{Expression: formula})
+		if err == nil {
+			t.Errorf("%q was accepted as a composite", formula)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidExpression) {
+			t.Errorf("%q failed with %v, want ErrInvalidExpression (the API answers 400 on it)", formula, err)
+		}
+	}
+}
+
+// Two spellings of the same ratio are the same row, because both canonicalise
+// to the same symbol.
+func TestCompositesCollideOnTheCanonicalSymbol(t *testing.T) {
+	st := newTestStore(t)
+
+	if _, err := st.CreateTicker(NewTicker{Expression: "VTI/GLD"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := st.CreateTicker(NewTicker{Expression: "vti / gld"}); !errors.Is(err, ErrDuplicateSymbol) {
+		t.Errorf("re-adding the same ratio gave %v, want ErrDuplicateSymbol", err)
+	}
+}
+
+func TestUpdateTickerEditsAndConvertsComposites(t *testing.T) {
+	st := newTestStore(t)
+
+	ratio, err := st.CreateTicker(NewTicker{Expression: "VTI/GLD"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Editing the formula re-derives the symbol.
+	formula := "VTI/P"
+	edited, err := st.UpdateTicker(ratio.ID, TickerPatch{Expression: &formula})
+	if err != nil {
+		t.Fatalf("edit formula: %v", err)
+	}
+	if edited.Symbol != "VTI/P" || edited.Expression != "VTI/P" {
+		t.Errorf("after editing: symbol %q, expression %q", edited.Symbol, edited.Expression)
+	}
+
+	// A patch that touches neither leaves the row alone — this is the path a
+	// Pause button takes, and it must not re-parse a row into something else.
+	enabled := false
+	paused, err := st.UpdateTicker(ratio.ID, TickerPatch{Enabled: &enabled})
+	if err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if paused.Symbol != "VTI/P" || paused.Expression != "VTI/P" || paused.Enabled {
+		t.Errorf("pausing changed the row: %+v", paused)
+	}
+
+	// Clearing the formula needs a symbol to replace it with; without one the
+	// row's own symbol would be re-read as a formula and nothing would happen.
+	empty := ""
+	if _, err := st.UpdateTicker(ratio.ID, TickerPatch{Expression: &empty}); err == nil {
+		t.Error("clearing a formula without a symbol was accepted")
+	}
+
+	symbol := "AAPL"
+	plain, err := st.UpdateTicker(ratio.ID, TickerPatch{Symbol: &symbol, Expression: &empty})
+	if err != nil {
+		t.Fatalf("convert to plain: %v", err)
+	}
+	if plain.IsComposite() || plain.Symbol != "AAPL" {
+		t.Errorf("after converting: symbol %q, expression %q", plain.Symbol, plain.Expression)
+	}
+
+	// And back the other way, by typing a formula into the symbol field.
+	back := "AAPL/VTI"
+	composite, err := st.UpdateTicker(ratio.ID, TickerPatch{Symbol: &back})
+	if err != nil {
+		t.Fatalf("convert to composite: %v", err)
+	}
+	if !composite.IsComposite() || composite.Symbol != "AAPL/VTI" {
+		t.Errorf("after converting back: symbol %q, expression %q", composite.Symbol, composite.Expression)
+	}
+}
+
+// Changing a composite's formula drops its stale quote for the same reason
+// changing a symbol does: the number on screen would be measuring something
+// else until the next refresh.
+func TestUpdateCompositeDropsTheStaleQuote(t *testing.T) {
+	st := newTestStore(t)
+
+	ratio, err := st.CreateTicker(NewTicker{Expression: "VTI/GLD"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	price := 1.5
+	if err := st.SaveQuote(Quote{
+		TickerID: ratio.ID, Symbol: ratio.Symbol, Price: &price,
+		Status: StatusOK, FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("save quote: %v", err)
+	}
+
+	formula := "VTI/P"
+	if _, err := st.UpdateTicker(ratio.ID, TickerPatch{Expression: &formula}); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	quotes, err := st.Quotes()
+	if err != nil {
+		t.Fatalf("quotes: %v", err)
+	}
+	if _, ok := quotes[ratio.ID]; ok {
+		t.Error("the old ratio's price survived the formula change")
+	}
+}
+
+// Composites are ordinary rows everywhere else: they pin, they order, they
+// round-trip through the same queries.
+func TestCompositesBehaveLikeOrdinaryRows(t *testing.T) {
+	st := newTestStore(t)
+
+	ratio, err := st.CreateTicker(NewTicker{Expression: "VTI/GLD"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := st.UpdateConfig(ConfigPatch{PinnedSymbols: &[]string{"VTI/GLD"}}); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	tickers, err := st.Tickers()
+	if err != nil {
+		t.Fatalf("tickers: %v", err)
+	}
+	if tickers[0].ID != ratio.ID || !tickers[0].Pinned {
+		t.Errorf("pinning a composite did not lift it to the top: %+v", tickers[0])
+	}
+	if tickers[0].Expression != "VTI/GLD" {
+		t.Errorf("the list query lost the expression: %+v", tickers[0])
+	}
+}

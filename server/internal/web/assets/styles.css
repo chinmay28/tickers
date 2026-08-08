@@ -26,6 +26,11 @@
   --up: #4ade80;
   --down: #f87171;
   --warn: #fbbf24;
+  /* Composite rows are outlined in this. It is deliberately not --primary,
+     --up or --down: "this row is computed" is a different axis from "this is
+     the accent" or "this went up", and reusing one of those would make a
+     falling composite look like two contradictory statements. */
+  --composite: #a78bfa;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 24px 60px rgb(0 0 0 / 0.45);
   --radius: 14px;
@@ -48,6 +53,7 @@
     --up: #12855a;
     --down: #c0392b;
     --warn: #b26b00;
+    --composite: #6d43c8;
     --shadow: 0 1px 2px rgb(15 30 40 / 0.08);
     --shadow-lg: 0 24px 60px rgb(15 30 40 / 0.16);
   }
@@ -337,6 +343,10 @@ svg {
   border-color: color-mix(in srgb, var(--down) 45%, transparent);
   color: var(--down);
 }
+.chip--composite {
+  border-color: color-mix(in srgb, var(--composite) 55%, transparent);
+  color: var(--composite);
+}
 
 /* ------------------------------------------------------------------ *
  * Cards & page furniture
@@ -424,6 +434,23 @@ svg {
 }
 .quote--disabled {
   opacity: 0.55;
+}
+
+/* A composite is priced from a formula rather than fetched, and the outline is
+   the whole of how you tell at a glance. The inset bar carries the signal at
+   small sizes, where a 1px border tint alone reads as a rendering artefact. */
+.quote--composite {
+  border-color: color-mix(in srgb, var(--composite) 55%, var(--border));
+  box-shadow: var(--shadow), inset 3px 0 0 var(--composite);
+}
+/* The drop target still has to win — you are being told where the row lands,
+   not what kind of row it is. */
+.quote--composite.quote--drop-target {
+  border-color: var(--primary);
+}
+.quote__formula {
+  font-family: var(--mono);
+  color: var(--composite);
 }
 .quote--dragging {
   opacity: 0.4;

@@ -16,6 +16,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +53,7 @@ func Payload(snap Snapshot, format string) map[string]any {
 	switch format {
 	case store.FormatDetailed:
 		for _, q := range snap.Quotes {
+			digits := decimals(q)
 			entry := map[string]any{
 				"status":   q.Status,
 				"currency": q.Currency,
@@ -60,16 +62,17 @@ func Payload(snap Snapshot, format string) map[string]any {
 				entry["name"] = q.ShortName
 			}
 			if q.Price != nil {
-				entry["price"] = round2(*q.Price)
+				entry["price"] = roundTo(*q.Price, digits)
 			}
 			if q.PreviousClose != nil {
-				entry["previousClose"] = round2(*q.PreviousClose)
+				entry["previousClose"] = roundTo(*q.PreviousClose, digits)
 			}
 			if change, ok := q.Change(); ok {
-				entry["change"] = round2(change)
+				entry["change"] = roundTo(change, digits)
 			}
 			if pct, ok := q.ChangePercent(); ok {
-				entry["changePercent"] = round2(pct)
+				// A percentage is a percentage whatever it is a percentage of.
+				entry["changePercent"] = roundTo(pct, 2)
 			}
 			if q.Error != "" {
 				entry["error"] = q.Error
@@ -82,7 +85,7 @@ func Payload(snap Snapshot, format string) map[string]any {
 	default: // store.FormatMinion
 		for _, q := range snap.Quotes {
 			if q.Status == store.StatusOK && q.Price != nil {
-				out[q.Symbol] = fmt.Sprintf("%.2f", *q.Price)
+				out[q.Symbol] = strconv.FormatFloat(*q.Price, 'f', decimals(q), 64)
 			} else {
 				out[q.Symbol] = "N/A"
 			}
@@ -90,6 +93,27 @@ func Payload(snap Snapshot, format string) map[string]any {
 		out["timestamp"] = snap.At.Format(TimestampLayout)
 	}
 	return out
+}
+
+// decimals is how many places a value is rendered to.
+//
+// Two for anything fetched — that is the legacy contract and it does not move.
+// A composite is the exception, and only because it is new: no existing
+// consumer has ever had a "VTI/GLD" key, so nothing is broken by giving one
+// enough places to be a number. It needs them: a P/VTI of 0.0335 rendered
+// "0.03" has thrown away most of what it said.
+func decimals(q store.Quote) int {
+	if !q.Composite || q.Price == nil {
+		return 2
+	}
+	switch abs := math.Abs(*q.Price); {
+	case abs >= 100:
+		return 2
+	case abs >= 1:
+		return 4
+	default:
+		return 6
+	}
 }
 
 // Publisher writes snapshots to sinks over HTTP.
@@ -215,11 +239,12 @@ func trim(b []byte) string {
 	return s
 }
 
-// round2 keeps published numbers at the two decimals the legacy format used,
-// so a consumer never sees the detailed format disagree with the minion
-// format about a price. Half-way cases follow float64's own representation —
-// 1.005 is really 1.00499…, so it rounds down; that is the same answer
-// Python's f"{x:.2f}" gave in the original script.
-func round2(v float64) float64 {
-	return math.Round(v*100) / 100
+// roundTo keeps the detailed format's numbers at the same precision the minion
+// format renders them to, so a consumer never sees the two disagree about a
+// price. Half-way cases follow float64's own representation — 1.005 is really
+// 1.00499…, so it rounds down; that is the same answer Python's f"{x:.2f}"
+// gave in the original script.
+func roundTo(v float64, digits int) float64 {
+	scale := math.Pow(10, float64(digits))
+	return math.Round(v*scale) / scale
 }

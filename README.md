@@ -43,6 +43,7 @@ tickers/
     ├── cmd/tickers/            #   entrypoint & CLI
     └── internal/
         ├── store/              #   SQLite: schema, migrations, every query
+        ├── expr/               #   the formula language behind composite rows
         ├── quotes/             #   quote providers (Yahoo Finance)
         ├── publish/            #   downstream publishing + the legacy payload
         ├── engine/             #   the scheduled refresh + publish cycle
@@ -140,6 +141,27 @@ the payload order**. Pinning never takes reordering away from a row — it is a
 set, not an order, so the watchlist's own sequence still applies within the
 pinned group.
 
+**Composites** — a row can be a *formula over other symbols* instead of a
+symbol. Type `VTI/GLD` into the same box you would type `AAPL` into and you get
+a ratio: stocks against gold, priced every cycle from both legs. Composite rows
+are outlined in violet and carry a `composite` chip; everything else about them
+is identical to an ordinary row — sparkline, change against the previous close,
+pin, pause, reorder, publish.
+
+- `+ - * /`, brackets and plain numbers all work: `P/VTI`, `(VTI+GLD)/2`,
+  `BTC-USD/GLD`, `VTI*2 - GLD`.
+- Write a subtraction **with spaces** (`VTI - GLD`). An unspaced hyphen belongs
+  to the symbol, because `BTC-USD` is one.
+- A leg does not have to be on the watchlist. It is fetched for the formula and
+  never becomes a row of its own; a leg that *is* on the watchlist is not
+  fetched twice.
+- Composites are published like anything else, under the formula as the key
+  (`"VTI/GLD": "0.9478"`). They get more decimal places than a fetched price —
+  a `P/VTI` of 0.0335 rendered `"0.03"` would be useless. Nothing about the
+  keys existing consumers already read changes.
+- If a leg can't be priced, the row says which one and why, the same way a
+  broken symbol does.
+
 **Publishing** — where snapshots go. A destination is a base URL, a key, an
 optional category, and a format. After every refresh the snapshot is
 `PUT {base}/{key}`; if that fails (typically a 404 because the entry doesn't
@@ -151,7 +173,7 @@ Two formats:
 
 | Format | Payload |
 |---|---|
-| `minion` (default) | `{"VTI": "295.50", "BTC-USD": "N/A", "timestamp": "08/07 14:03:22"}` — the original script's shape, for existing consumers |
+| `minion` (default) | `{"VTI": "295.50", "VTI/GLD": "0.9478", "BTC-USD": "N/A", "timestamp": "08/07 14:03:22"}` — the original script's shape, for existing consumers |
 | `detailed` | per-symbol objects with `price`, `previousClose`, `change`, `changePercent`, `currency`, `status`, plus an ISO timestamp |
 
 **Activity** — the last refresh cycles, with per-symbol counts, which verb each

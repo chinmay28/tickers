@@ -7,6 +7,35 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Composite tickers
+
+A watchlist row can now be a **formula over other symbols** instead of a
+symbol. Type `VTI/GLD` into the same box you would type `AAPL` into and you get
+a ratio — stocks against gold — recomputed every cycle from both legs.
+
+- `+ - * /`, brackets and plain numbers: `P/VTI`, `(VTI+GLD)/2`,
+  `BTC-USD/GLD`, `VTI*2 - GLD`. Write a subtraction **with spaces**; an
+  unspaced hyphen belongs to the symbol, because `BTC-USD` is one.
+- Composite rows are outlined in violet and carry a `composite` chip.
+  Everything else is identical to an ordinary row: sparkline from stored
+  history, change and change percentage against the previous close, pin, pause,
+  drag to reorder, publish. That sameness is the design — a composite is a
+  ticker with an expression, and nothing else.
+- A leg does not have to be on the watchlist. It is fetched for the formula and
+  never becomes a row; a leg that *is* on the watchlist is not fetched twice.
+- If a leg can't be priced the row says which one, and why, in the provider's
+  own words.
+- Composites publish under the formula as the key (`"VTI/GLD": "0.9478"`), with
+  more decimal places than a fetched price — a `P/VTI` of 0.0335 rendered
+  `"0.03"` would be useless. **Nothing an existing consumer already reads
+  changes**: fetched symbols keep their two decimals exactly as before.
+- Editing a composite's formula re-derives its symbol and drops the stale
+  quote, the same way retyping a symbol does; clearing it (with a symbol) turns
+  the row back into an ordinary ticker.
+
+Schema migration `003_composite_expression` adds one defaulted column, so an
+older binary rolled back onto the new database keeps running.
+
 ### The script becomes an application
 
 Tickers is `update_minion_quotes.py` — a cron script that fetched seven

@@ -3,8 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +24,9 @@ type fakeProvider struct {
 	prices map[string]float64
 	calls  int
 	fail   map[string]bool
+	// asked records the symbol list of the most recent Fetch, so a test can
+	// assert what one cycle actually went and got.
+	asked []string
 }
 
 func (f *fakeProvider) Name() string { return "fake" }
@@ -29,6 +35,7 @@ func (f *fakeProvider) Fetch(ctx context.Context, symbols []string) (map[string]
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	f.asked = append([]string(nil), symbols...)
 
 	out := map[string]quotes.Quote{}
 	failures := map[string]error{}
@@ -59,6 +66,12 @@ func (f *fakeProvider) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeProvider) lastAsked() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
 }
 
 func newTestEngine(t *testing.T, provider quotes.Provider) (*Engine, *store.Store) {
@@ -442,5 +455,195 @@ func TestCheckProviderReportsBothOutcomes(t *testing.T) {
 	// An empty symbol falls back to a known-good default rather than erroring.
 	if _, err := eng.CheckProvider(context.Background(), ""); err != nil {
 		t.Errorf("empty symbol: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Composites
+// ---------------------------------------------------------------------------
+
+// clearWatchlist empties the seeded watchlist, so a composite test asserts on
+// exactly the rows it created.
+func clearWatchlist(t *testing.T, st *store.Store) {
+	t.Helper()
+	existing, err := st.Tickers()
+	if err != nil {
+		t.Fatalf("tickers: %v", err)
+	}
+	for _, ticker := range existing {
+		if err := st.DeleteTicker(ticker.ID); err != nil {
+			t.Fatalf("delete %s: %v", ticker.Symbol, err)
+		}
+	}
+}
+
+func TestRunCyclePricesACompositeFromItsLegs(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}}
+	eng, st := newTestEngine(t, provider)
+	clearWatchlist(t, st)
+
+	ratio, err := st.CreateTicker(store.NewTicker{Expression: "VTI/GLD"})
+	if err != nil {
+		t.Fatalf("create composite: %v", err)
+	}
+
+	run, err := eng.RunCycle(context.Background(), store.TriggerManual)
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if run.OKCount != 1 || run.ErrorCount != 0 {
+		t.Fatalf("run counted %d ok / %d failed, want 1 / 0", run.OKCount, run.ErrorCount)
+	}
+
+	stored, err := st.Quotes()
+	if err != nil {
+		t.Fatalf("quotes: %v", err)
+	}
+	q, ok := stored[ratio.ID]
+	if !ok {
+		t.Fatal("the composite has no stored quote")
+	}
+	if q.Status != store.StatusOK || q.Price == nil {
+		t.Fatalf("composite quote = %+v", q)
+	}
+	if *q.Price != 1.5 {
+		t.Errorf("VTI/GLD priced at %v, want 1.5", *q.Price)
+	}
+	// The fake's previous close is a dollar under the price, so the ratio's
+	// previous close is 299/199 — which is what gives a composite a change.
+	if q.PreviousClose == nil {
+		t.Fatal("composite has no previous close, so it can show no change")
+	}
+	if want := 299.0 / 199.0; math.Abs(*q.PreviousClose-want) > 1e-9 {
+		t.Errorf("previous close %v, want %v", *q.PreviousClose, want)
+	}
+	if _, ok := q.ChangePercent(); !ok {
+		t.Error("composite reports no change percentage")
+	}
+	// A ratio is dimensionless; stamping it USD would be a lie the payload
+	// would then carry downstream.
+	if q.Currency != "" {
+		t.Errorf("composite carries currency %q, want none", q.Currency)
+	}
+}
+
+// A composite's legs are fetched whether or not they are on the watchlist, and
+// a leg that is on it is not fetched twice.
+func TestCompositeLegsAreFetchedOnceAndNeedNoRow(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}}
+	eng, st := newTestEngine(t, provider)
+	clearWatchlist(t, st)
+
+	if _, err := st.CreateTicker(store.NewTicker{Symbol: "VTI"}); err != nil {
+		t.Fatalf("create VTI: %v", err)
+	}
+	if _, err := st.CreateTicker(store.NewTicker{Expression: "VTI/GLD"}); err != nil {
+		t.Fatalf("create composite: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	asked := provider.lastAsked()
+	slices.Sort(asked)
+	if !slices.Equal(asked, []string{"GLD", "VTI"}) {
+		t.Errorf("cycle fetched %v, want [GLD VTI] — GLD is a leg only, VTI is shared", asked)
+	}
+
+	tickers, err := st.Tickers()
+	if err != nil {
+		t.Fatalf("tickers: %v", err)
+	}
+	if len(tickers) != 2 {
+		t.Errorf("watchlist has %d rows, want 2 — a leg must not become a row", len(tickers))
+	}
+}
+
+func TestCompositeReportsTheLegThatFailed(t *testing.T) {
+	provider := &fakeProvider{
+		prices: map[string]float64{"VTI": 300},
+		fail:   map[string]bool{"GLD": true},
+	}
+	eng, st := newTestEngine(t, provider)
+	clearWatchlist(t, st)
+
+	ratio, err := st.CreateTicker(store.NewTicker{Expression: "VTI/GLD"})
+	if err != nil {
+		t.Fatalf("create composite: %v", err)
+	}
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	stored, err := st.Quotes()
+	if err != nil {
+		t.Fatalf("quotes: %v", err)
+	}
+	q := stored[ratio.ID]
+	if q.Status != store.StatusError {
+		t.Fatalf("composite with an unpriceable leg is %q", q.Status)
+	}
+	if !strings.Contains(q.Error, "GLD") {
+		t.Errorf("error %q does not name the leg that failed", q.Error)
+	}
+	if !strings.Contains(q.Error, "provider says no") {
+		t.Errorf("error %q drops the provider's own reason", q.Error)
+	}
+}
+
+// A composite stores history under its own symbol like anything else, which is
+// the whole of what the sparkline needs.
+func TestCompositeAccumulatesHistory(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}}
+	eng, st := newTestEngine(t, provider)
+	clearWatchlist(t, st)
+
+	if _, err := st.CreateTicker(store.NewTicker{Expression: "VTI/GLD"}); err != nil {
+		t.Fatalf("create composite: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+			t.Fatalf("cycle %d: %v", i, err)
+		}
+	}
+
+	points, err := st.History("VTI/GLD", 10)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(points) != 2 {
+		t.Fatalf("composite history has %d points, want 2", len(points))
+	}
+	for _, p := range points {
+		if p.Price != 1.5 {
+			t.Errorf("history point %v, want 1.5", p.Price)
+		}
+	}
+}
+
+// The composite reaches the published payload as an ordinary key, which is the
+// point of computing it into a quote rather than into a special case.
+func TestCompositeAppearsInTheSnapshot(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}}
+	eng, st := newTestEngine(t, provider)
+	clearWatchlist(t, st)
+
+	if _, err := st.CreateTicker(store.NewTicker{Expression: "VTI/GLD"}); err != nil {
+		t.Fatalf("create composite: %v", err)
+	}
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	snap, err := eng.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// Four decimals rather than the legacy two: the snapshot's join stamps the
+	// quote as composite, and a ratio needs the places to say anything.
+	payload := publish.Payload(snap, store.FormatMinion)
+	if got := payload["VTI/GLD"]; got != "1.5000" {
+		t.Errorf("payload[VTI/GLD] = %v, want \"1.5000\"", got)
 	}
 }

@@ -43,6 +43,33 @@ function money(value, currency) {
   return currency && currency !== 'USD' ? `${text} ${currency}` : text;
 }
 
+/** How many decimals a composite's value is worth showing. It has no currency
+ *  and no natural magnitude, so it gets more than a price would: a VTI/GLD
+ *  rendered "0.97" hides the move that "0.9683" shows. */
+function ratioDigits(value) {
+  const abs = Math.abs(value ?? 0);
+  return abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
+}
+
+/** Format a composite's value. */
+function ratio(value) {
+  if (value === null || value === undefined) return '—';
+  const digits = ratioDigits(value);
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+/** Mirror of the server's expr.Looks: does this text read as a composite
+ *  formula rather than a plain symbol? A bare hyphen doesn't count — BTC-USD is
+ *  a symbol, and a subtraction has to be spaced. Used only to pick wording and
+ *  to keep "Search by name" from looking up a ratio; the server decides. */
+function looksComposite(text) {
+  const s = String(text ?? '');
+  return /[/*+()]/.test(s) || s.includes(' - ');
+}
+
 function signed(value, digits = 2) {
   if (value === null || value === undefined) return '';
   const text = Math.abs(value).toLocaleString(undefined, {
@@ -441,14 +468,14 @@ function renderWatchlist(data) {
 
     <div class="card">
       <div class="card__head">
-        <h2 class="card__title">Add a ticker</h2>
+        <h2 class="card__title">Add a ticker or a ratio</h2>
       </div>
       <div class="card__body">
         <form class="add-row" id="add-form" data-form-key="add-form" autocomplete="off">
           <div class="field">
-            <label class="field__label" for="add-symbol">Symbol</label>
+            <label class="field__label" for="add-symbol">Symbol or formula</label>
             <input class="input input--mono" id="add-symbol" name="symbol"
-                   placeholder="AAPL, BTC-USD, VWRL.L" required />
+                   placeholder="AAPL, BTC-USD, VTI/GLD" required />
           </div>
           <div class="field">
             <label class="field__label" for="add-label">Label <span style="text-transform:none">(optional)</span></label>
@@ -457,6 +484,15 @@ function renderWatchlist(data) {
           <button class="btn btn--primary" type="submit">Add</button>
           <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
         </form>
+        <p class="field__hint" style="margin:0.55rem 0 0">
+          A formula makes a <strong>composite</strong> — a row priced from other
+          symbols instead of fetched. <code>VTI/GLD</code>, <code>P/VTI</code>,
+          <code>(VTI+GLD)/2</code> all work, with <code>+ − × ÷</code> and
+          brackets. Composites are outlined in violet and behave like any other
+          row: chart, change, pin, publish. Write a subtraction with spaces
+          (<code>VTI - GLD</code>) — an unspaced hyphen belongs to symbols like
+          <code>BTC-USD</code>.
+        </p>
         <div class="matches" id="matches">${renderMatches()}</div>
       </div>
     </div>
@@ -506,6 +542,10 @@ function renderQuote(t) {
   const q = t.quote;
   const editing = state.editing.has(t.id);
   const failed = q && q.status === 'error';
+  // A composite is a row whose price came from a formula over other symbols.
+  // It renders like every other row apart from the outline, the chip and the
+  // extra decimals — that sameness is the point of the feature.
+  const composite = Boolean(t.expression);
 
   let priceHTML;
   if (q && q.status === 'ok' && q.price !== null) {
@@ -513,9 +553,11 @@ function renderQuote(t) {
     const change =
       t.change === null || t.change === undefined
         ? ''
-        : `${signed(t.change)} (${signed(t.changePercent, 2)}%)`;
+        : // The change is shown to the same precision as the value it moved,
+          // so a row never disagrees with itself about how exact it is.
+          `${signed(t.change, composite ? ratioDigits(q.price) : 2)} (${signed(t.changePercent, 2)}%)`;
     priceHTML = `
-      <span class="quote__value">${esc(money(q.price, q.currency))}</span>
+      <span class="quote__value">${esc(composite ? ratio(q.price) : money(q.price, q.currency))}</span>
       ${change ? `<span class="quote__change quote__change--${dir}">${esc(change)}</span>` : ''}
       <span class="quote__change quote__change--flat">${esc(ago(q.fetchedAt))}</span>`;
   } else {
@@ -524,7 +566,9 @@ function renderQuote(t) {
   }
 
   return `
-    <article class="quote${t.enabled ? '' : ' quote--disabled'}" data-id="${esc(t.id)}" draggable="true">
+    <article class="quote${t.enabled ? '' : ' quote--disabled'}${
+      composite ? ' quote--composite' : ''
+    }" data-id="${esc(t.id)}" draggable="true">
       <button class="quote__handle" type="button" aria-label="Reorder ${esc(t.symbol)}" tabindex="-1">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <path d="M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01"/>
@@ -533,8 +577,16 @@ function renderQuote(t) {
 
       <div class="quote__head">
         <span class="quote__symbol">${esc(t.symbol)}</span>
+        ${composite ? `<span class="chip chip--composite">composite</span>` : ''}
+        ${
+          // The symbol is the formula with its spaces removed, so it is only
+          // worth printing the formula as well when the two actually differ.
+          composite && t.expression !== t.symbol
+            ? `<span class="quote__name quote__formula">${esc(t.expression)}</span>`
+            : ''
+        }
         ${t.label ? `<span class="quote__name">${esc(t.label)}</span>` : ''}
-        ${!t.label && q?.shortName ? `<span class="quote__name">${esc(q.shortName)}</span>` : ''}
+        ${!t.label && !composite && q?.shortName ? `<span class="quote__name">${esc(q.shortName)}</span>` : ''}
         ${t.pinned ? `<span class="chip chip--pinned">pinned</span>` : ''}
         ${t.enabled ? '' : `<span class="chip chip--off">paused</span>`}
       </div>
@@ -562,8 +614,15 @@ function renderQuote(t) {
         editing
           ? `<form class="quote__edit" data-edit="${esc(t.id)}" data-form-key="ticker:${esc(t.id)}" autocomplete="off">
               <div class="field">
-                <label class="field__label">Symbol</label>
-                <input class="input input--mono" name="symbol" value="${esc(t.symbol)}" required />
+                <label class="field__label">${composite ? 'Formula' : 'Symbol'}</label>
+                ${
+                  // The field's *name* is what tells the submit handler which
+                  // of the two this row is; the server re-derives the symbol
+                  // from the formula either way.
+                  composite
+                    ? `<input class="input input--mono" name="expression" value="${esc(t.expression)}" required />`
+                    : `<input class="input input--mono" name="symbol" value="${esc(t.symbol)}" required />`
+                }
               </div>
               <div class="field">
                 <label class="field__label">Label</label>
@@ -1110,19 +1169,26 @@ $('#view').addEventListener('submit', (event) => {
         state.matches = null;
         state.history.clear();
       },
-      { success: `Added ${symbol.toUpperCase()}` },
+      {
+        success: `Added ${symbol.toUpperCase().replace(/\s+/g, '')}${
+          looksComposite(symbol) ? ' (composite)' : ''
+        }`,
+      },
     );
     return;
   }
 
   if (form.dataset.edit) {
     const id = form.dataset.edit;
+    // A composite's form carries `expression`, a plain row's carries `symbol`.
+    // Sending only the one that exists is what keeps a composite from being
+    // reinterpreted as a symbol, and vice versa.
+    const payload = { label: (values.label || '').trim() };
+    if ('expression' in values) payload.expression = (values.expression || '').trim();
+    else payload.symbol = (values.symbol || '').trim();
     act(
       async () => {
-        await patch(`/tickers/${id}`, {
-          symbol: (values.symbol || '').trim(),
-          label: (values.label || '').trim(),
-        });
+        await patch(`/tickers/${id}`, payload);
         state.editing.delete(id);
         clearDraft(`ticker:${id}`);
         state.history.delete(id);
@@ -1204,6 +1270,12 @@ $('#view').addEventListener('click', async (event) => {
     const query = $('#add-symbol').value.trim();
     if (!query) {
       toast('Type a company or symbol first');
+      return;
+    }
+    if (looksComposite(query)) {
+      // The provider has no idea what a ratio is; searching for one returns
+      // nothing and reads as a broken search rather than a wrong button.
+      toast('That is a formula — press Add. Search looks up one symbol at a time.');
       return;
     }
     state.matches = { status: 'loading', items: [] };

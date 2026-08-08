@@ -300,9 +300,14 @@ func (s *Server) handleListTickers(w http.ResponseWriter, r *http.Request) {
 }
 
 type tickerBody struct {
-	Symbol  *string `json:"symbol"`
-	Label   *string `json:"label"`
-	Enabled *bool   `json:"enabled"`
+	Symbol *string `json:"symbol"`
+	// Expression makes the row a composite priced from a formula over other
+	// symbols. It is an alternative to Symbol, not an addition to it — and a
+	// Symbol that reads as a formula is treated as one, so a client that only
+	// knows about the symbol field can still add "VTI/GLD".
+	Expression *string `json:"expression"`
+	Label      *string `json:"label"`
+	Enabled    *bool   `json:"enabled"`
 }
 
 func (s *Server) handleCreateTicker(w http.ResponseWriter, r *http.Request) {
@@ -310,11 +315,17 @@ func (s *Server) handleCreateTicker(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	if body.Symbol == nil {
+	if body.Symbol == nil && body.Expression == nil {
 		writeError(w, http.StatusBadRequest, "symbol is required")
 		return
 	}
-	in := store.NewTicker{Symbol: *body.Symbol, Enabled: body.Enabled}
+	in := store.NewTicker{Enabled: body.Enabled}
+	if body.Symbol != nil {
+		in.Symbol = *body.Symbol
+	}
+	if body.Expression != nil {
+		in.Expression = *body.Expression
+	}
 	if body.Label != nil {
 		in.Label = *body.Label
 	}
@@ -341,17 +352,19 @@ func (s *Server) handleUpdateTicker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := s.store.UpdateTicker(r.PathValue("id"), store.TickerPatch{
-		Symbol:  body.Symbol,
-		Label:   body.Label,
-		Enabled: body.Enabled,
+		Symbol:     body.Symbol,
+		Expression: body.Expression,
+		Label:      body.Label,
+		Enabled:    body.Enabled,
 	})
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	// A changed symbol dropped its stale quote (see store.UpdateTicker), so
-	// refill it now — otherwise the row sits blank until the next poll.
-	if body.Symbol != nil {
+	// A changed symbol or formula dropped its stale quote (see
+	// store.UpdateTicker), so refill it now — otherwise the row sits blank
+	// until the next poll.
+	if body.Symbol != nil || body.Expression != nil {
 		if _, err := s.engine.RunCycle(r.Context(), store.TriggerManual); err != nil {
 			s.log.Warn("refresh after replacing ticker failed", "symbol", t.Symbol, "error", err)
 		}
@@ -682,6 +695,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, store.ErrDuplicateSymbol):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, store.ErrInvalidExpression):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case isValidationError(err):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
