@@ -62,6 +62,21 @@
         <span id="footer-status">Loading…</span>
       </footer>
 
+      <!-- The primary create action, floating clear of the list the way
+           CountRoster's does. It is shown on the Watchlist only; app.js hides
+           it elsewhere, because "add" has no meaning on the other pages. -->
+      <button
+        class="fab"
+        id="add-fab"
+        type="button"
+        title="Add a ticker or a ratio"
+        aria-label="Add a ticker or a ratio"
+        aria-haspopup="dialog"
+        hidden
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+
       <nav class="tab-bar" aria-label="Primary">
         <a class="tab-bar__item" href="#/" data-route="watchlist">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-6 4 4 4-7 5 6"/><path d="M3 21h18"/></svg>
@@ -81,6 +96,49 @@
         </a>
       </nav>
     </div>
+
+    <!-- The add form, as a native modal dialog.
+         It lives here in the shell rather than inside #view on purpose. #view
+         is redrawn wholesale every ten seconds, and a form rebuilt under a
+         half-typed symbol is exactly the bug the draft machinery exists to
+         paper over. Out here it is never re-rendered, so what you typed simply
+         stays typed — and `showModal()` brings the focus trap, the Escape key
+         and the inert background with it, none of which this app would
+         otherwise have. -->
+    <dialog class="sheet" id="add-dialog" aria-labelledby="add-dialog-title">
+      <div class="sheet__head">
+        <h2 class="sheet__title" id="add-dialog-title">Add a ticker or a ratio</h2>
+        <button class="sheet__close" type="button" id="add-cancel" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="sheet__body">
+        <form id="add-form" autocomplete="off">
+          <div class="field">
+            <label class="field__label" for="add-symbol">Symbol or formula</label>
+            <input class="input input--mono" id="add-symbol" name="symbol"
+                   placeholder="AAPL, BTC-USD, VTI/GLD" required />
+            <span class="field__hint">
+              A formula makes a <strong>composite</strong> — a row priced from
+              other symbols instead of fetched. <code>VTI/GLD</code>,
+              <code>P/VTI</code>, <code>(VTI+GLD)/2</code> all work, with
+              <code>+ − × ÷</code> and brackets. Write a subtraction with spaces
+              (<code>VTI - GLD</code>); an unspaced hyphen belongs to symbols
+              like <code>BTC-USD</code>.
+            </span>
+          </div>
+          <div class="field" style="margin-top:0.8rem">
+            <label class="field__label" for="add-label">Label <span style="text-transform:none">(optional)</span></label>
+            <input class="input" id="add-label" name="label" placeholder="Rainy-day fund" />
+          </div>
+          <div class="form-actions">
+            <button class="btn btn--primary" type="submit">Add</button>
+            <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
+          </div>
+        </form>
+        <div class="matches" id="matches"></div>
+      </div>
+    </dialog>
 
     <div class="toasts" id="toasts" aria-live="assertive"></div>
     <script src="/app.js" type="module"></script>

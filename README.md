@@ -132,9 +132,12 @@ Override defaults with env vars (`PORT`, `HOST`, `TICKERS_INSTALL`,
 
 ## Using it
 
-**Watchlist** — the symbols being tracked. Each row shows the last price, the
-move from the previous close, a sparkline from stored history, and when it was
-last read. Pinned symbols carry a `pinned` chip and always sort above the rest;
+**Watchlist** — the symbols being tracked. The floating **+** in the
+bottom-right corner is how you add one; it opens a sheet that takes a symbol or
+a formula, with **Search by name** for when you don't know the ticker. Each row
+shows the last price, the move from the previous close, a sparkline from stored
+history, and when it was last read. Pinned symbols carry a `pinned` chip and
+always sort above the rest;
 **Pin**/**Unpin** on a row edits the same list the Settings page shows as text.
 Drag to reorder on a desktop, or use ↑↓ on a phone; **the watchlist order is
 the payload order**. Pinning never takes reordering away from a row — it is a

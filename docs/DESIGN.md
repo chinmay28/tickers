@@ -437,13 +437,37 @@ happen under a cursor. Two rules cover it, and both are needed:
   an edit form, changing tabs — still land immediately, and they no longer
   empty the other forms on the page. A draft exists only once that field has
   been typed into, so restoring one can never shadow a fresh server value; it
-  is dropped when the form is saved or cancelled. Symbol-search results live in
-  `state` for the same reason: a redraw must not take the list away from under
-  a finger already reaching for a row.
+  is dropped when the form is saved or cancelled.
 
-The alternative — diffing, or keeping forms out of the re-rendered subtree — is
-more machinery than a page of drafts, and it would have to be got right in
+The alternative — diffing, or keeping every form out of the re-rendered subtree
+— is more machinery than a page of drafts, and it would have to be got right in
 every view rather than once in `render`.
+
+### The add dialog
+
+The one form that *is* kept out of the re-rendered subtree is the add form,
+which lives in the shell as a `<dialog>` opened by a floating **+** button in
+the bottom-right corner — CountRoster's create affordance, adapted. It sits
+outside `#view` for a reason worth naming: nothing in it has to survive a
+redraw, because nothing redraws it. No draft, no focus capture, no deferral —
+what you typed stays typed because the elements are never replaced. The
+symbol-search results are the same story, painted into their own region rather
+than carried through `render`.
+
+`showModal()` rather than a hand-rolled overlay: it brings the focus trap, the
+Escape key and an inert background, none of which this client would otherwise
+have. Closing — by the button, by the backdrop, or by Escape — resets the form;
+a half-typed symbol from ten minutes ago is a puzzle, not a convenience. A
+*rejected* add is the exception and keeps the dialog open on what you typed, so
+a duplicate or a formula that won't parse is fixed with an edit rather than a
+retype.
+
+CountRoster shows its FAB on phones only, because its desktop layout keeps a
+create button on the page. This one shows at every width: removing the
+add-a-ticker card from the top of the watchlist left the button as the only way
+in. Its distance from the bottom is a token (`--fab-inset`) because the toasts
+read it too and stack above the button rather than landing on it, and because
+the phone layout has to lift both clear of the tab bar.
 
 Caching is split on purpose: the shell, `app.js`, `styles.css` and the manifest
 are `no-cache`, while icons and the badge get a day. An upgrade that left a

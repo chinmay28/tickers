@@ -37,6 +37,13 @@
   --radius-sm: 9px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+  /* How far the floating add button sits above the bottom of the viewport.
+     It is a token because the toasts read it too — they stack above the
+     button rather than landing on top of it — and because the phone layout
+     has to lift both clear of the tab bar. */
+  --fab-size: 3.5rem;
+  --fab-inset: calc(env(safe-area-inset-bottom) + 1.25rem);
 }
 
 @media (prefers-color-scheme: light) {
@@ -569,17 +576,7 @@ svg {
   min-width: 0;
 }
 
-/* Add-a-ticker form */
-.add-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  align-items: flex-end;
-}
-.add-row .field {
-  flex: 1 1 10rem;
-  min-width: 0;
-}
+/* Symbol-search results in the add dialog. */
 .matches {
   margin-top: 0.7rem;
   display: grid;
@@ -726,6 +723,105 @@ svg {
 }
 
 /* ------------------------------------------------------------------ *
+ * Floating add button, and the sheet it opens
+ * ------------------------------------------------------------------ */
+
+/* Unlike CountRoster's, this one is shown at every width: removing the
+   add-a-ticker card from the top of the watchlist left the button as the only
+   way in, and a create action that exists on phones but not on desktop would
+   be a worse trade than one extra floating control. */
+.fab {
+  position: fixed;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: var(--fab-inset);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--fab-size);
+  height: var(--fab-size);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-ink);
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+/* `.fab` sets display, so the attribute needs a rule of its own to win. */
+.fab[hidden] {
+  display: none;
+}
+.fab:active {
+  transform: scale(0.93);
+  filter: brightness(0.96);
+}
+.fab:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+.fab svg {
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
+/* A centred dialog on desktop, a bottom sheet on a phone (see the responsive
+   block). `dialog` rather than a hand-rolled overlay: showModal() gives the
+   focus trap, the Escape key and an inert page for free. */
+.sheet {
+  margin: auto;
+  width: min(34rem, calc(100vw - 1.5rem));
+  max-width: none;
+  max-height: min(86dvh, 44rem);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+.sheet[open] {
+  display: flex;
+  flex-direction: column;
+}
+.sheet::backdrop {
+  /* Not a token: ::backdrop does not inherit from the page in every engine. */
+  background: rgb(4 8 10 / 0.62);
+}
+.sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.sheet__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+.sheet__close {
+  display: flex;
+  padding: 0.35rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.sheet__close:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.sheet__body {
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------------------ *
  * Mobile tab bar
  * ------------------------------------------------------------------ */
 .tab-bar {
@@ -764,7 +860,10 @@ svg {
   z-index: 40;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(4.5rem + env(safe-area-inset-bottom));
+  /* Above the floating button rather than across it: a toast is wider than
+     the gap left beside a 3.5rem disc, and one landing on the add button for
+     four seconds looks like the button broke. */
+  bottom: calc(var(--fab-inset) + var(--fab-size) + 0.6rem);
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -855,6 +954,21 @@ svg {
   }
   .tab-bar {
     display: flex;
+  }
+  /* Lift the button — and, through the token, the toasts — clear of the tab
+     bar that only exists at this width. */
+  :root {
+    --fab-inset: calc(4.5rem + env(safe-area-inset-bottom) + 0.9rem);
+  }
+  /* The dialog becomes a bottom sheet: full width, anchored to the bottom
+     edge, so it opens under the thumb rather than in the middle of the screen. */
+  .sheet {
+    width: 100%;
+    margin: auto 0 0;
+    max-height: 88dvh;
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom);
   }
   .quote {
     grid-template-columns: 1fr auto;
