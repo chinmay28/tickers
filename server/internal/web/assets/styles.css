@@ -882,6 +882,14 @@ svg {
 .backtest-note {
   margin: 0 0 0.8rem;
 }
+/* The replacements table is a caveat, not a result: it sits above the chart so
+   it is read before the numbers, and quieter than the cards below it so it does
+   not read as one of them. */
+.backtest-swaps {
+  margin-bottom: 1rem;
+  background: none;
+  box-shadow: none;
+}
 
 /* Interval preset chips under the seconds field. */
 .presets {

@@ -52,6 +52,10 @@ value under one key instead of adding up four symbols itself.
   holding failed and why, exactly as a composite does.
 - Holdings are fetched **alongside the watchlist and deduplicated against it**,
   so a portfolio over symbols already tracked costs no extra requests.
+- Each portfolio's card **says so in words** — "On the watchlist as
+  `FOUR-FUND`, priced every refresh and published with everything else" — rather
+  than showing the symbol as a bare chip and leaving "how do I add this to the
+  watchlist?" a fair question to still be asking.
 - Renaming a portfolio moves the key; deleting one takes the row with it. The
   row cannot be re-pointed from the watchlist — its symbol is the portfolio's
   name and its value comes from the allocation — but its label is still yours.
@@ -73,10 +77,11 @@ listing truncate the whole portfolio.
 - The stand-in is **scaled to meet the real series** at the month it takes over,
   so its month-to-month returns are carried over unchanged and no month reports
   a jump nobody experienced. Splicing prices instead would do exactly that.
-- **Always disclosed.** Every substitution gets its own note naming the holding,
-  the stand-in and the month the real data starts, and the holding rows carry
-  both. Most of a run can be a proxy, and one nobody was told about is a
-  fabrication.
+- **Always disclosed**, in a **Replacements table** above the chart: the
+  holding, what stood in for it, and the month its own data starts. Most of a
+  run can be a proxy, and one nobody was told about is a fabrication — but five
+  near-identical paragraphs are their own kind of undisclosed, because nobody
+  reads them. The table says the same in a fifth of the height.
 - A **proxied year's income** is the stand-in's, in the stand-in's units, so a
   yield column doesn't silently read zero for the years before a holding listed.
 - The **benchmark is never substituted** — it answers "what would the plain

@@ -463,9 +463,13 @@ as a return — the test pins a case where doing so would turn a ×4.4 run into 
 
 Three rules around it, each preventing a specific dishonesty:
 
-- **Every substitution is disclosed**, in its own note, naming the holding, the
-  stand-in and the month the real data takes over. Most of a run can be a proxy.
-  The holding rows also carry the configured replacement whether or not it was
+- **Every substitution is disclosed**, as a row in a Replacements table naming
+  the holding, the stand-in and the month the real data takes over. It started
+  as a sentence each, which reads fine for one and becomes five near-identical
+  paragraphs above the chart for a portfolio that leans on them — at which point
+  nobody reads any of them, including the one line beside them that is not
+  boilerplate. The engine emits the fields, not the prose; the client builds the
+  table. The holding rows carry the configured replacement whether or not it was
   used, so "it wasn't needed" is distinguishable from "none was set".
 - **The shortest history is reported after the substitution, not before.** A
   stand-in changes which series is actually holding the run back, and the answer
