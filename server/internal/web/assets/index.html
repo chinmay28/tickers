@@ -200,6 +200,24 @@
               </select>
             </div>
             <div class="field">
+              <label class="field__label" for="portfolio-contribution">Contribution <span style="text-transform:none">(optional)</span></label>
+              <div class="allocation-row__weight">
+                <input class="input" id="portfolio-contribution" name="contribution" type="number"
+                       min="0" step="any" placeholder="0" />
+                <select class="select" id="portfolio-contribution-frequency" name="contributionFrequency">
+                  <option value="none">never</option>
+                  <option value="monthly">monthly</option>
+                  <option value="quarterly">quarterly</option>
+                  <option value="annually">annually</option>
+                </select>
+              </div>
+              <span class="field__hint">
+                Paid in at the end of each period, split by the target weights.
+                Returns stay time-weighted, so money paid in never counts as
+                growth.
+              </span>
+            </div>
+            <div class="field">
               <label class="field__label" for="portfolio-start">Start year <span style="text-transform:none">(optional)</span></label>
               <input class="input" id="portfolio-start" name="startYear" type="number"
                      min="1900" max="2200" step="1" placeholder="as early as the data goes" />

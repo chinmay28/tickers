@@ -144,4 +144,15 @@ CREATE TABLE portfolios (
 );
 `,
 	},
+	{
+		// Periodic contributions. Both columns default to "nothing is paid in",
+		// which is what every existing portfolio means, so a binary rolled back
+		// onto this database reads and writes the table exactly as before — it
+		// just never sets them, and its portfolios stay lump-sum ones.
+		ID: "005_portfolio_contributions",
+		SQL: `
+ALTER TABLE portfolios ADD COLUMN contribution REAL NOT NULL DEFAULT 0;
+ALTER TABLE portfolios ADD COLUMN contribution_frequency TEXT NOT NULL DEFAULT 'none';
+`,
+	},
 }

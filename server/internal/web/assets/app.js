@@ -769,7 +769,11 @@ function portfolioRow(p) {
             .join('')}
         </div>
         <p class="field__hint" style="margin:0.55rem 0 0">
-          ${esc(amount(p.initialAmount))} · ${esc(period)} ·
+          ${esc(amount(p.initialAmount))}${
+            p.contribution > 0
+              ? ` + ${esc(amount(p.contribution))} ${esc(p.contributionFrequency)}`
+              : ''
+          } · ${esc(period)} ·
           ${esc(REBALANCE_LABELS[p.rebalance] ?? p.rebalance)}
         </p>
       </div>
@@ -805,14 +809,15 @@ function renderBacktest(data) {
   }
 
   const b = run.data;
-  const gain = b.portfolio.end - b.initial;
 
   return `
     <div class="page-head page-head--sub">
       <div>
         <h2>${esc(name)}</h2>
         <p>
-          ${esc(amount(b.initial))} from ${esc(monthName(b.start))} to
+          ${esc(amount(b.initial))}${
+            b.contributed ? ` plus ${esc(amount(b.contributed))} paid in` : ''
+          } from ${esc(monthName(b.start))} to
           ${esc(monthName(b.end))} — ${b.months} ${b.months === 1 ? 'month' : 'months'}${
             b.rebalances ? `, rebalanced ${b.rebalances} ${b.rebalances === 1 ? 'time' : 'times'}` : ''
           }.
@@ -820,7 +825,9 @@ function renderBacktest(data) {
       </div>
       <div class="perf-head__delta">
         <div class="perf-head__value">${esc(amount(b.portfolio.end))}</div>
-        <div class="perf-change perf-change--${direction(gain)}">${esc(percent(b.portfolio.totalPercent))}</div>
+        <div class="perf-change perf-change--${direction(b.portfolio.totalPercent)}">${esc(
+          percent(b.portfolio.totalPercent),
+        )}</div>
       </div>
     </div>
 
@@ -846,8 +853,15 @@ function renderBacktest(data) {
     <p class="field__hint perf-note">
       Monthly closes, adjusted for splits and dividends where the source reports
       them — which is what makes this a total return rather than a price chart.
-      Nothing here models fees, taxes, spreads or contributions, so it is what
-      the allocation did, not what an account holding it would have.
+      ${
+        b.contributed
+          ? `Returns are <strong>time-weighted</strong>: money paid in raises the
+             balance without having earned anything, so it is excluded from every
+             percentage here and shown as its own row instead.`
+          : ''
+      }
+      Nothing here models fees, taxes or spreads, so it is what the allocation
+      did, not what an account holding it would have.
     </p>
   `;
 }
@@ -944,6 +958,16 @@ function metricsTable(b) {
       <thead><tr><th></th>${columns.map((m) => `<th>${esc(m.label)}</th>`).join('')}</tr></thead>
       <tbody>
         <tr><th>Final balance</th>${cells((m) => esc(amount(m.end)))}</tr>
+        ${
+          // Only when there were any. Without this row a reader looking at a
+          // balance four times the initial amount and a total return of 40%
+          // has no way to see where the rest came from.
+          b.contributed
+            ? `<tr><th>Of which paid in</th>${cells(
+                () => `${esc(amount(b.initial))} + ${esc(amount(b.contributed))}`,
+              )}</tr>`
+            : ''
+        }
         <tr><th>Total return</th>${cells(
           (m) =>
             `<span class="perf-change perf-change--${direction(m.totalPercent)}">${esc(
@@ -1871,6 +1895,8 @@ function openPortfolio(portfolio) {
   form.elements.name.value = portfolio?.name ?? '';
   form.elements.initialAmount.value = portfolio?.initialAmount ?? 10000;
   form.elements.rebalance.value = portfolio?.rebalance ?? 'annually';
+  form.elements.contribution.value = portfolio?.contribution || '';
+  form.elements.contributionFrequency.value = portfolio?.contributionFrequency ?? 'none';
   form.elements.startYear.value = portfolio?.startYear || '';
   form.elements.endYear.value = portfolio?.endYear || '';
   form.elements.benchmark.value = portfolio?.benchmark ?? '';
@@ -1945,6 +1971,8 @@ function portfolioPayload() {
     startYear: Number(values.startYear) || 0,
     endYear: Number(values.endYear) || 0,
     rebalance: values.rebalance || 'annually',
+    contribution: Number(values.contribution) || 0,
+    contributionFrequency: values.contributionFrequency || 'none',
     benchmark: (values.benchmark || '').trim().toUpperCase(),
   };
 }

@@ -272,11 +272,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			"maxPinnedSymbols":  store.MaxPinnedSymbols,
 			"maxHoldings":       store.MaxHoldings,
 			"formats":           []string{store.FormatMinion, store.FormatDetailed},
-			"rebalances": []string{
-				store.RebalanceNone, store.RebalanceAnnually,
-				store.RebalanceQuarterly, store.RebalanceMonthly,
-			},
-			"seedSymbols": store.SeedSymbols,
+			"cadences":          store.Cadences,
+			"seedSymbols":       store.SeedSymbols,
 		},
 	})
 }
@@ -478,13 +475,15 @@ func (s *Server) handleListPortfolios(w http.ResponseWriter, r *http.Request) {
 // take exactly the same fields, and a client that has built one has built the
 // other.
 type portfolioBody struct {
-	Name          *string          `json:"name"`
-	Holdings      *[]store.Holding `json:"holdings"`
-	InitialAmount *float64         `json:"initialAmount"`
-	StartYear     *int             `json:"startYear"`
-	EndYear       *int             `json:"endYear"`
-	Rebalance     *string          `json:"rebalance"`
-	Benchmark     *string          `json:"benchmark"`
+	Name                  *string          `json:"name"`
+	Holdings              *[]store.Holding `json:"holdings"`
+	InitialAmount         *float64         `json:"initialAmount"`
+	StartYear             *int             `json:"startYear"`
+	EndYear               *int             `json:"endYear"`
+	Rebalance             *string          `json:"rebalance"`
+	Contribution          *float64         `json:"contribution"`
+	ContributionFrequency *string          `json:"contributionFrequency"`
+	Benchmark             *string          `json:"benchmark"`
 }
 
 func (s *Server) handleCreatePortfolio(w http.ResponseWriter, r *http.Request) {
@@ -511,6 +510,12 @@ func (s *Server) handleCreatePortfolio(w http.ResponseWriter, r *http.Request) {
 	if body.Rebalance != nil {
 		in.Rebalance = *body.Rebalance
 	}
+	if body.Contribution != nil {
+		in.Contribution = *body.Contribution
+	}
+	if body.ContributionFrequency != nil {
+		in.ContributionFrequency = *body.ContributionFrequency
+	}
 	if body.Benchmark != nil {
 		in.Benchmark = *body.Benchmark
 	}
@@ -529,13 +534,15 @@ func (s *Server) handleUpdatePortfolio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, err := s.store.UpdatePortfolio(r.PathValue("id"), store.PortfolioPatch{
-		Name:          body.Name,
-		Holdings:      body.Holdings,
-		InitialAmount: body.InitialAmount,
-		StartYear:     body.StartYear,
-		EndYear:       body.EndYear,
-		Rebalance:     body.Rebalance,
-		Benchmark:     body.Benchmark,
+		Name:                  body.Name,
+		Holdings:              body.Holdings,
+		InitialAmount:         body.InitialAmount,
+		StartYear:             body.StartYear,
+		EndYear:               body.EndYear,
+		Rebalance:             body.Rebalance,
+		Contribution:          body.Contribution,
+		ContributionFrequency: body.ContributionFrequency,
+		Benchmark:             body.Benchmark,
 	})
 	if err != nil {
 		s.fail(w, err)
@@ -589,6 +596,12 @@ func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Rebalance != nil {
 		spec.Rebalance = *body.Rebalance
+	}
+	if body.Contribution != nil {
+		spec.Contribution = *body.Contribution
+	}
+	if body.ContributionFrequency != nil {
+		spec.ContributionFrequency = *body.ContributionFrequency
 	}
 	if body.Benchmark != nil {
 		spec.Benchmark = *body.Benchmark

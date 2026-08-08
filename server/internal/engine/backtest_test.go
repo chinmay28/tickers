@@ -57,6 +57,16 @@ func half() []store.Holding {
 	return []store.Holding{{Symbol: "UP", Weight: 50}, {Symbol: "DOWN", Weight: 50}}
 }
 
+// lump is a run with no money paid in, where the index is just the balances
+// rebased to 1 — which is what the simulation produces for a lump sum.
+func lump(balances []float64) result {
+	index := make([]float64, len(balances))
+	for i, v := range balances {
+		index[i] = v / balances[0]
+	}
+	return result{balances: balances, index: index}
+}
+
 func TestBacktestCompoundsEachHoldingByItsOwnReturn(t *testing.T) {
 	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
 
@@ -438,6 +448,108 @@ func TestBacktestPricesABenchmarkThatIsAlsoAHoldingOnce(t *testing.T) {
 	}
 }
 
+func TestBacktestPaysInOnTheContributionCadence(t *testing.T) {
+	// A flat holding, so every penny of the final balance is a deposit and the
+	// arithmetic has nowhere to hide.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"FLAT": monthlyBars("2020-01", 100, 100, 100, 100),
+	})
+
+	paid := spec(store.Holding{Symbol: "FLAT", Weight: 100})
+	paid.Contribution = 100
+	paid.ContributionFrequency = store.RebalanceMonthly
+
+	result, err := eng.Backtest(context.Background(), paid)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	// Three monthly returns, so three contributions — including the one in the
+	// final month, which earns nothing but is money that genuinely went in.
+	if math.Abs(result.Contributed-300) > 1e-9 {
+		t.Errorf("contributed %.2f, want 300", result.Contributed)
+	}
+	if math.Abs(result.Portfolio.End-1300) > 1e-9 {
+		t.Errorf("final balance = %.2f, want 1300 (1000 in, 300 paid in, nothing earned)",
+			result.Portfolio.End)
+	}
+}
+
+func TestBacktestDoesNotCountContributionsAsReturn(t *testing.T) {
+	// The bug this whole index/balance split exists to prevent: a flat holding
+	// paid into every month triples the balance while returning nothing.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"FLAT": monthlyBars("2020-01", 100, 100, 100, 100),
+	})
+
+	paid := spec(store.Holding{Symbol: "FLAT", Weight: 100})
+	paid.Contribution = 1000
+	paid.ContributionFrequency = store.RebalanceMonthly
+
+	result, err := eng.Backtest(context.Background(), paid)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if math.Abs(result.Portfolio.TotalPercent) > 1e-9 {
+		t.Errorf("total return = %.4f%%, want 0 — nothing was earned; the balance grew because "+
+			"money was paid in", result.Portfolio.TotalPercent)
+	}
+	for _, year := range result.Annual {
+		if math.Abs(year.Percent) > 1e-9 {
+			t.Errorf("%d returned %.4f%%, want 0 for the same reason", year.Year, year.Percent)
+		}
+	}
+	// And the balance still shows the money, because that is the other question.
+	if math.Abs(result.Portfolio.End-4000) > 1e-9 {
+		t.Errorf("final balance = %.2f, want 4000", result.Portfolio.End)
+	}
+}
+
+func TestBacktestDrawdownIgnoresMoneyPaidInDuringTheFall(t *testing.T) {
+	// Halving, with contributions large enough to keep the balance climbing
+	// throughout. A drawdown measured on the balance would report none at all.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"SINKING": monthlyBars("2020-01", 100, 50, 25),
+	})
+
+	paid := spec(store.Holding{Symbol: "SINKING", Weight: 100})
+	paid.Contribution = 5000
+	paid.ContributionFrequency = store.RebalanceMonthly
+
+	result, err := eng.Backtest(context.Background(), paid)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Portfolio.MaxDrawdown < 70 {
+		t.Errorf("deepest fall = %.2f%%, want about 75 — the holding lost three quarters, and a "+
+			"drawdown row papered over by deposits is worse than none",
+			result.Portfolio.MaxDrawdown)
+	}
+	if result.Portfolio.End <= result.Initial {
+		t.Errorf("balance = %.2f; the deposits did raise it, and that has to stay true",
+			result.Portfolio.End)
+	}
+}
+
+func TestBacktestLumpSumIsUnchangedByTheContributionMachinery(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if result.Contributed != 0 {
+		t.Errorf("contributed %v with no contribution configured", result.Contributed)
+	}
+	// With no cash flows the index and the balances are proportional, so the
+	// return is still the one the balance shows.
+	if math.Abs(result.Portfolio.TotalPercent-1) > 1e-9 {
+		t.Errorf("total return = %.4f%%, want 1 (1000 → 1010)", result.Portfolio.TotalPercent)
+	}
+}
+
 func TestMaxDrawdownIsThePeakToTroughFallAndWhenItWasRecovered(t *testing.T) {
 	months := []string{"2020-01", "2020-02", "2020-03", "2020-04", "2020-05", "2020-06"}
 	balances := []float64{100, 120, 60, 90, 130, 110}
@@ -471,7 +583,8 @@ func TestMeasureWithholdsAnAnnualRateFromARunTooShortToHaveOne(t *testing.T) {
 	months := []string{"2020-01", "2020-02", "2020-03"}
 	balances := []float64{1000, 1100, 1200}
 
-	m := measure("Portfolio", months, balances, annualReturns(months, balances))
+	run := lump(balances)
+	m := measure("Portfolio", months, run, annualReturns(months, run.index))
 
 	if m.CAGR != nil {
 		t.Errorf("CAGR = %v for a two-month run; annualising that is a forecast wearing a "+
@@ -491,7 +604,8 @@ func TestMeasureCompoundsTheAnnualRateOverTheRunsRealLength(t *testing.T) {
 		balances[i] = 1000 * math.Pow(2, float64(i)/24)
 	}
 
-	m := measure("Portfolio", months, balances, annualReturns(months, balances))
+	run := lump(balances)
+	m := measure("Portfolio", months, run, annualReturns(months, run.index))
 
 	if m.CAGR == nil {
 		t.Fatal("no CAGR for a two-year run")

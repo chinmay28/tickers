@@ -27,12 +27,14 @@ var ErrBadSpec = errors.New("this portfolio cannot be backtested")
 // stored-row parts, so an unsaved allocation typed into the form and a saved
 // one run the same code.
 type BacktestSpec struct {
-	Holdings      []store.Holding
-	InitialAmount float64
-	StartYear     int
-	EndYear       int
-	Rebalance     string
-	Benchmark     string
+	Holdings              []store.Holding
+	InitialAmount         float64
+	StartYear             int
+	EndYear               int
+	Rebalance             string
+	Contribution          float64
+	ContributionFrequency string
+	Benchmark             string
 }
 
 // Backtest is what a simulation produced.
@@ -52,6 +54,10 @@ type Backtest struct {
 	Rebalances int `json:"rebalances"`
 
 	Initial float64 `json:"initial"`
+	// Contributed is the total paid in after the initial amount. The gap
+	// between Initial+Contributed and the final balance is what was earned;
+	// without it a reader has no way to tell growth from deposits.
+	Contributed float64 `json:"contributed"`
 	// Points is the growth of the initial amount, month by month, starting at
 	// Start with exactly Initial.
 	Points []Balance `json:"points"`
@@ -184,57 +190,73 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		initial = 10000
 	}
 
-	balances, rebalances := simulate(holdings, series, months, initial, spec.Rebalance)
-	annual := annualReturns(months, balances)
-
-	result := Backtest{
-		Start:      months[0],
-		End:        months[len(months)-1],
-		Months:     len(months) - 1,
-		Rebalances: rebalances,
-		Initial:    initial,
-		Points:     make([]Balance, len(months)),
-		Annual:     annual,
-		Holdings:   make([]HoldingResult, len(holdings)),
-		Portfolio:  measure("Portfolio", months, balances, annual),
-		Notes:      startNotes(months[0], holdings, benchmark, firstMonth),
+	cash := plan{
+		initial:      initial,
+		contribution: spec.Contribution,
+		frequency:    spec.ContributionFrequency,
+		rebalance:    spec.Rebalance,
+	}
+	if cash.frequency == "" {
+		cash.frequency = store.RebalanceNone
 	}
 
-	// The benchmark is one holding at 100%, run over the same months by the
-	// same code — which is what makes it a comparison rather than a second
-	// implementation that might disagree.
-	var benchBalances []float64
+	run := simulate(holdings, series, months, cash)
+	annual := annualReturns(months, run.index)
+
+	out := Backtest{
+		Start:       months[0],
+		End:         months[len(months)-1],
+		Months:      len(months) - 1,
+		Rebalances:  run.rebalances,
+		Initial:     initial,
+		Contributed: run.contributed,
+		Points:      make([]Balance, len(months)),
+		Annual:      annual,
+		Holdings:    make([]HoldingResult, len(holdings)),
+		Portfolio:   measure("Portfolio", months, run, annual),
+		Notes:       startNotes(months[0], holdings, benchmark, firstMonth),
+	}
+
+	// The benchmark is one holding at 100%, run over the same months with the
+	// same cash flows by the same code — which is what makes it a comparison
+	// rather than a second implementation that might disagree. Only the
+	// rebalancing is dropped: a single holding has nothing to rebalance against.
+	var bench *result
 	if benchmark != "" {
-		benchBalances, _ = simulate(
-			[]HoldingResult{{Symbol: benchmark, Weight: 100}}, series, months, initial, store.RebalanceNone)
-		benchAnnual := annualReturns(months, benchBalances)
-		benchMetrics := measure(benchmark, months, benchBalances, benchAnnual)
-		result.Benchmark = &benchMetrics
+		benchCash := cash
+		benchCash.rebalance = store.RebalanceNone
+		benchRun := simulate(
+			[]HoldingResult{{Symbol: benchmark, Weight: 100}}, series, months, benchCash)
+		bench = &benchRun
+
+		benchAnnual := annualReturns(months, benchRun.index)
+		benchMetrics := measure(benchmark, months, benchRun, benchAnnual)
+		out.Benchmark = &benchMetrics
 
 		byYear := make(map[int]float64, len(benchAnnual))
 		for _, r := range benchAnnual {
 			byYear[r.Year] = r.Percent
 		}
-		for i := range result.Annual {
-			if pct, ok := byYear[result.Annual[i].Year]; ok {
+		for i := range out.Annual {
+			if pct, ok := byYear[out.Annual[i].Year]; ok {
 				value := pct
-				result.Annual[i].Benchmark = &value
+				out.Annual[i].Benchmark = &value
 			}
 		}
 	}
 
 	for i, m := range months {
-		result.Points[i] = Balance{Month: m, Value: balances[i]}
-		if benchBalances != nil {
-			value := benchBalances[i]
-			result.Points[i].Benchmark = &value
+		out.Points[i] = Balance{Month: m, Value: run.balances[i]}
+		if bench != nil {
+			value := bench.balances[i]
+			out.Points[i].Benchmark = &value
 		}
 	}
 	for i, h := range holdings {
 		h.FirstMonth = firstMonth[h.Symbol]
-		result.Holdings[i] = h
+		out.Holdings[i] = h
 	}
-	return result, nil
+	return out, nil
 }
 
 // loadMonthly fetches one symbol's daily bars and reduces them to month-end
@@ -393,23 +415,52 @@ func weights(holdings []store.Holding) ([]HoldingResult, error) {
 	return out, nil
 }
 
-// simulate walks the months, compounding each holding by its own return and
-// rebalancing on the cadence's boundaries. It returns the portfolio's value at
-// each month and how many rebalances it performed.
+// plan is the money side of a simulation: what goes in, and when.
+type plan struct {
+	initial      float64
+	contribution float64
+	frequency    string
+	rebalance    string
+}
+
+// result is one pass of the simulation.
+//
+// The two series exist because a contribution is not a return. Money paid in
+// raises the balance without anything having been earned, so every *return*
+// number — total, CAGR, volatility, drawdown, the yearly table — is measured on
+// `index`, the growth of a single unit with the cash flows taken out, while
+// every *money* number is read off `balances`. Compute a CAGR from a balance
+// that has been topped up monthly for thirty years and you get a spectacular
+// figure describing nothing.
+//
+// With no contributions the two are proportional and the distinction costs
+// nothing.
+type result struct {
+	balances    []float64
+	index       []float64
+	rebalances  int
+	contributed float64
+}
+
+// simulate walks the months, compounding each holding by its own return,
+// paying in on the contribution cadence and rebalancing on the rebalancing one.
 //
 // Between rebalances the weights drift, which is the point: a 60/40 that has
 // not been touched for a decade is a 78/22, and a backtest that silently held
 // it at 60/40 would be reporting a strategy nobody ran.
 func simulate(holdings []HoldingResult, series map[string]map[string]float64,
-	months []string, initial float64, cadence string) ([]float64, int) {
+	months []string, p plan) result {
 	values := make([]float64, len(holdings))
 	for i, h := range holdings {
-		values[i] = initial * h.Weight / 100
+		values[i] = p.initial * h.Weight / 100
 	}
 
-	balances := make([]float64, len(months))
-	balances[0] = initial
-	rebalances := 0
+	out := result{
+		balances: make([]float64, len(months)),
+		index:    make([]float64, len(months)),
+	}
+	out.balances[0] = p.initial
+	out.index[0] = 1
 
 	for k := 1; k < len(months); k++ {
 		total := 0.0
@@ -421,26 +472,48 @@ func simulate(holdings []HoldingResult, series map[string]map[string]float64,
 			}
 			total += values[i]
 		}
-		balances[k] = total
+
+		// The month's return is measured before anything is paid in, against a
+		// balance that already includes last month's contribution. That is the
+		// time-weighted return: what the holdings did, uncontaminated by when
+		// money happened to arrive.
+		if out.balances[k-1] > 0 {
+			out.index[k] = out.index[k-1] * (total / out.balances[k-1])
+		} else {
+			out.index[k] = out.index[k-1]
+		}
+
+		if p.contribution > 0 && onBoundary(months[k], p.frequency) {
+			// A contribution in the final month is kept, unlike a rebalance:
+			// it never earns anything, but it is money that genuinely went in,
+			// and a balance that omitted it would not be the account's.
+			for i, h := range holdings {
+				values[i] += p.contribution * h.Weight / 100
+			}
+			total += p.contribution
+			out.contributed += p.contribution
+		}
+		out.balances[k] = total
 
 		// The last month never rebalances: it would move money at the closing
 		// bell of the run and change nothing about the answer, while counting
 		// as a trade that happened.
-		if k < len(months)-1 && rebalanceAfter(months[k], cadence) {
+		if k < len(months)-1 && onBoundary(months[k], p.rebalance) {
 			for i, h := range holdings {
 				values[i] = total * h.Weight / 100
 			}
-			rebalances++
+			out.rebalances++
 		}
 	}
-	return balances, rebalances
+	return out
 }
 
-// rebalanceAfter reports whether the cadence rebalances at the end of this
-// month. Boundaries are calendar ones — December for a yearly rebalance, not
-// "twelve months after the run happened to start" — because that is when
-// somebody doing this by hand would actually do it.
-func rebalanceAfter(month, cadence string) bool {
+// onBoundary reports whether this month closes one of the cadence's periods.
+// Boundaries are calendar ones — December for a yearly cadence, not "twelve
+// months after the run happened to start" — because that is when somebody doing
+// this by hand would actually do it. Rebalancing and contributing share it, for
+// the same reason they share a vocabulary.
+func onBoundary(month, cadence string) bool {
 	switch cadence {
 	case store.RebalanceMonthly:
 		return true
@@ -513,24 +586,28 @@ func annualReturns(months []string, balances []float64) []AnnualReturn {
 	return out
 }
 
-// measure computes the summary table for one balance series.
-func measure(label string, months []string, balances []float64, annual []AnnualReturn) Metrics {
+// measure computes the summary table for one run.
+//
+// Money comes off the balances and returns come off the index — see result.
+// Without contributions the two agree; with them, "final balance" and "total
+// return" answer different questions and both are wanted.
+func measure(label string, months []string, run result, annual []AnnualReturn) Metrics {
+	balances, index := run.balances, run.index
 	m := Metrics{
 		Label: label,
 		Start: balances[0],
 		End:   balances[len(balances)-1],
 	}
-	if m.Start > 0 {
-		m.TotalPercent = (m.End/m.Start - 1) * 100
-	}
+	growth := index[len(index)-1] / index[0]
+	m.TotalPercent = (growth - 1) * 100
 
-	years := float64(len(balances)-1) / 12
-	if years >= cagrMinYears && m.Start > 0 && m.End > 0 {
-		cagr := (math.Pow(m.End/m.Start, 1/years) - 1) * 100
+	years := float64(len(index)-1) / 12
+	if years >= cagrMinYears && growth > 0 {
+		cagr := (math.Pow(growth, 1/years) - 1) * 100
 		m.CAGR = &cagr
 	}
 
-	if stdev, ok := annualisedStdev(balances); ok {
+	if stdev, ok := annualisedStdev(index); ok {
 		m.Stdev = &stdev
 	}
 
@@ -549,7 +626,11 @@ func measure(label string, months []string, balances []float64, annual []AnnualR
 		}
 	}
 
-	m.MaxDrawdown, m.DrawdownPeak, m.DrawdownTrough, m.DrawdownRecover = maxDrawdown(months, balances)
+	// On the index, not the balances: a portfolio paid into every month can be
+	// falling hard while its balance still climbs, and a drawdown row that
+	// never fires because the contributions covered the fall is worse than
+	// none at all.
+	m.MaxDrawdown, m.DrawdownPeak, m.DrawdownTrough, m.DrawdownRecover = maxDrawdown(months, index)
 	return m
 }
 
@@ -617,12 +698,14 @@ func maxDrawdown(months []string, balances []float64) (depth float64, peak, trou
 // a typed one reach Backtest as the same thing.
 func backtestSpec(p store.Portfolio) BacktestSpec {
 	return BacktestSpec{
-		Holdings:      p.Holdings,
-		InitialAmount: p.InitialAmount,
-		StartYear:     p.StartYear,
-		EndYear:       p.EndYear,
-		Rebalance:     p.Rebalance,
-		Benchmark:     p.Benchmark,
+		Holdings:              p.Holdings,
+		InitialAmount:         p.InitialAmount,
+		StartYear:             p.StartYear,
+		EndYear:               p.EndYear,
+		Rebalance:             p.Rebalance,
+		Contribution:          p.Contribution,
+		ContributionFrequency: p.ContributionFrequency,
+		Benchmark:             p.Benchmark,
 	}
 }
 
