@@ -144,6 +144,22 @@ the payload order**. Pinning never takes reordering away from a row — it is a
 set, not an order, so the watchlist's own sequence still applies within the
 pinned group.
 
+**History** — **double-tap (or double-click) a row** to open its performance
+sheet: a chart of the daily closes behind it, and a table of returns over a
+week, a month, three months, the year to date, and one, three and five years.
+Pick a range with the chips above the chart, and drag across the line to read
+any single day off it. Returns longer than a year also show a compound annual
+rate, and a period the symbol is too young for says so rather than quietly
+measuring from its first day.
+
+This series comes from the quote source, not from the sparkline history stored
+locally — that is pruned to a window measured in hours, so it can say what a
+symbol did today and nothing longer. Closes are adjusted for splits and
+dividends where the source reports them, and each period is measured from the
+last close *on or before* its start, because markets are shut at weekends.
+Composites get the same sheet, recomputed from the formula on every day all of
+its legs traded.
+
 **Composites** — a row can be a *formula over other symbols* instead of a
 symbol. Type `VTI/GLD` into the same box you would type `AAPL` into and you get
 a ratio: stocks against gold, priced every cycle from both legs. Composite rows

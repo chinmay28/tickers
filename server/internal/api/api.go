@@ -95,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/tickers/{id}", s.handleUpdateTicker)
 	mux.HandleFunc("DELETE /api/tickers/{id}", s.handleDeleteTicker)
 	mux.HandleFunc("GET /api/tickers/{id}/history", s.handleTickerHistory)
+	mux.HandleFunc("GET /api/tickers/{id}/performance", s.handleTickerPerformance)
 
 	mux.HandleFunc("GET /api/sinks", s.handleListSinks)
 	mux.HandleFunc("POST /api/sinks", s.handleCreateSink)
@@ -412,6 +413,29 @@ func (s *Server) handleTickerHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"symbol": t.Symbol, "points": points})
+}
+
+// handleTickerPerformance answers the watchlist's history sheet: the daily
+// series behind a row and its returns over the usual windows.
+//
+// Unlike /history, which reads the stored sparkline points, this one goes
+// upstream — the stored series is pruned to a window measured in hours and can
+// never answer "how has this done in five years". It is therefore the one
+// read-only endpoint that can be slow, and the engine caches per symbol so a
+// repeated double-tap doesn't repeat the fetch.
+func (s *Server) handleTickerPerformance(w http.ResponseWriter, r *http.Request) {
+	perf, err := s.engine.Performance(r.Context(), r.PathValue("id"))
+	if err != nil {
+		// A provider that can only price today is a configuration a user chose,
+		// not a fault: say what is missing rather than logging a 500.
+		if errors.Is(err, quotes.ErrNoHistory) {
+			writeError(w, http.StatusNotImplemented, err.Error())
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"performance": perf})
 }
 
 // ---------------------------------------------------------------------------

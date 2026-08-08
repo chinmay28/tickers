@@ -232,6 +232,7 @@ one file. Two plain GETs are the whole integration:
 | | |
 |---|---|
 | Quotes | `GET {base}/v8/finance/chart/{SYMBOL}?range=1d&interval=1m` |
+| History | `GET {base}/v8/finance/chart/{SYMBOL}?period1=…&period2=…&interval=1d` |
 | Symbol search | `GET {base}/v1/finance/search?q=…` |
 
 The *behaviour* is still yfinance's, deliberately.
@@ -264,6 +265,45 @@ Swapping in a different source (a paid feed, Stooq, Alpha Vantage) is a new
 file in `internal/quotes/` implementing `Provider` and nothing else changing —
 that is the entire reason the interface exists. It is not a planned feature;
 see the non-goals.
+
+### Past prices are a separate, optional capability
+
+`Historian` is a second interface next to `Provider`, implemented by Yahoo and
+type-asserted at the call site, exactly like `Configurable`. The refresh loop
+never needs a past price, so requiring one of every provider would be taxing
+the common case for the rare one; a source that can only price today simply
+doesn't implement it, and the performance sheet gets `ErrNoHistory` and a
+sentence to show (`501`, because it is a capability that is absent rather than
+a request that is wrong).
+
+Four decisions inside it, each with a failure it prevents:
+
+- **The series is fetched, not read from `quote_history`.** That table holds one
+  point per refresh cycle and is pruned to a retention window measured in
+  hours: it is the sparkline's, and it can never answer "what has this done in
+  five years". They are different questions with different sources, and
+  conflating them would have meant retaining a year of one-minute samples on an
+  SD card to answer a question the provider answers in one GET.
+- **`period1`/`period2`, not `range=5y`.** A five-year return is measured from
+  the close *before* five years ago, and a named range starts on that boundary
+  at best. The engine asks for five years and two months, which also survives a
+  long holiday or a trading halt at the boundary.
+- **Adjusted closes where they exist.** An unadjusted five-year chart of a stock
+  that split 4:1 shows a crash nobody experienced. Raw closes are the fallback
+  for instruments with no adjustments to make — currencies, crypto.
+- **A bar is dated by the exchange's calendar, not by UTC.** `meta.gmtoffset`
+  shifts each timestamp before the date is taken. A close in Auckland stamped
+  in UTC lands on the previous day, and that date is the key a composite aligns
+  its legs on.
+
+Composite history is the refresh cycle's composite pricing, run once per day
+instead of once per cycle: fetch each leg, evaluate the formula against a map of
+symbol to value. Days are **intersected across the legs** rather than carried
+forward — a day one leg was shut and another moved would produce a ratio that
+never existed, on exactly the days a reader is most likely to be squinting at.
+Series are cached by *symbol* for ten minutes, which is both what stops a
+repeated double-tap repeating the fetch and what makes a composite over symbols
+already on the watchlist cost no extra requests.
 
 ## Configuration precedence
 
@@ -383,6 +423,7 @@ its life half-updated.
 | PATCH/DELETE | `/api/tickers/{id}` | edit (incl. replace) / remove |
 | POST | `/api/tickers/reorder` | `{ids: [...]}` |
 | GET | `/api/tickers/{id}/history` | sparkline points |
+| GET | `/api/tickers/{id}/performance` | five years of daily closes + returns |
 | GET/POST | `/api/sinks` | list / add |
 | PATCH/DELETE | `/api/sinks/{id}` | edit / remove |
 | POST | `/api/sinks/{id}/test` | send the real payload to one destination |
@@ -468,6 +509,40 @@ add-a-ticker card from the top of the watchlist left the button as the only way
 in. Its distance from the bottom is a token (`--fab-inset`) because the toasts
 read it too and stack above the button rather than landing on it, and because
 the phone layout has to lift both clear of the tab bar.
+
+### The performance sheet
+
+A second `<dialog>` in the shell, for the same reason: a chart being scrubbed
+must not be replaced by the ten-second poll mid-drag.
+
+It is opened by **double-tapping a row**, counted as two clicks on the same
+`.quote` inside 450ms rather than by a `dblclick` listener plus a touch path — a
+tap raises a click everywhere this app runs, so one timing check covers a thumb
+and a mouse. Controls are excluded from the count (double-clicking **Pause**
+means two pauses), and the row carries `touch-action: manipulation`, which gives
+up the browser's own double-tap gesture — page zoom — so the second tap reaches
+the handler at all. The gesture is undiscoverable on its own, so the watchlist's
+blurb names it; it is deliberately *not* a sixth button, because five already
+have to fit one line at 390px.
+
+The server sends five years and the chips re-slice it client-side, so changing
+range is instant and costs no request. Two things the chart does that a naive
+one doesn't, both found by pointing it at a ratio of two legs that move
+together:
+
+- **A series flat to within floating-point residue is drawn flat.** Scaling by
+  its span magnifies the last bits of a double into a dramatic zigzag.
+- **Axis labels get enough decimals to differ from each other.** The row's own
+  formatter gives three identical labels to a series that moved a thousandth of
+  a percent, which makes a chart of a rounding error look exactly like a chart
+  of a rally. The gutter is then sized from the widest label, which is also
+  what stops `68,000.00` being clipped.
+
+The scrub handler maps a pointer's x straight back to a point index, which only
+works because the SVG's aspect ratio is pinned in CSS to its `viewBox` — with
+letterboxing the crosshair would sit under the wrong day at every width but one.
+`touch-action: pan-y` on the chart lets a sideways drag read the line while an
+up-and-down drag still scrolls the sheet.
 
 ### The on-screen keyboard
 

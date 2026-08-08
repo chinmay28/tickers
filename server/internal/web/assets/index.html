@@ -152,6 +152,20 @@
       </div>
     </dialog>
 
+    <!-- The performance sheet, opened by double-tapping a watchlist row.
+         Same reasoning as the add dialog above: it lives in the shell, so the
+         ten-second redraw of #view can never pull the chart out from under
+         someone who is scrubbing it. Its body is painted by app.js. -->
+    <dialog class="sheet sheet--wide" id="perf-dialog" aria-labelledby="perf-title">
+      <div class="sheet__head">
+        <h2 class="sheet__title" id="perf-title">Performance</h2>
+        <button class="sheet__close" type="button" id="perf-close" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="sheet__body" id="perf-body"></div>
+    </dialog>
+
     <div class="toasts" id="toasts" aria-live="assertive"></div>
     <script src="/app.js" type="module"></script>
   </body>
