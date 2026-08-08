@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -18,6 +19,19 @@ import (
 // held up; once every symbol has an answer the work stops entirely.
 const maxLogosPerCycle = 6
 
+// logoTTL is how long a fetched answer stands before it is asked again.
+//
+// A logo changes when a company rebrands, so anything shorter is wasted
+// requests — but "never" was worse than it looked: it made a wrong URL, an
+// expired key and a source that was down for an hour into permanent answers
+// that only a manual cache clear could undo. A day is long enough to cost
+// nothing and short enough that a mistake fixes itself overnight.
+//
+// It deliberately covers the noes as well. Most of the cache is symbols with
+// no logo, and those are exactly the rows a corrected setting has to be able
+// to overturn.
+const logoTTL = 24 * time.Hour
+
 // refreshLogos asks about symbols the cache has no answer for yet.
 //
 // Every outcome is recorded except a real failure: an image is stored, "this
@@ -30,7 +44,10 @@ func (e *Engine) refreshLogos(ctx context.Context, symbols []string) {
 	if !ok {
 		return
 	}
-	asked, err := e.store.AskedAboutLogos()
+	// Uploaded logos are settled whatever their age: they are the operator's
+	// own files, and a refresh cycle overwriting one with whatever a third
+	// party happens to serve would be the feature undoing somebody's work.
+	settled, err := e.store.SettledLogos(time.Now().Add(-logoTTL))
 	if err != nil {
 		e.log.Warn("logo cache unreadable", "error", err)
 		return
@@ -41,7 +58,7 @@ func (e *Engine) refreshLogos(ctx context.Context, symbols []string) {
 		if fetched >= maxLogosPerCycle {
 			return
 		}
-		if asked[symbol] {
+		if settled[symbol] {
 			continue
 		}
 

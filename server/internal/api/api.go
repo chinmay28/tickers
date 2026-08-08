@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -99,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tickers/{id}/performance", s.handleTickerPerformance)
 
 	mux.HandleFunc("GET /api/logos/{symbol}", s.handleLogo)
+	mux.HandleFunc("PUT /api/logos/{symbol}", s.handleUploadLogo)
+	mux.HandleFunc("DELETE /api/logos/{symbol}", s.handleDeleteLogo)
 
 	mux.HandleFunc("GET /api/portfolios", s.handleListPortfolios)
 	mux.HandleFunc("POST /api/portfolios", s.handleCreatePortfolio)
@@ -185,11 +189,12 @@ type stateResponse struct {
 	// resolved — nil for a provider that can't be reconfigured, which is what
 	// the UI keys off to hide those fields.
 	Provider *providerView `json:"provider"`
-	// Logos is every symbol with a cached image, so the client knows which
-	// marks to draw as a picture and which to draw from the name. Sending the
-	// list beats letting the client guess: an <img> per symbol would 404 for
-	// every fund and every crypto pair on every load.
-	Logos []string `json:"logos"`
+	// Logos maps every symbol with an image to the second it was stored, so the
+	// client knows which marks to draw as a picture and which to draw from the
+	// name — an <img> per symbol would 404 for every fund and crypto pair on
+	// every load — and so a replaced image can beat the day of browser caching
+	// the bytes are served with.
+	Logos map[string]store.LogoMark `json:"logos"`
 	// LogoStats is how the cache is doing: how many symbols have a picture,
 	// how many came back without one, and why. A feature that fetches logos
 	// and shows none looks the same whether the symbols haven't got any or the
@@ -259,7 +264,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	logos, err := s.store.LogoSymbols()
+	logos, err := s.store.LogoVersions()
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -473,8 +478,10 @@ func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", logo.ContentType)
-	// A day is long enough that a watchlist redraw costs nothing and short
-	// enough that a logo the source has since changed is not pinned forever.
+	// A day of browser caching, because a watchlist redraw asks for every one
+	// of these and the bytes change about never. A replacement still shows up
+	// at once: the client stamps the URL with the version /api/state reports,
+	// so a new image is a new URL rather than a stale hit.
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	// The image came from a third party. It is served from this app's own
 	// origin, so it is worth saying plainly that it is only ever an image:
@@ -484,6 +491,73 @@ func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", "inline")
 	http.ServeContent(w, r, "", logo.FetchedAt, bytes.NewReader(logo.Bytes))
+}
+
+// handleUploadLogo stores an image somebody chose for a symbol.
+//
+// The body is the file itself rather than a multipart form: the client has a
+// File object and `fetch` will send it as-is, and multipart would mean parsing
+// a form to recover exactly those bytes.
+//
+// It works whether or not logo *fetching* is enabled. That setting exists
+// because fetching talks to a third party about your watchlist; uploading your
+// own picture talks to nobody, so gating it behind that switch would be asking
+// permission for something that never happens.
+func (s *Server) handleUploadLogo(w http.ResponseWriter, r *http.Request) {
+	symbol := store.NormalizeSymbol(r.PathValue("symbol"))
+	if symbol == "" {
+		writeError(w, http.StatusBadRequest, "a symbol is required")
+		return
+	}
+
+	// One byte past the cap, so a file exactly at the limit is accepted and one
+	// over it is refused rather than silently truncated into a broken image.
+	body, err := io.ReadAll(io.LimitReader(
+		http.MaxBytesReader(w, r.Body, store.MaxLogoBytes+1), store.MaxLogoBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not read the image: "+err.Error())
+		return
+	}
+	if len(body) == 0 {
+		writeError(w, http.StatusBadRequest, "that file is empty")
+		return
+	}
+	if len(body) > store.MaxLogoBytes {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("a logo has to be %d KB or smaller", store.MaxLogoBytes/1024))
+		return
+	}
+
+	// Sniffed, not taken from the request: this is served back from this app's
+	// own origin, and a file labelled image/png that is really HTML would be a
+	// stored cross-site script. It is the same check the fetcher makes, for the
+	// same reason — the file being local makes it likelier to be an honest
+	// mistake, not likelier to be safe.
+	kind := http.DetectContentType(body)
+	if !strings.HasPrefix(kind, "image/") {
+		writeError(w, http.StatusUnsupportedMediaType,
+			"that file is "+kind+", not an image the browser will render (PNG, JPEG, GIF or WebP)")
+		return
+	}
+
+	if err := s.store.SaveLogo(store.Logo{
+		Symbol: symbol, Status: store.LogoOK, Origin: store.LogoCustom,
+		ContentType: kind, Bytes: body, Source: "uploaded",
+	}); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"symbol": symbol, "contentType": kind})
+}
+
+// handleDeleteLogo removes a symbol's image. An uploaded one goes back to
+// whatever the source offers, or to the drawn mark.
+func (s *Server) handleDeleteLogo(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteLogo(r.PathValue("symbol")); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleTickerPerformance answers the watchlist's history sheet: the daily

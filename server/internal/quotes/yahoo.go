@@ -454,7 +454,7 @@ func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
 	// have their choice second-guessed by a fallback that mostly returns
 	// nothing.
 	if settings.LogoURL != "" {
-		return y.image(ctx, ExpandLogoURL(settings.LogoURL, symbol))
+		return y.image(ctx, ExpandLogoURL(settings.LogoURL, symbol, settings.LogoKey))
 	}
 
 	endpoint := fmt.Sprintf("%s/v1/finance/search?q=%s&quotesCount=6&newsCount=0&listsCount=0",
@@ -496,24 +496,34 @@ func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
 
 // image fetches one picture, given the URL a search result pointed at.
 func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
+	settings, client := y.current()
+	// Everything written down about this request uses the redacted form: the
+	// real URL is used once, to make the request, and never again.
+	safe := RedactLogoURL(src, settings.LogoKey)
+
 	parsed, err := url.Parse(src)
 	if err != nil {
-		return Logo{}, fmt.Errorf("logo URL %q: %w", src, err)
+		return Logo{}, fmt.Errorf("logo URL %q: %w", safe, err)
 	}
-	// The URL comes from a third party's JSON and is fetched by the server, so
-	// it is checked before it is followed rather than after: file:// would make
-	// this a way to read the host's disk through the quote source.
+	// The URL comes from a third party's JSON or an operator's settings and is
+	// fetched by the server, so it is checked before it is followed rather than
+	// after: file:// would make this a way to read the host's disk.
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return Logo{}, fmt.Errorf("logo URL %q is not http(s)", src)
+		return Logo{}, fmt.Errorf("logo URL %q is not http(s)", safe)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 	if err != nil {
 		return Logo{}, err
 	}
-	settings, client := y.current()
 	req.Header.Set("User-Agent", settings.UserAgent)
 	req.Header.Set("Accept", "image/*")
+	// A key with nowhere to go in the URL is a server-side credential, and a
+	// bearer header is where those belong: it stays out of the request line,
+	// out of the other end's access log, and out of any redirect target.
+	if settings.LogoKey != "" && !strings.Contains(settings.LogoURL, LogoKeyToken) {
+		req.Header.Set("Authorization", "Bearer "+settings.LogoKey)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -522,7 +532,14 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return Logo{}, fmt.Errorf("%w: nothing at %s", ErrNoLogo, src)
+		return Logo{}, fmt.Errorf("%w: nothing at %s", ErrNoLogo, safe)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// Worth its own message: this is the one failure a key is the answer
+		// to, and "HTTP 401" alone leaves the operator guessing which of the
+		// URL, the key and the network is wrong.
+		return Logo{}, fmt.Errorf("%s rejected the request (HTTP %d) — check the logo key",
+			safe, resp.StatusCode)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Logo{}, fmt.Errorf("logo fetch returned HTTP %d", resp.StatusCode)
@@ -538,10 +555,10 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 		// Durable, so it is wrapped: a URL that answers with something this
 		// big will do so again next cycle, and re-asking forever hides the
 		// misconfiguration instead of reporting it.
-		return Logo{}, fmt.Errorf("%w: %s answered with more than %d bytes", ErrNoLogo, src, maxLogoBytes)
+		return Logo{}, fmt.Errorf("%w: %s answered with more than %d bytes", ErrNoLogo, safe, maxLogoBytes)
 	}
 	if len(body) == 0 {
-		return Logo{}, fmt.Errorf("%w: %s answered with an empty body", ErrNoLogo, src)
+		return Logo{}, fmt.Errorf("%w: %s answered with an empty body", ErrNoLogo, safe)
 	}
 
 	// Sniffed rather than trusted: the content type is what the browser will
@@ -552,9 +569,11 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 		// Also durable, and the single most useful thing this can report: a
 		// mistyped logo URL usually answers 200 with somebody's HTML, and
 		// "answered with text/html, not an image" is the whole diagnosis.
-		return Logo{}, fmt.Errorf("%w: %s answered with %s, not an image", ErrNoLogo, src, kind)
+		return Logo{}, fmt.Errorf("%w: %s answered with %s, not an image", ErrNoLogo, safe, kind)
 	}
-	return Logo{ContentType: kind, Bytes: body, Source: src}, nil
+	// The stored provenance is the redacted URL too — the cache is read by
+	// anyone who can open the database or the Settings page.
+	return Logo{ContentType: kind, Bytes: body, Source: safe}, nil
 }
 
 // maxBody caps how much of a response we will read. The endpoints return tens

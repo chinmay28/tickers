@@ -143,6 +143,24 @@ found by shape and colour before the text is read.
 A search result whose name was long enough could already push its row past the
 edge of the add dialog; it now ellipsises as it was meant to.
 
+### Your own logo on any row
+
+**Edit** a watchlist row and upload an image for it. It works for a symbol, a
+composite and a portfolio alike — a portfolio row now has an **Edit** of its
+own, where its label and its logo live.
+
+- **Nothing has to be configured**, and nothing is fetched: an upload talks to
+  no third party, so it is not behind the *Symbol logos* switch, which exists
+  because fetching is.
+- **Yours wins and yours stays.** The daily refresh skips an uploaded image
+  rather than fetching over it, and turning logo fetching off — or changing the
+  source — empties the fetched cache without touching your files.
+- PNG, JPEG, GIF or WebP, up to 256 KB. The bytes are sniffed rather than
+  trusted, so a file that isn't really an image is refused and says what it was
+  instead: it would otherwise be served back from this app's own origin.
+- **Remove** puts the drawn mark back — offered only for uploads, because
+  removing a fetched logo would just bring it back on the next daily pass.
+
 ### Real logos, for anyone who wants them
 
 **Symbol logos** in Settings — off by default — fetches an actual logo per
@@ -162,7 +180,12 @@ symbol and shows it in the mark's place.
   recorded, so a network blink is retried and a real answer is not.
 - **A cycle fetches at most six**, so a first run on a long watchlist doesn't
   open a connection per symbol at a host that owes it nothing. The rest arrive
-  over the next few cycles, and then the fetching stops for good.
+  over the next few cycles.
+- **Answers stand for a day, then are asked again.** Logos change when a company
+  rebrands, so anything more often is wasted requests — but never re-asking was
+  worse than it looked: it turned a wrong URL, an expired key, and a source that
+  was down for an hour into permanent answers that only clearing the cache by
+  hand could undo. A day fixes those overnight.
 - Composites and portfolios never get one, and the drawn mark stays underneath
   every logo, so anything missing or slow to load leaves initials rather than an
   empty square.

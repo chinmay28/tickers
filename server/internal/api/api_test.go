@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1040,12 +1041,132 @@ func TestStateListsCachedLogos(t *testing.T) {
 	}
 
 	_, body := h.do(t, http.MethodGet, "/api/state", nil)
-	logos, ok := body["logos"].([]any)
+	logos, ok := body["logos"].(map[string]any)
 	if !ok {
-		t.Fatalf("state has no logos list: %v", body["logos"])
+		t.Fatalf("state has no logos map: %v", body["logos"])
 	}
-	if len(logos) != 1 || logos[0] != "VTI" {
+	if len(logos) != 1 {
 		t.Errorf("state listed %v, want just VTI — a symbol with no logo must not be listed, "+
 			"or the client draws a broken image for it", logos)
+	}
+	// The entry carries a version, so a replaced image beats the day of browser
+	// caching the bytes are served with.
+	mark, ok := logos["VTI"].(map[string]any)
+	if !ok {
+		t.Fatalf("VTI's entry is %v, want an object", logos["VTI"])
+	}
+	if v, ok := mark["v"].(float64); !ok || v <= 0 {
+		t.Errorf("VTI's version is %v, want the second its image was stored", mark["v"])
+	}
+}
+
+func TestStateNeverCarriesTheLogoKey(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+
+	if rec, body := h.do(t, http.MethodPatch, "/api/settings", map[string]any{
+		"logoKey":         "sk_live_do_not_leak",
+		"logoUrlTemplate": "https://logos.test/{symbol}.png",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("patch returned %d: %v", rec.Code, body)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+	rec := httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "sk_live_do_not_leak") {
+		t.Error("the logo key is in /api/state, which every browser on the network gets")
+	}
+
+	// But the page still has to know one is stored, or the field cannot say so.
+	_, body := h.do(t, http.MethodGet, "/api/state", nil)
+	settings := body["settings"].(map[string]any)
+	if settings["logoKeySet"] != true {
+		t.Errorf("logoKeySet = %v, want true", settings["logoKeySet"])
+	}
+	if _, leaked := settings["logoKey"]; leaked {
+		t.Error("the settings object has a logoKey field at all; it should never be serialised")
+	}
+}
+
+func TestUploadAndRemoveALogo(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+
+	upload := func(symbol string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/logos/"+symbol, bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A real PNG: the bytes are sniffed, not trusted, because they are served
+	// back from this app's own origin.
+	png := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+	}
+	if rec := upload("VTI", png); rec.Code != http.StatusOK {
+		t.Fatalf("upload returned %d: %s", rec.Code, rec.Body)
+	}
+
+	stored, err := h.store.Logo("VTI")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if stored.Origin != store.LogoCustom {
+		t.Errorf("origin = %q, want custom — a refresh cycle would fetch over it", stored.Origin)
+	}
+	if stored.ContentType != "image/png" {
+		t.Errorf("content type = %q, want image/png sniffed from the bytes", stored.ContentType)
+	}
+
+	// State reports it as an upload, so the UI can offer to remove it.
+	_, body := h.do(t, http.MethodGet, "/api/state", nil)
+	mark := body["logos"].(map[string]any)["VTI"].(map[string]any)
+	if mark["custom"] != true {
+		t.Errorf("state says custom=%v for an uploaded logo", mark["custom"])
+	}
+
+	// Anything that isn't an image is refused, whoever uploaded it: it would be
+	// served back from this origin.
+	if rec := upload("GLD", []byte("<html>not a logo</html>")); rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("uploading markup returned %d, want 415", rec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/logos/VTI", nil)
+	rec := httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete returned %d", rec.Code)
+	}
+	if _, err := h.store.Logo("VTI"); !errors.Is(err, store.ErrNotFound) {
+		t.Error("the logo survived being removed")
+	}
+}
+
+func TestUploadALogoForASymbolWithASlashInIt(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}})
+
+	png := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	}
+	// A composite's symbol is its formula, so it carries a slash. Escaped, it
+	// has to arrive as one path segment rather than two.
+	req := httptest.NewRequest(http.MethodPut, "/api/logos/VTI%2FGLD", bytes.NewReader(png))
+	rec := httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload returned %d: %s — a composite cannot be given a logo", rec.Code, rec.Body)
+	}
+	if _, err := h.store.Logo("VTI/GLD"); err != nil {
+		t.Fatalf("the composite's logo was stored under some other key: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/logos/VTI%2FGLD", nil)
+	rec = httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("serving it back returned %d", rec.Code)
 	}
 }

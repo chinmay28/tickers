@@ -208,4 +208,22 @@ CREATE TABLE logos (
 ALTER TABLE logos ADD COLUMN reason TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		// Who put this logo here. Everything already in the table was fetched,
+		// which is exactly what the default says, so an existing install needs
+		// no backfill and an older binary rolled back onto this database keeps
+		// working — it would re-fetch over an uploaded image eventually, which
+		// is the worst a rollback can do here and is recoverable by uploading
+		// again.
+		//
+		// The column exists because the two kinds have opposite lifetimes. A
+		// fetched logo is a cache: it expires, it is re-asked, and it is thrown
+		// away when the feature that fetched it is turned off. An uploaded one
+		// is the operator's own file, and every one of those behaviours would
+		// be data loss.
+		ID: "009_logo_origin",
+		SQL: `
+ALTER TABLE logos ADD COLUMN origin TEXT NOT NULL DEFAULT 'fetched';
+`,
+	},
 }

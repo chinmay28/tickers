@@ -598,16 +598,92 @@ func TestLogoTemplateGoesStraightToTheURL(t *testing.T) {
 }
 
 func TestExpandLogoURL(t *testing.T) {
-	cases := []struct{ template, symbol, want string }{
-		{"https://x.test/{symbol}.png", "aapl", "https://x.test/AAPL.png"},
-		{"https://x.test/{symbol_lower}.png", "AAPL", "https://x.test/aapl.png"},
-		{"https://x.test/i?t={symbol}", "BRK-B", "https://x.test/i?t=BRK-B"},
+	cases := []struct{ template, symbol, key, want string }{
+		{"https://x.test/{symbol}.png", "aapl", "", "https://x.test/AAPL.png"},
+		{"https://x.test/{symbol_lower}.png", "AAPL", "", "https://x.test/aapl.png"},
+		{"https://x.test/i?t={symbol}", "BRK-B", "", "https://x.test/i?t=BRK-B"},
 		// A slash in a symbol would otherwise address a different path.
-		{"https://x.test/{symbol}.png", "A/B", "https://x.test/A%2FB.png"},
+		{"https://x.test/{symbol}.png", "A/B", "", "https://x.test/A%2FB.png"},
+		{"https://x.test/{symbol}?token={key}", "AAPL", "pk_1", "https://x.test/AAPL?token=pk_1"},
+		// The key lands in a query string, so it is escaped as one.
+		{"https://x.test/{symbol}?token={key}", "AAPL", "a b&c", "https://x.test/AAPL?token=a+b%26c"},
 	}
 	for _, c := range cases {
-		if got := ExpandLogoURL(c.template, c.symbol); got != c.want {
-			t.Errorf("ExpandLogoURL(%q, %q) = %q, want %q", c.template, c.symbol, got, c.want)
+		if got := ExpandLogoURL(c.template, c.symbol, c.key); got != c.want {
+			t.Errorf("ExpandLogoURL(%q, %q, %q) = %q, want %q", c.template, c.symbol, c.key, got, c.want)
+		}
+	}
+}
+
+func TestLogoKeyIsSentAndNeverWrittenDown(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(onePixelPNG)
+	}))
+	defer srv.Close()
+
+	// No {key} in the template: the credential is a server-side one and belongs
+	// in a header.
+	y := NewYahoo(Settings{BaseURL: srv.URL, LogoURL: srv.URL + "/{symbol}.png", LogoKey: "sk_secret"})
+	logo, err := y.Logo(context.Background(), "AAPL")
+	if err != nil {
+		t.Fatalf("logo: %v", err)
+	}
+	if auth != "Bearer sk_secret" {
+		t.Errorf("Authorization = %q, want a bearer token — a key with nowhere to go in the "+
+			"URL is a server-side credential", auth)
+	}
+	if strings.Contains(logo.Source, "sk_secret") {
+		t.Errorf("the stored source %q carries the key; the cache is readable by anyone "+
+			"who can open the Settings page", logo.Source)
+	}
+}
+
+func TestLogoKeyInTheURLStaysOutOfTheHeaderAndTheRecord(t *testing.T) {
+	var auth, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		gotQuery = r.URL.RawQuery
+		// 404, so the failure path is what gets inspected — that is where a
+		// URL turns into a message somebody reads.
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	y := NewYahoo(Settings{
+		BaseURL: srv.URL,
+		LogoURL: srv.URL + "/{symbol}.png?token={key}",
+		LogoKey: "pk_public",
+	})
+	_, err := y.Logo(context.Background(), "AAPL")
+	if !errors.Is(err, ErrNoLogo) {
+		t.Fatalf("logo: %v, want ErrNoLogo for a 404", err)
+	}
+	if !strings.Contains(gotQuery, "pk_public") {
+		t.Errorf("query was %q; a template with {key} in it has to carry the key", gotQuery)
+	}
+	if auth != "" {
+		t.Errorf("Authorization = %q; the key was already in the URL and must not be sent twice", auth)
+	}
+	if strings.Contains(err.Error(), "pk_public") {
+		t.Errorf("the error %q carries the key, and it ends up on the Settings page", err)
+	}
+}
+
+func TestRedactLogoURL(t *testing.T) {
+	cases := []struct{ src, key, want string }{
+		{"https://x.test/A.png?token=pk_1", "pk_1", "https://x.test/A.png?token=%E2%80%A6"},
+		// Pasted straight into the template, so this build never saw the value
+		// as a key — the parameter name is the only clue and it is enough.
+		{"https://x.test/A.png?token=pasted", "", "https://x.test/A.png?token=%E2%80%A6"},
+		{"https://x.test/A.png?apikey=x&format=png", "", "https://x.test/A.png?apikey=%E2%80%A6&format=png"},
+		{"https://x.test/A.png", "", "https://x.test/A.png"},
+	}
+	for _, c := range cases {
+		if got := RedactLogoURL(c.src, c.key); got != c.want {
+			t.Errorf("RedactLogoURL(%q, %q) = %q, want %q", c.src, c.key, got, c.want)
 		}
 	}
 }

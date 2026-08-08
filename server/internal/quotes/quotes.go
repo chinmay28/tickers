@@ -50,6 +50,10 @@ type Settings struct {
 	// services, and an install that can reach one this binary has never heard
 	// of should not have to wait for a release to use it.
 	LogoURL string `json:"logoUrl"`
+	// LogoKey authenticates the logo request. It never appears in the settings
+	// the UI is served — see store.Config — and this struct's own JSON drops it
+	// too, because Effective() is what the Settings page renders.
+	LogoKey string `json:"-"`
 }
 
 // Merge overlays the non-zero fields of override onto s.
@@ -65,6 +69,9 @@ func (s Settings) Merge(override Settings) Settings {
 	}
 	if override.LogoURL != "" {
 		s.LogoURL = override.LogoURL
+	}
+	if override.LogoKey != "" {
+		s.LogoKey = override.LogoKey
 	}
 	return s
 }
@@ -212,11 +219,16 @@ var ErrNoHistory = errors.New("this quote provider does not supply price history
 // ErrNotFound means the provider has no such symbol.
 var ErrNotFound = errors.New("no quote for that symbol")
 
-// LogoPlaceholders are what a logo URL template may contain. One of them has to
-// be there, or every symbol would be given the same picture.
+// What a logo URL template may contain. One of the symbol tokens has to be
+// there, or every symbol would be given the same picture.
 const (
 	LogoSymbolToken      = "{symbol}"
 	LogoSymbolLowerToken = "{symbol_lower}"
+	// LogoKeyToken is where the key goes when the service wants it in the URL.
+	// Its absence is meaningful: a key configured with no `{key}` in the
+	// template is sent as a bearer token instead, which is how the same field
+	// serves both kinds of credential these services hand out.
+	LogoKeyToken = "{key}"
 )
 
 // ExpandLogoURL fills a logo template in for one symbol.
@@ -224,8 +236,38 @@ const (
 // The symbol is path-escaped: a template can put it in a path segment or a
 // query, and `BRK-B` is fine in both but a symbol with a slash in it would
 // otherwise silently address a different path.
-func ExpandLogoURL(template, symbol string) string {
+func ExpandLogoURL(template, symbol, key string) string {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	out := strings.ReplaceAll(template, LogoSymbolToken, url.PathEscape(symbol))
-	return strings.ReplaceAll(out, LogoSymbolLowerToken, url.PathEscape(strings.ToLower(symbol)))
+	out = strings.ReplaceAll(out, LogoSymbolLowerToken, url.PathEscape(strings.ToLower(symbol)))
+	return strings.ReplaceAll(out, LogoKeyToken, url.QueryEscape(key))
+}
+
+// RedactLogoURL is that URL with the credential taken back out, for anywhere it
+// might be written down.
+//
+// A logo URL ends up in three places a key has no business being: an error
+// message, the `source` column of the cache, and — through the reason on a
+// tombstone — the Settings page of an app with no login on it. Redacting at
+// the point of use rather than remembering to do it at each of those is what
+// keeps a key out of all three.
+func RedactLogoURL(src, key string) string {
+	if key != "" {
+		src = strings.ReplaceAll(src, key, "…")
+		src = strings.ReplaceAll(src, url.QueryEscape(key), "…")
+	}
+	// Also by name, because a template can carry a token this build never saw:
+	// pasted straight into the URL rather than into the key field.
+	parsed, err := url.Parse(src)
+	if err != nil {
+		return src
+	}
+	query := parsed.Query()
+	for _, name := range []string{"token", "key", "apikey", "api_key", "access_token"} {
+		if query.Has(name) {
+			query.Set(name, "…")
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
