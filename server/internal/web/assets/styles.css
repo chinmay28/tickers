@@ -1037,6 +1037,17 @@ svg {
   align-items: center;
   gap: 0.4rem;
 }
+/* The benchmark is in the table to be ranked against, not to be mistaken for
+   something held. Tinted rather than greyed: it has to stay as readable as the
+   rows around it, since reading it against them is the entire reason it is
+   there. */
+.holding--benchmark {
+  background: color-mix(in srgb, var(--primary) 7%, transparent);
+}
+.holding--benchmark .chip {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+}
 
 
 /* A sortable column head. The button is what makes the column reachable from a
@@ -1572,6 +1583,12 @@ svg {
   .perf-when {
     display: block;
     margin-left: 0;
+  }
+  /* A holding's chips — "benchmark", a stand-in — drop under its symbol rather
+     than widening the first column until the return is behind a horizontal
+     scroll. Same trade as the row above, and the same reason. */
+  .holding__name {
+    flex-wrap: wrap;
   }
 
 

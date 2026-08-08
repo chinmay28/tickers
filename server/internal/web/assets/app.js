@@ -1372,7 +1372,7 @@ function holdingsCard(b) {
 }
 
 function holdingsTable(b, period) {
-  const rows = sortedHoldings(period.returns ?? []);
+  const rows = sortedHoldings(holdingRows(b, period));
   if (!rows.length) return '<div class="empty">Nothing to measure over this period.</div>';
 
   return `
@@ -1380,14 +1380,7 @@ function holdingsTable(b, period) {
       ${esc(monthName(period.from))} → ${esc(monthName(period.to))} · portfolio
       <span class="perf-change perf-change--${direction(period.portfolio)}">${esc(
         percent(period.portfolio),
-      )}</span>${
-        period.benchmark === null || period.benchmark === undefined
-          ? ''
-          : ` · ${esc(b.benchmark?.label ?? 'benchmark')}
-              <span class="perf-change perf-change--${direction(period.benchmark)}">${esc(
-                percent(period.benchmark),
-              )}</span>`
-      }
+      )}</span>
     </p>
     <div class="table-scroll"><table class="table">
       <thead><tr>
@@ -1399,14 +1392,46 @@ function holdingsTable(b, period) {
     </table></div>`;
 }
 
+/** The rows: every holding, and the benchmark as one of them where there is one.
+ *
+ *  In the table rather than only in the caption above it, because sorted by
+ *  return it lands *in* the ranking — and "which of these beat the index" stops
+ *  being arithmetic over eight rows and becomes a question about which side of
+ *  one line a row is on. It costs nothing to put there: the number is already
+ *  in the payload, measured over the same months by the same code.
+ *
+ *  It is not held, so it has no weight. That is a null rather than a zero: zero
+ *  would rank it below every holding as though it were a position somebody had
+ *  closed. */
+function holdingRows(b, period) {
+  const rows = (period.returns ?? []).map((r) => ({ ...r, isBenchmark: false }));
+  if (b.benchmark && period.benchmark !== null && period.benchmark !== undefined) {
+    rows.push({
+      symbol: b.benchmark.label,
+      weight: null,
+      percent: period.benchmark,
+      proxied: false,
+      isBenchmark: true,
+    });
+  }
+  return rows;
+}
+
 /** The rows in the order the reader asked for, leaving the server's own — best
  *  first — as the default. Sorting a copy: the payload is rendered again on
  *  every redraw, and a sort in place would make the arrow the only thing that
  *  could still say which order it is in. */
-function sortedHoldings(returns) {
+function sortedHoldings(rows) {
   const { key, dir } = holdingSort();
   const compare = HOLDING_SORTS[key].compare;
-  return [...returns].sort((a, b) => (dir === 'asc' ? compare(a, b) : compare(b, a)));
+  return [...rows].sort((a, b) => {
+    // The benchmark has no weight to be ranked by, so it sits under the
+    // holdings whichever way that column points rather than leaping to the top
+    // the moment the sort is reversed. Every other column ranks it like any
+    // other row, which is the point of it being one.
+    if (key === 'weight' && a.isBenchmark !== b.isBenchmark) return a.isBenchmark ? 1 : -1;
+    return dir === 'asc' ? compare(a, b) : compare(b, a);
+  });
 }
 
 function holdingSort() {
@@ -1445,11 +1470,12 @@ function holdingRow(b, r, period) {
     gap < 0 ? 'behind' : 'ahead of'
   } the portfolio over this period`;
   return `
-    <tr>
+    <tr${r.isBenchmark ? ' class="holding--benchmark"' : ''}>
       <th>
         <span class="holding__name">
           ${symbolMark(r.symbol)}
           <span>${esc(r.symbol)}</span>
+          ${r.isBenchmark ? '<span class="chip">benchmark</span>' : ''}
           ${
             r.proxied && stand
               ? `<span class="chip__stand" title="Part of this move is ${esc(
@@ -1459,9 +1485,11 @@ function holdingRow(b, r, period) {
           }
         </span>
       </th>
-      <td class="field__hint">${esc(
-        Number(r.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-      )}%</td>
+      <td class="field__hint">${
+        r.isBenchmark
+          ? '<span title="Nothing is held in it — it is here to be measured against">not held</span>'
+          : `${esc(Number(r.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }))}%`
+      }</td>
       <td class="holding__return">
         <span class="perf-change perf-change--${direction(r.percent)}">${esc(percent(r.percent))}</span>
         <span class="perf-when" title="${esc(against)}">${esc(signed(gap))} pts</span>
