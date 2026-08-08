@@ -1105,18 +1105,18 @@ func TestMeasureCompoundsTheAnnualRateOverTheRunsRealLength(t *testing.T) {
 	}
 }
 
-// board is one period's leaderboard by key, so a test can name the period it
-// means instead of counting entries.
-func board(result Backtest, key string) Leaderboard {
-	for _, l := range result.Leaders {
-		if l.Key == key {
-			return l
+// period is one period's holding performance by key, so a test can name the
+// period it means instead of counting entries.
+func period(result Backtest, key string) PeriodPerformance {
+	for _, p := range result.Performance {
+		if p.Key == key {
+			return p
 		}
 	}
-	return Leaderboard{}
+	return PeriodPerformance{}
 }
 
-func TestLeaderboardRanksHoldingsByTheirOwnReturn(t *testing.T) {
+func TestHoldingPerformanceMeasuresEachHoldingOnItsOwn(t *testing.T) {
 	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
 
 	result, err := eng.Backtest(context.Background(), spec(half()...))
@@ -1124,9 +1124,9 @@ func TestLeaderboardRanksHoldingsByTheirOwnReturn(t *testing.T) {
 		t.Fatalf("backtest: %v", err)
 	}
 
-	run := board(result, "run")
+	run := period(result, "run")
 	if !run.Available || len(run.Returns) != 2 {
-		t.Fatalf("whole-run leaderboard = %+v, want both holdings ranked", run)
+		t.Fatalf("whole-run performance = %+v, want both holdings measured", run)
 	}
 	if run.Returns[0].Symbol != "UP" || run.Returns[1].Symbol != "DOWN" {
 		t.Errorf("ranked %s then %s, want the best first", run.Returns[0].Symbol, run.Returns[1].Symbol)
@@ -1146,7 +1146,7 @@ func TestLeaderboardRanksHoldingsByTheirOwnReturn(t *testing.T) {
 	}
 }
 
-func TestLeaderboardMeasuresTheYearFromTheDecemberBefore(t *testing.T) {
+func TestHoldingPerformanceMeasuresTheYearFromTheDecemberBefore(t *testing.T) {
 	// December 2019 through March 2020. The year to date is the move since
 	// December's close, not since January's — the same baseline the calendar
 	// years use, or the two cards would report different years.
@@ -1161,7 +1161,7 @@ func TestLeaderboardMeasuresTheYearFromTheDecemberBefore(t *testing.T) {
 		t.Fatalf("backtest: %v", err)
 	}
 
-	ytd := board(result, "ytd")
+	ytd := period(result, "ytd")
 	if !ytd.Available || ytd.From != "2019-12" {
 		t.Fatalf("year to date = %+v, want it measured from 2019-12", ytd)
 	}
@@ -1170,7 +1170,7 @@ func TestLeaderboardMeasuresTheYearFromTheDecemberBefore(t *testing.T) {
 	}
 }
 
-func TestLeaderboardWithholdsAPeriodTheRunDoesNotCover(t *testing.T) {
+func TestHoldingPerformanceWithholdsAPeriodTheRunDoesNotCover(t *testing.T) {
 	// Three months of history. Every close it has falls inside the last year,
 	// and that is not the same as having a year to report.
 	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
@@ -1181,24 +1181,24 @@ func TestLeaderboardWithholdsAPeriodTheRunDoesNotCover(t *testing.T) {
 	}
 
 	for _, key := range []string{"1y", "3y", "5y", "10y"} {
-		if l := board(result, key); l.Available || len(l.Returns) > 0 {
-			t.Errorf("%s came back available for a three-month run: %+v", key, l)
+		if p := period(result, key); p.Available || len(p.Returns) > 0 {
+			t.Errorf("%s came back available for a three-month run: %+v", key, p)
 		}
 	}
 	// Withheld, not dropped: the card has to be able to say the period exists
 	// and the run is too young for it.
-	if len(result.Leaders) != len(leaderWindows) {
-		t.Errorf("got %d leaderboards, want one per period — an unavailable period is still information",
-			len(result.Leaders))
+	if len(result.Performance) != len(holdingWindows) {
+		t.Errorf("got %d periods, want one per window — an unavailable period is still information",
+			len(result.Performance))
 	}
 	// A run that started in January has no full year to date either, which is
 	// exactly why the whole run is always one of the periods.
-	if !board(result, "run").Available {
+	if !period(result, "run").Available {
 		t.Error("the whole run is unavailable; no period is left for a young portfolio to be read over")
 	}
 }
 
-func TestLeaderboardSaysWhenAMoveIsPartlyItsStandIns(t *testing.T) {
+func TestHoldingPerformanceSaysWhenAMoveIsPartlyItsStandIns(t *testing.T) {
 	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
 		"OLD": monthlyBars("2020-01", 100, 110, 121, 133),
 		"NEW": {
@@ -1219,7 +1219,7 @@ func TestLeaderboardSaysWhenAMoveIsPartlyItsStandIns(t *testing.T) {
 		t.Fatalf("backtest: %v", err)
 	}
 
-	run := board(result, "run")
+	run := period(result, "run")
 	for _, r := range run.Returns {
 		if r.Symbol == "NEW" && !r.Proxied {
 			t.Errorf("NEW = %+v, want it marked proxied — the run starts two months before NEW listed", r)
@@ -1230,7 +1230,7 @@ func TestLeaderboardSaysWhenAMoveIsPartlyItsStandIns(t *testing.T) {
 	}
 }
 
-func TestLeaderboardCarriesTheBenchmarksMoveOverTheSamePeriod(t *testing.T) {
+func TestHoldingPerformanceCarriesTheBenchmarksMoveOverTheSamePeriod(t *testing.T) {
 	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
 
 	withBenchmark := spec(half()...)
@@ -1240,9 +1240,9 @@ func TestLeaderboardCarriesTheBenchmarksMoveOverTheSamePeriod(t *testing.T) {
 		t.Fatalf("backtest: %v", err)
 	}
 
-	run := board(result, "run")
+	run := period(result, "run")
 	if run.Benchmark == nil {
-		t.Fatal("no benchmark move on a leaderboard for a run that has a benchmark")
+		t.Fatal("no benchmark move on a period of a run that has a benchmark")
 	}
 	if math.Abs(*run.Benchmark-21) > 1e-9 {
 		t.Errorf("benchmark returned %.4f%% over the run, want 21", *run.Benchmark)

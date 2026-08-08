@@ -124,13 +124,14 @@ returns everything the client renders in one round trip.
   window; a range covers only closes *inside* it, and needs the whole window
   covered to be reported at all. Both are computed from the full series — the
   chart's points are thinned, the numbers never are.
-- **There is a second window list, and it is not that one.** `leaderWindows` in
-  `backtest.go` drives the portfolio's leaders-and-laggards card. It is monthly
-  where `windows` is daily, and every period is measured back from the *run's
-  last month* rather than from now — a run ending in 2019 has no opinion about
-  this year. The coverage rule is the same one, though: a period that opened
-  before the run did is sent unavailable rather than quietly measured from the
-  run's own start.
+- **There is a second window list, and it is not that one.** `holdingWindows` in
+  `backtest.go` drives the portfolio's per-holding performance table. It is
+  monthly where `windows` is daily, and every period is measured back from the
+  *run's last month* rather than from now — a run ending in 2019 has no opinion
+  about this year. The coverage rule is the same one, though: a period that
+  opened before the run did is sent unavailable rather than quietly measured
+  from the run's own start. Every holding goes over the wire, best first; which
+  rows matter is the reader's question, so the client sorts and drops nothing.
 - **Settings are a key/value table** so adding one never needs a migration. An
   unset key reads back as its default, not as zero — that distinction is what
   lets "unpin everything" differ from "never configured".

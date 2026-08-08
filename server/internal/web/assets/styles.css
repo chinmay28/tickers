@@ -804,7 +804,11 @@ svg {
   color: var(--muted);
   font-weight: 650;
 }
-.table tr:last-child td {
+/* The last row closes the table, so it drops its rule. Scoped to the body and
+   spelling out th as well as td: a row header is a th inside tbody, and the
+   head's own row is a :last-child too — it keeps its border. */
+.table tbody tr:last-child td,
+.table tbody tr:last-child th {
   border-bottom: 0;
 }
 .table td.wrap {
@@ -1023,49 +1027,44 @@ svg {
   box-shadow: none;
 }
 
-/* Leaders and laggards. Two columns on a screen wide enough for them, because
-   the whole point of the card is reading one against the other; one column on a
-   phone, where side-by-side would leave each return four characters wide. */
-.leaders {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 0.4rem 1.4rem;
-  margin-top: 0.7rem;
+/* The per-holding performance table. The period it covers reads as a caption
+   above it rather than as a fifth column repeating one date on every row. */
+.holdings__when {
+  margin: 0.7rem 0 0.5rem;
 }
-.leaders__against {
-  margin: 0.7rem 0 0;
-}
-.leaders__title {
-  margin: 0 0 0.35rem;
-  font-size: 0.72rem;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-}
-.leaders__hidden {
-  margin: 0.6rem 0 0;
-}
-/* The return is pinned right so the column reads as a column of returns —
-   ragged ones have to be compared one pair at a time. */
-.leader {
-  display: flex;
+.holding__name {
+  display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.35rem 0;
-  border-top: 1px solid var(--border);
+  gap: 0.4rem;
 }
-.leader__name {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  min-width: 0;
-  margin-right: auto;
+
+
+/* A sortable column head. The button is what makes the column reachable from a
+   keyboard and announces it as one; it inherits the head's own type so sorting
+   a column doesn't make it look like a different column. The arrow is given
+   fixed room so switching columns doesn't shift the header widths. */
+.th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
 }
-.leader__name strong {
-  font-family: var(--mono);
-  font-size: 0.85rem;
+.th-sort:hover,
+.th-sort--active {
+  color: var(--text);
+}
+.th-sort__arrow {
+  display: inline-block;
+  width: 0.7rem;
+  font-size: 0.62rem;
+  color: var(--primary);
 }
 
 /* Interval preset chips under the seconds field. */
@@ -1574,6 +1573,7 @@ svg {
     display: block;
     margin-left: 0;
   }
+
 
   /* Five actions have to fit one line at 390px, or Remove wraps onto a row of
      its own and every card grows by 2rem. Tighter than the desktop sizing, but
