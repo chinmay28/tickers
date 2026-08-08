@@ -105,4 +105,16 @@ SELECT 'pinned_symbols', group_concat(symbol, ',')
 HAVING count(*) > 0;
 `,
 	},
+	{
+		// Composite tickers: a row whose price is computed from a formula over
+		// other symbols ("VTI/GLD") rather than fetched. The column defaults to
+		// the empty string, which is what every existing row means — "this is an
+		// ordinary symbol" — so an older binary rolled back onto this database
+		// still reads and writes the table happily; it just never sets the
+		// column, and its composites-that-aren't stay plain tickers.
+		ID: "003_composite_expression",
+		SQL: `
+ALTER TABLE tickers ADD COLUMN expression TEXT NOT NULL DEFAULT '';
+`,
+	},
 }

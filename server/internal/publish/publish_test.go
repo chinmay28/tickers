@@ -219,16 +219,68 @@ func TestPublishAllVisitsEverySink(t *testing.T) {
 	}
 }
 
-func TestRound2(t *testing.T) {
+func TestRoundTo(t *testing.T) {
 	// Half-way cases are decided by float64's representation, not by a rule —
 	// 68120.115 is really 68120.11500000000...728, so it rounds up. The cases
 	// below are the unambiguous ones plus that documented reality.
 	for in, want := range map[float64]float64{
 		295.501: 295.50, 295.506: 295.51, -1.006: -1.01, 0: 0, 68120.115: 68120.12,
 	} {
-		if got := round2(in); got != want {
-			t.Errorf("round2(%v) = %v, want %v", in, got, want)
+		if got := roundTo(in, 2); got != want {
+			t.Errorf("roundTo(%v, 2) = %v, want %v", in, got, want)
 		}
+	}
+	if got := roundTo(0.03353504, 6); got != 0.033535 {
+		t.Errorf("roundTo(0.03353504, 6) = %v, want 0.033535", got)
+	}
+}
+
+// A composite is the one thing published to more than two decimals, and only
+// because it is new: a ratio of 0.0335 rendered "0.03" has thrown away most of
+// what it said, and no pre-existing consumer has ever had such a key.
+func TestCompositesArePublishedWithEnoughPrecision(t *testing.T) {
+	ratio, big := 0.03353504, 303.9456
+	prevRatio, prevBig := 0.033, 302.5
+	snap := Snapshot{
+		At: time.Date(2026, 8, 7, 14, 3, 22, 0, time.UTC),
+		Quotes: []store.Quote{
+			{Symbol: "P/VTI", Price: &ratio, PreviousClose: &prevRatio,
+				Status: store.StatusOK, Composite: true},
+			{Symbol: "(VTI+GLD)/2", Price: &big, PreviousClose: &prevBig,
+				Status: store.StatusOK, Composite: true},
+		},
+	}
+
+	minion := Payload(snap, store.FormatMinion)
+	if minion["P/VTI"] != "0.033535" {
+		t.Errorf("minion P/VTI = %v, want \"0.033535\"", minion["P/VTI"])
+	}
+	// Past 100 there is nothing left to say; a composite reads like a price.
+	if minion["(VTI+GLD)/2"] != "303.95" {
+		t.Errorf("minion (VTI+GLD)/2 = %v, want \"303.95\"", minion["(VTI+GLD)/2"])
+	}
+
+	detailed := Payload(snap, store.FormatDetailed)
+	entry, _ := detailed["P/VTI"].(map[string]any)
+	if entry["price"] != 0.033535 {
+		t.Errorf("detailed P/VTI price = %v, want 0.033535", entry["price"])
+	}
+	// The two formats must never disagree about the same number.
+	if entry["change"] != roundTo(ratio-prevRatio, 6) {
+		t.Errorf("detailed P/VTI change = %v", entry["change"])
+	}
+}
+
+// The legacy shape does not move for anything the provider priced, whatever
+// its magnitude — this is the compatibility surface.
+func TestFetchedQuotesStayAtTwoDecimals(t *testing.T) {
+	penny := 0.0345
+	snap := Snapshot{
+		At:     time.Date(2026, 8, 7, 14, 3, 22, 0, time.UTC),
+		Quotes: []store.Quote{{Symbol: "PENNY", Price: &penny, Status: store.StatusOK}},
+	}
+	if got := Payload(snap, store.FormatMinion)["PENNY"]; got != "0.03" {
+		t.Errorf("minion PENNY = %v, want \"0.03\" — the legacy format is fixed", got)
 	}
 }
 

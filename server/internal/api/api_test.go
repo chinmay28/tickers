@@ -752,3 +752,123 @@ func TestStateReportsRuntimeConfiguration(t *testing.T) {
 		t.Errorf("runtime = %v, want %+v", got, runtime)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Composites
+// ---------------------------------------------------------------------------
+
+func TestCreateCompositeTickerPricesItImmediately(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}})
+
+	rec, body := h.do(t, http.MethodPost, "/api/tickers", map[string]any{
+		"expression": "vti / gld",
+		"label":      "Stocks vs gold",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+	ticker, _ := body["ticker"].(map[string]any)
+	if ticker["symbol"] != "VTI/GLD" || ticker["expression"] != "VTI/GLD" {
+		t.Fatalf("created %v", ticker)
+	}
+
+	// Adding a ticker runs a cycle, so the row must already carry its value
+	// rather than showing "—" until the next poll.
+	_, state := h.do(t, http.MethodGet, "/api/state", nil)
+	view := findTicker(t, state, "VTI/GLD")
+	quote, _ := view["quote"].(map[string]any)
+	if quote == nil || quote["status"] != "ok" {
+		t.Fatalf("composite quote = %v", quote)
+	}
+	if price, _ := quote["price"].(float64); price != 1.5 {
+		t.Errorf("price = %v, want 1.5", quote["price"])
+	}
+	// The stub's previous close is two dollars under, so the ratio moved.
+	if _, ok := view["changePercent"].(float64); !ok {
+		t.Errorf("composite has no change percentage: %v", view)
+	}
+}
+
+// The symbol field takes a formula too, so a client that only knows about
+// symbols can still add a ratio.
+func TestCreateTickerAcceptsAFormulaInTheSymbolField(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300, "P": 30}})
+
+	rec, body := h.do(t, http.MethodPost, "/api/tickers", map[string]any{"symbol": "P/VTI"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+	ticker, _ := body["ticker"].(map[string]any)
+	if ticker["expression"] != "P/VTI" {
+		t.Errorf("created %v, want a composite", ticker)
+	}
+}
+
+func TestCreateCompositeRejectsABadFormula(t *testing.T) {
+	h := newHarness(t, stubProvider{})
+
+	rec, body := h.do(t, http.MethodPost, "/api/tickers", map[string]any{"expression": "VTI/"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400 (body %v)", rec.Code, body)
+	}
+	if msg, _ := body["error"].(string); msg == "" {
+		t.Error("a rejected formula came back without an explanation")
+	}
+}
+
+func TestPatchCompositeFormulaRepricesTheRow(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300, "GLD": 200, "P": 30}})
+
+	_, created := h.do(t, http.MethodPost, "/api/tickers", map[string]any{"expression": "VTI/GLD"})
+	ticker, _ := created["ticker"].(map[string]any)
+	id, _ := ticker["id"].(string)
+
+	rec, body := h.do(t, http.MethodPatch, "/api/tickers/"+id, map[string]any{"expression": "P/VTI"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+
+	_, state := h.do(t, http.MethodGet, "/api/state", nil)
+	view := findTicker(t, state, "P/VTI")
+	quote, _ := view["quote"].(map[string]any)
+	if quote == nil || quote["status"] != "ok" {
+		t.Fatalf("quote after the edit = %v", quote)
+	}
+	if price, _ := quote["price"].(float64); price != 0.1 {
+		t.Errorf("price = %v, want 0.1", quote["price"])
+	}
+}
+
+func TestCompositeHistoryIsServedLikeAnyOther(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}})
+
+	_, created := h.do(t, http.MethodPost, "/api/tickers", map[string]any{"expression": "VTI/GLD"})
+	ticker, _ := created["ticker"].(map[string]any)
+	id, _ := ticker["id"].(string)
+
+	rec, body := h.do(t, http.MethodGet, "/api/tickers/"+id+"/history", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+	if body["symbol"] != "VTI/GLD" {
+		t.Errorf("history is for %v, want VTI/GLD", body["symbol"])
+	}
+	points, _ := body["points"].([]any)
+	if len(points) == 0 {
+		t.Error("the composite recorded no history point, so it would draw no chart")
+	}
+}
+
+// findTicker pulls one row out of a /api/state body by symbol.
+func findTicker(t *testing.T, state map[string]any, symbol string) map[string]any {
+	t.Helper()
+	tickers, _ := state["tickers"].([]any)
+	for _, entry := range tickers {
+		view, _ := entry.(map[string]any)
+		if view["symbol"] == symbol {
+			return view
+		}
+	}
+	t.Fatalf("%s is not on the watchlist", symbol)
+	return nil
+}

@@ -81,7 +81,7 @@ SQLite, WAL mode, one writer. Timestamps are RFC3339 in UTC — sortable as text
 and readable when you open the file by hand.
 
 ```sql
-tickers(id, symbol UNIQUE, label, position, enabled, origin, created_at, updated_at)
+tickers(id, symbol UNIQUE, expression, label, position, enabled, origin, created_at, updated_at)
 quotes(ticker_id PK → tickers, symbol, price, previous_close, currency,
        short_name, market_state, status, error, fetched_at)
 quote_history(id, symbol, price, at)
@@ -106,6 +106,23 @@ from it, and unpinning drops it straight back into the slot it would otherwise
 have had. Ordering the pinned group by the settings list instead would have
 made dragging a pinned row do nothing — with the shipped watchlist pinned by
 default, that is every row on a fresh install.
+
+**A composite is a ticker with an `expression`, and nothing else.** A row whose
+`expression` is non-empty is priced by evaluating that formula over other
+symbols (`VTI/GLD`) rather than by fetching its own symbol; an empty expression
+— every row that existed before the feature — means an ordinary ticker. That is
+the entire distinction, and it is deliberately the *only* one: composites reuse
+the same table, the same quote row, the same history series, the same publish
+path. Everything downstream of "a row has a number" therefore worked on day one
+without knowing composites exist.
+
+A composite's `symbol` is **derived** from its expression — the canonical
+formula with the spaces taken out, so `vti / gld` and `VTI/GLD` are the same
+row and collide on the existing unique index. Deriving it rather than asking
+for one is what gives a composite the same stable, unique, publishable key
+every other row has: history keys on it, the payload keys on it, the pinned
+list keys on it. The expression is stored separately in its canonical *spaced*
+form, because that is the only form guaranteed to re-parse (see below).
 
 **`origin` is provenance now, nothing more.** A fresh install seeds the seven
 symbols from the script with `origin = 'seed'`, and changing a row's symbol
@@ -159,6 +176,51 @@ govern it, and both exist because of the upgrade story:
 
 `/api/health` reports the applied list, so an operator can see from outside
 which schema a running instance is on.
+
+## Composite formulas
+
+`internal/expr` is a ~350-line recursive-descent parser over a deliberately
+tiny grammar:
+
+```
+expr   := term (('+' | '-') term)*
+term   := factor (('*' | '/') factor)*
+factor := '-' factor | '(' expr ')' | number | symbol
+```
+
+Length and nesting are both capped, because the input is a text field and
+unbounded recursion on parentheses is a stack overflow waiting for a fuzzer.
+
+**The hyphen is the only genuinely ambiguous character**, and it is worth
+naming because it is where a naive tokeniser breaks: `-` is subtraction, and it
+is also a character in `BTC-USD` and `BRK-B`. The lexer resolves it
+positionally — a hyphen wedged between two symbol characters with no space
+belongs to the symbol; a hyphen with a space on either side is the operator. So
+`BTC-USD/GLD` reads as one ratio and `VTI - GLD` reads as a difference, which
+is what someone typing either of them meant. The cost is that `VTI-GLD` lexes
+as a single unpriceable symbol, which is why the error names the symbol it
+could not price and why the UI asks for spaces around a minus.
+
+**Parse returns two renderings.** `String()` is canonical with spaces around
+`+`/`−` so it re-parses to the same tree — that is what gets stored and shown
+back in the edit box, and `expr_test.go` asserts the round trip, because a
+canonical form that drifts would rewrite a row every time you saved it
+untouched. `Key()` is the same thing with the spaces removed, and becomes the
+row's symbol.
+
+**Typing a formula into the symbol field is the same as giving an expression.**
+`expr.Looks` decides, and the store promotes one to the other. No provider has
+a symbol containing `/`, `*`, `+` or brackets, so there is nothing else the
+input could mean, and a mode switch in front of it would be ceremony. A bare
+hyphen deliberately does not count.
+
+**Evaluation happens in the refresh cycle, twice per composite** — once against
+the fetched prices and once against the fetched previous closes. The second is
+what gives a ratio a change and a change percentage, and it is best-effort: a
+composite with no previous close still shows a price. A missing leg comes back
+as a typed `*expr.MissingError`, which the engine swaps for that leg's own
+provider error, because "no price for GLD" is a worse answer than the 404 that
+explains why.
 
 ## The quote source
 
@@ -251,13 +313,17 @@ show the value it is falling back to as its placeholder.
 `engine.RunCycle` is the whole of the original `main()`:
 
 1. Read the config and the enabled watchlist.
-2. Fetch every symbol concurrently (capped at 4 in flight — a domestic
-   connection firing twenty at once collects timeouts, not quotes).
-3. Store one quote per ticker, success or failure, and append a history point
-   for each success.
-4. Prune history past the retention window.
-5. If `publishOnRefresh`, build the snapshot and send it to every enabled sink.
-6. Append a `run` record.
+2. Work out the symbols to fetch: the plain rows, plus every leg of every
+   composite, deduplicated. A ratio over a symbol already on the watchlist
+   costs no extra request, and a leg that isn't on it is fetched without
+   becoming a row.
+3. Fetch them concurrently (capped at 4 in flight — a domestic connection
+   firing twenty at once collects timeouts, not quotes).
+4. Store one quote per ticker, success or failure — fetched for a plain row,
+   evaluated for a composite — and append a history point for each success.
+5. Prune history past the retention window.
+6. If `publishOnRefresh`, build the snapshot and send it to every enabled sink.
+7. Append a `run` record.
 
 It never fails as a whole because a symbol failed — only something structural,
 like an unreadable database, comes back as an error. Cycles are serialised by a
@@ -285,6 +351,15 @@ so Activity can distinguish "updated" from "created" without guessing. When both
 fail it reports **both** errors — being told only about the POST sends people
 looking at the wrong endpoint, and the PUT's status is usually the one that
 explains what the store actually wants.
+
+The one place the payload does move is **composites**, and only because they
+are new. A ratio published to the legacy two decimals is not a number anyone
+can use — a `P/VTI` of 0.0335 rendered `"0.03"` has thrown away most of what it
+said — so a composite gets 2, 4 or 6 places by magnitude. No pre-existing
+consumer has ever had a `VTI/GLD` key, so nothing that was already being read
+changes; `TestFetchedQuotesStayAtTwoDecimals` is the guard on that boundary.
+Composite-ness is not stored on the quote row: `Engine.Snapshot` already joins
+tickers to quotes, and stamps it there.
 
 Sink URLs are validated to `http`/`https` on the way in. The server POSTs
 whatever is configured there, so restricting the scheme keeps a typo — or a
@@ -323,8 +398,12 @@ Conventions:
 
 - Request bodies reject unknown fields. A client sending `{"symbl": "VTI"}`
   should be told, not silently given a ticker with an empty symbol.
+- `POST/PATCH /api/tickers` take `symbol` **or** `expression`; a `symbol` that
+  reads as a formula is treated as one, so a client that only knows about
+  symbols can still add `VTI/GLD`.
 - Errors are `{"error": "…"}`. `404` for a missing row, `409` for a duplicate
-  symbol, `400` for anything the caller can fix, `500` otherwise.
+  symbol, `400` for anything the caller can fix (including a formula that
+  won't parse, which carries the parser's own message), `500` otherwise.
 - A path or method under `/api/` that matches nothing gets a JSON 404 — never
   the HTML shell, which a client would then try to JSON-parse.
 - `/api/search` returns `200` with a warning even when the upstream search

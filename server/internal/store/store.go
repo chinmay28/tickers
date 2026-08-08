@@ -27,6 +27,13 @@ var ErrNotFound = errors.New("not found")
 // a 409, not a 500.
 var ErrDuplicateSymbol = errors.New("symbol already on the watchlist")
 
+// ErrInvalidExpression wraps everything a composite's formula can be wrong
+// about — a stray character, an unclosed bracket, a formula that combines
+// nothing. It has a sentinel of its own because the API has to answer 400 for
+// all of them, and the underlying messages are the parser's rather than a fixed
+// set this package could match on.
+var ErrInvalidExpression = errors.New("invalid composite formula")
+
 // Store is a handle on the database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
