@@ -117,4 +117,31 @@ HAVING count(*) > 0;
 ALTER TABLE tickers ADD COLUMN expression TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		// Portfolios: a saved allocation to backtest. A whole new table, so an
+		// older binary rolled back onto this database simply never reads it —
+		// the watchlist, the quotes and the published payload are untouched.
+		//
+		// The allocation is one JSON column rather than a child table. Nothing
+		// joins a holding to anything (a portfolio leg is fetched like a
+		// composite's leg, and need not be on the watchlist), nothing queries
+		// across portfolios by symbol, and the whole list is written and read
+		// as a unit — which is exactly the shape `runs.publishes` already is.
+		ID: "004_portfolios",
+		SQL: `
+CREATE TABLE portfolios (
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  allocations    TEXT NOT NULL DEFAULT '[]',
+  initial_amount REAL NOT NULL DEFAULT 10000,
+  start_year     INTEGER NOT NULL DEFAULT 0,
+  end_year       INTEGER NOT NULL DEFAULT 0,
+  rebalance      TEXT NOT NULL DEFAULT 'annually',
+  benchmark      TEXT NOT NULL DEFAULT '',
+  position       INTEGER NOT NULL,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
+`,
+	},
 }

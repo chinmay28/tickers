@@ -7,6 +7,33 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Portfolios, and what they would have done
+
+A new **Portfolios** page backtests an allocation: symbols and weights, an
+initial amount, a rebalancing cadence, and an optional benchmark.
+
+- **Growth compounded monthly** from the quote source's own daily closes,
+  reduced to one per month. Those closes are split- and dividend-adjusted, so
+  distributions are already reinvested and the result is a total return rather
+  than a price chart.
+- **CAGR, annualised volatility, best and worst full calendar year, and the
+  deepest peak-to-trough fall** — the last with the months it ran between and
+  whether it was ever recovered, which is the part a depth on its own leaves out.
+- **A benchmark symbol** run at 100% over the same months. Both sides are cut to
+  the period they share; a comparison drawn over months one side didn't trade is
+  not a comparison.
+- **Every calendar year**, with a part year shown and labelled rather than
+  dropped or quietly claimed as a whole one.
+- The run starts where its **latest holding** does, whatever start year is
+  asked for, and names the holding responsible. Rebalancing lands on calendar
+  boundaries, and *never* lets the weights drift on purpose.
+- Holdings don't have to be on the watchlist, and the daily series is shared
+  with the performance sheet — a portfolio over funds you also chart costs no
+  extra requests.
+
+Nothing models fees, taxes, spreads, contributions or inflation. It is what the
+allocation did, not what an account holding it would have.
+
 ### Activity folded into Publishing
 
 The run log has moved under the destinations it describes, as a **Recent

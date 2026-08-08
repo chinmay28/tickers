@@ -97,6 +97,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tickers/{id}/history", s.handleTickerHistory)
 	mux.HandleFunc("GET /api/tickers/{id}/performance", s.handleTickerPerformance)
 
+	mux.HandleFunc("GET /api/portfolios", s.handleListPortfolios)
+	mux.HandleFunc("POST /api/portfolios", s.handleCreatePortfolio)
+	mux.HandleFunc("PATCH /api/portfolios/{id}", s.handleUpdatePortfolio)
+	mux.HandleFunc("DELETE /api/portfolios/{id}", s.handleDeletePortfolio)
+	mux.HandleFunc("POST /api/portfolios/{id}/backtest", s.handleBacktestPortfolio)
+	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
+
 	mux.HandleFunc("GET /api/sinks", s.handleListSinks)
 	mux.HandleFunc("POST /api/sinks", s.handleCreateSink)
 	mux.HandleFunc("PATCH /api/sinks/{id}", s.handleUpdateSink)
@@ -160,13 +167,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // The UI polls this; a page that had to fan out to five endpoints to redraw
 // would spend its life half-updated.
 type stateResponse struct {
-	Version  string         `json:"version"`
-	Tickers  []tickerView   `json:"tickers"`
-	Sinks    []store.Sink   `json:"sinks"`
-	Settings store.Config   `json:"settings"`
-	Engine   engine.Status  `json:"engine"`
-	Preview  map[string]any `json:"preview"`
-	Runtime  Runtime        `json:"runtime"`
+	Version string       `json:"version"`
+	Tickers []tickerView `json:"tickers"`
+	Sinks   []store.Sink `json:"sinks"`
+	// Portfolios are the saved allocations, not their results. A backtest is
+	// slow and large; it is asked for by name when a page wants one, and would
+	// turn a ten-second poll into a fan of upstream requests if it rode along.
+	Portfolios []store.Portfolio `json:"portfolios"`
+	Settings   store.Config      `json:"settings"`
+	Engine     engine.Status     `json:"engine"`
+	Preview    map[string]any    `json:"preview"`
+	Runtime    Runtime           `json:"runtime"`
 	// Provider is the quote source's effective settings, with every default
 	// resolved — nil for a provider that can't be reconfigured, which is what
 	// the UI keys off to hide those fields.
@@ -224,6 +235,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	portfolios, err := s.store.Portfolios()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	cfg, err := s.store.Config()
 	if err != nil {
 		s.fail(w, err)
@@ -240,21 +256,27 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, stateResponse{
-		Version:  version.String(),
-		Tickers:  views,
-		Sinks:    sinks,
-		Settings: cfg,
-		Engine:   s.engine.Status(),
-		Preview:  preview,
-		Runtime:  s.runtime,
-		Provider: s.providerView(),
+		Version:    version.String(),
+		Tickers:    views,
+		Sinks:      sinks,
+		Portfolios: portfolios,
+		Settings:   cfg,
+		Engine:     s.engine.Status(),
+		Preview:    preview,
+		Runtime:    s.runtime,
+		Provider:   s.providerView(),
 		Meta: map[string]any{
 			"minRefreshSeconds": store.MinRefreshSeconds,
 			"minQuoteTimeout":   store.MinQuoteTimeout,
 			"maxQuoteTimeout":   store.MaxQuoteTimeout,
 			"maxPinnedSymbols":  store.MaxPinnedSymbols,
+			"maxHoldings":       store.MaxHoldings,
 			"formats":           []string{store.FormatMinion, store.FormatDetailed},
-			"seedSymbols":       store.SeedSymbols,
+			"rebalances": []string{
+				store.RebalanceNone, store.RebalanceAnnually,
+				store.RebalanceQuarterly, store.RebalanceMonthly,
+			},
+			"seedSymbols": store.SeedSymbols,
 		},
 	})
 }
@@ -436,6 +458,164 @@ func (s *Server) handleTickerPerformance(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"performance": perf})
+}
+
+// ---------------------------------------------------------------------------
+// Portfolios
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListPortfolios(w http.ResponseWriter, r *http.Request) {
+	portfolios, err := s.store.Portfolios()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"portfolios": portfolios})
+}
+
+// portfolioBody is both the create/patch payload and the ad-hoc backtest
+// payload, which is deliberate: "run this without saving it" and "save this"
+// take exactly the same fields, and a client that has built one has built the
+// other.
+type portfolioBody struct {
+	Name          *string          `json:"name"`
+	Holdings      *[]store.Holding `json:"holdings"`
+	InitialAmount *float64         `json:"initialAmount"`
+	StartYear     *int             `json:"startYear"`
+	EndYear       *int             `json:"endYear"`
+	Rebalance     *string          `json:"rebalance"`
+	Benchmark     *string          `json:"benchmark"`
+}
+
+func (s *Server) handleCreatePortfolio(w http.ResponseWriter, r *http.Request) {
+	var body portfolioBody
+	if !decode(w, r, &body) {
+		return
+	}
+	in := store.NewPortfolio{}
+	if body.Name != nil {
+		in.Name = *body.Name
+	}
+	if body.Holdings != nil {
+		in.Holdings = *body.Holdings
+	}
+	if body.InitialAmount != nil {
+		in.InitialAmount = *body.InitialAmount
+	}
+	if body.StartYear != nil {
+		in.StartYear = *body.StartYear
+	}
+	if body.EndYear != nil {
+		in.EndYear = *body.EndYear
+	}
+	if body.Rebalance != nil {
+		in.Rebalance = *body.Rebalance
+	}
+	if body.Benchmark != nil {
+		in.Benchmark = *body.Benchmark
+	}
+
+	p, err := s.store.CreatePortfolio(in)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"portfolio": p})
+}
+
+func (s *Server) handleUpdatePortfolio(w http.ResponseWriter, r *http.Request) {
+	var body portfolioBody
+	if !decode(w, r, &body) {
+		return
+	}
+	p, err := s.store.UpdatePortfolio(r.PathValue("id"), store.PortfolioPatch{
+		Name:          body.Name,
+		Holdings:      body.Holdings,
+		InitialAmount: body.InitialAmount,
+		StartYear:     body.StartYear,
+		EndYear:       body.EndYear,
+		Rebalance:     body.Rebalance,
+		Benchmark:     body.Benchmark,
+	})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"portfolio": p})
+}
+
+func (s *Server) handleDeletePortfolio(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeletePortfolio(r.PathValue("id")); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleBacktestPortfolio runs a saved allocation.
+//
+// It is a POST rather than a GET even though it changes nothing: it fans out to
+// one full-history request per holding the first time it runs, and a URL a
+// browser is free to prefetch, retry or cache is the wrong shape for that.
+func (s *Server) handleBacktestPortfolio(w http.ResponseWriter, r *http.Request) {
+	result, err := s.engine.BacktestPortfolio(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.failBacktest(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backtest": result})
+}
+
+// handleBacktest runs an allocation that has not been saved — the editor's
+// "try it" path, so nobody has to commit a portfolio to the database to find
+// out whether the symbols in it have any overlapping history.
+func (s *Server) handleBacktest(w http.ResponseWriter, r *http.Request) {
+	var body portfolioBody
+	if !decode(w, r, &body) {
+		return
+	}
+	spec := engine.BacktestSpec{}
+	if body.Holdings != nil {
+		spec.Holdings = *body.Holdings
+	}
+	if body.InitialAmount != nil {
+		spec.InitialAmount = *body.InitialAmount
+	}
+	if body.StartYear != nil {
+		spec.StartYear = *body.StartYear
+	}
+	if body.EndYear != nil {
+		spec.EndYear = *body.EndYear
+	}
+	if body.Rebalance != nil {
+		spec.Rebalance = *body.Rebalance
+	}
+	if body.Benchmark != nil {
+		spec.Benchmark = *body.Benchmark
+	}
+
+	result, err := s.engine.Backtest(r.Context(), spec)
+	if err != nil {
+		s.failBacktest(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backtest": result})
+}
+
+// failBacktest maps the two failures a backtest has that nothing else does: a
+// quote source that can only price today, and a portfolio whose own contents
+// make it unrunnable.
+func (s *Server) failBacktest(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, quotes.ErrNoHistory):
+		// Not a fault — a provider that can only price today is a configuration
+		// somebody chose. Say what is missing, as the performance sheet does.
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, engine.ErrBadSpec):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		s.fail(w, err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +900,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrDuplicateSymbol):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrInvalidExpression):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrInvalidPortfolio):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case isValidationError(err):
 		writeError(w, http.StatusBadRequest, err.Error())

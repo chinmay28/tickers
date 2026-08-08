@@ -1,0 +1,503 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"math"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/chinmay28/tickers/server/internal/quotes"
+	"github.com/chinmay28/tickers/server/internal/store"
+)
+
+// monthlyBars turns a run of month-end closes into daily bars, one per month,
+// starting at first ("2020-01"). A backtest reduces each month to its last bar,
+// so one bar a month is a complete series as far as it is concerned.
+func monthlyBars(first string, closes ...float64) []quotes.Bar {
+	start, err := time.Parse("2006-01", first)
+	if err != nil {
+		panic(err)
+	}
+	bars := make([]quotes.Bar, 0, len(closes))
+	for i, close := range closes {
+		bars = append(bars, quotes.Bar{
+			Date:  start.AddDate(0, i, 0).Format("2006-01") + "-28",
+			Close: close,
+		})
+	}
+	return bars
+}
+
+// backtestEngine wires an engine to a historian holding the given series.
+func backtestEngine(t *testing.T, bars map[string][]quotes.Bar) (*Engine, *fakeHistorian) {
+	t.Helper()
+	provider := newFakeHistorian(map[string]float64{})
+	for symbol, series := range bars {
+		provider.bars[symbol] = series
+	}
+	eng, _ := newTestEngine(t, provider)
+	return eng, provider
+}
+
+// rising and falling are the same three months from opposite directions:
+// +10% a month against −10% a month. Every weighting claim below is checked
+// against these, because the arithmetic stays doable in your head.
+var (
+	rising  = monthlyBars("2020-01", 100, 110, 121)
+	falling = monthlyBars("2020-01", 100, 90, 81)
+)
+
+func spec(holdings ...store.Holding) BacktestSpec {
+	return BacktestSpec{Holdings: holdings, InitialAmount: 1000, Rebalance: store.RebalanceNone}
+}
+
+func half() []store.Holding {
+	return []store.Holding{{Symbol: "UP", Weight: 50}, {Symbol: "DOWN", Weight: 50}}
+}
+
+func TestBacktestCompoundsEachHoldingByItsOwnReturn(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	// 500 compounding at +10% for two months is 605; 500 at −10% is 405.
+	if math.Abs(result.Portfolio.End-1010) > 1e-9 {
+		t.Errorf("final balance = %.4f, want 1010 — each holding has to grow by its own return, not the portfolio's",
+			result.Portfolio.End)
+	}
+	if result.Points[0].Value != 1000 {
+		t.Errorf("the run starts at %.2f, want the initial amount 1000", result.Points[0].Value)
+	}
+	if result.Start != "2020-01" || result.End != "2020-03" {
+		t.Errorf("ran %s to %s, want 2020-01 to 2020-03", result.Start, result.End)
+	}
+	if result.Months != 2 {
+		t.Errorf("counted %d monthly returns over three months, want 2", result.Months)
+	}
+}
+
+func TestBacktestRebalancingSellsWhatGrewAndBuysWhatDidNot(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	drifted, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("drifting backtest: %v", err)
+	}
+
+	monthly := spec(half()...)
+	monthly.Rebalance = store.RebalanceMonthly
+	held, err := eng.Backtest(context.Background(), monthly)
+	if err != nil {
+		t.Fatalf("rebalanced backtest: %v", err)
+	}
+
+	// Rebalanced back to 500/500 after February, the third month's +10% and
+	// −10% cancel exactly and the portfolio ends where it started.
+	if math.Abs(held.Portfolio.End-1000) > 1e-9 {
+		t.Errorf("monthly rebalancing ended at %.4f, want 1000", held.Portfolio.End)
+	}
+	if held.Portfolio.End >= drifted.Portfolio.End {
+		t.Errorf("rebalancing (%.4f) did not differ from letting the weights drift (%.4f); "+
+			"the whole point of the cadence is that it changes the answer",
+			held.Portfolio.End, drifted.Portfolio.End)
+	}
+	// Three months hold two rebalance opportunities, and the last month is not
+	// one of them — moving money at the closing bell changes nothing and would
+	// still be counted as a trade.
+	if held.Rebalances != 1 {
+		t.Errorf("performed %d rebalances over three months, want 1", held.Rebalances)
+	}
+}
+
+func TestBacktestRebalancesOnCalendarBoundariesNotElapsedMonths(t *testing.T) {
+	// The same three months, straddling a year end rather than sitting inside
+	// one: an annual rebalance has to fire at December.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"UP":   monthlyBars("2019-11", 100, 110, 121),
+		"DOWN": monthlyBars("2019-11", 100, 90, 81),
+	})
+
+	annual := spec(half()...)
+	annual.Rebalance = store.RebalanceAnnually
+	result, err := eng.Backtest(context.Background(), annual)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Rebalances != 1 {
+		t.Fatalf("an annual rebalance over November→January fired %d times, want once at December",
+			result.Rebalances)
+	}
+	if math.Abs(result.Portfolio.End-1000) > 1e-9 {
+		t.Errorf("final balance = %.4f, want 1000 — rebalanced at the December close, January's ±10%% cancels",
+			result.Portfolio.End)
+	}
+}
+
+func TestBacktestIntersectsMonthsSoNoLegContributesAPhantomReturn(t *testing.T) {
+	// DOWN did not trade in February. Carrying its January close forward would
+	// hand the portfolio a month where one side moved and the other didn't.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"UP": rising,
+		"DOWN": {
+			{Date: "2020-01-28", Close: 100},
+			{Date: "2020-03-28", Close: 81},
+		},
+	})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Months != 1 {
+		t.Errorf("used %d monthly returns, want 1 — February is not a month both holdings have",
+			result.Months)
+	}
+	// January to March directly: 500×1.21 + 500×0.81.
+	if math.Abs(result.Portfolio.End-1010) > 1e-9 {
+		t.Errorf("final balance = %.4f, want 1010", result.Portfolio.End)
+	}
+}
+
+func TestBacktestStartsWhereItsLatestHoldingDoesAndSaysSo(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"OLD": monthlyBars("2018-01", 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+			112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126),
+		"NEW": monthlyBars("2020-01", 100, 110, 121),
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "OLD", Weight: 50}, {Symbol: "NEW", Weight: 50}},
+		InitialAmount: 1000,
+		StartYear:     2018,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Start != "2020-01" {
+		t.Errorf("ran from %s; a portfolio can only start where all of it has prices", result.Start)
+	}
+	// The date on its own leaves the reader to work out which holding is
+	// responsible, which is the thing they'd have to change.
+	if len(result.Notes) == 0 {
+		t.Fatal("a start two years later than the one asked for went unexplained")
+	}
+	if !strings.Contains(result.Notes[0], "NEW") {
+		t.Errorf("the note is %q; it has to name the holding that set the start", result.Notes[0])
+	}
+	for _, h := range result.Holdings {
+		if h.Symbol == "NEW" && h.FirstMonth != "2020-01" {
+			t.Errorf("NEW reports its first month as %q, want 2020-01", h.FirstMonth)
+		}
+	}
+}
+
+func TestBacktestMeasuresCalendarYearsFromTheDecemberBefore(t *testing.T) {
+	// December 2019 through June 2021: 2020 is a whole year, 2021 is half of one.
+	closes := []float64{100}
+	for c := 101.0; c <= 111; c++ {
+		closes = append(closes, c)
+	}
+	closes = append(closes, 120)
+	closes = append(closes, 121, 122, 123, 124, 125, 132)
+
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"ONE": monthlyBars("2019-12", closes...)})
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "ONE", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if len(result.Annual) != 2 {
+		t.Fatalf("got %d annual rows, want 2 — the base month is a baseline, not a year of its own: %+v",
+			len(result.Annual), result.Annual)
+	}
+	first, second := result.Annual[0], result.Annual[1]
+	if first.Year != 2020 || math.Abs(first.Percent-20) > 1e-9 || first.Partial {
+		t.Errorf("2020 = %+v, want a full year of +20%% measured from the December 2019 close", first)
+	}
+	if second.Year != 2021 || math.Abs(second.Percent-10) > 1e-9 || !second.Partial {
+		t.Errorf("2021 = %+v, want +10%% marked partial — the run stops in June", second)
+	}
+	// A half year is not a worst year, however bad it was.
+	if result.Portfolio.Worst == nil || result.Portfolio.Worst.Year != 2020 {
+		t.Errorf("worst year = %+v, want 2020 — the only year the run covers end to end",
+			result.Portfolio.Worst)
+	}
+}
+
+func TestBacktestReportsAPartFirstYearJustAsItReportsAPartLastOne(t *testing.T) {
+	// Starting in October, 2020 is three months long. Dropping it while showing
+	// an equally partial final year is the inconsistency; showing it unmarked
+	// would claim a year the run never covered.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"ONE": monthlyBars("2020-10", 100, 110, 120, 130, 140),
+	})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "ONE", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if len(result.Annual) != 2 || result.Annual[0].Year != 2020 {
+		t.Fatalf("annual rows = %+v, want a part 2020 and a part 2021", result.Annual)
+	}
+	if !result.Annual[0].Partial || math.Abs(result.Annual[0].Percent-20) > 1e-9 {
+		t.Errorf("2020 = %+v, want +20%% marked partial (October to December)", result.Annual[0])
+	}
+	// Neither year is whole, so there is no best or worst to report.
+	if result.Portfolio.Best != nil {
+		t.Errorf("best year = %+v; no calendar year here was covered end to end", result.Portfolio.Best)
+	}
+}
+
+func TestBacktestRunsTheBenchmarkOverTheSameMonths(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	withBenchmark := spec(half()...)
+	withBenchmark.Benchmark = "up"
+	result, err := eng.Backtest(context.Background(), withBenchmark)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Benchmark == nil {
+		t.Fatal("no benchmark came back for a spec that asked for one")
+	}
+	if result.Benchmark.Label != "UP" {
+		t.Errorf("benchmark labelled %q, want the normalised symbol UP", result.Benchmark.Label)
+	}
+	// 1000 fully invested in a symbol that gained 21%.
+	if math.Abs(result.Benchmark.End-1210) > 1e-9 {
+		t.Errorf("benchmark ended at %.4f, want 1210", result.Benchmark.End)
+	}
+	if result.Points[len(result.Points)-1].Benchmark == nil {
+		t.Error("the growth points carry no benchmark value; the chart has nothing to draw the second line from")
+	}
+}
+
+func TestBacktestBenchmarkTruncatesBothSidesToTheSharedPeriod(t *testing.T) {
+	// A benchmark that only exists for the last two months. Drawing the
+	// portfolio over three and the benchmark over two would put two curves on
+	// one chart that cannot be read against each other.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"UP":    rising,
+		"DOWN":  falling,
+		"LATER": monthlyBars("2020-02", 100, 110),
+	})
+
+	withBenchmark := spec(half()...)
+	withBenchmark.Benchmark = "LATER"
+	result, err := eng.Backtest(context.Background(), withBenchmark)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Start != "2020-02" {
+		t.Errorf("ran from %s, want 2020-02 — the benchmark is intersected like any other leg", result.Start)
+	}
+	if result.Months != 1 {
+		t.Errorf("counted %d monthly returns, want 1", result.Months)
+	}
+}
+
+func TestBacktestRenormalisesWeightsThatDoNotQuiteReachAHundred(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"A": rising, "B": rising, "C": rising,
+	})
+
+	result, err := eng.Backtest(context.Background(), spec(
+		store.Holding{Symbol: "A", Weight: 33.33},
+		store.Holding{Symbol: "B", Weight: 33.33},
+		store.Holding{Symbol: "C", Weight: 33.33},
+	))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	// Three thirds of a portfolio all up 21% is 1210 — not 1209.9, which is
+	// what simulating 99.99% invested and 0.01% in nothing would produce.
+	if math.Abs(result.Portfolio.End-1210) > 1e-9 {
+		t.Errorf("final balance = %.6f, want 1210; weights have to be renormalised, not taken at face value",
+			result.Portfolio.End)
+	}
+	total := 0.0
+	for _, h := range result.Holdings {
+		total += h.Weight
+	}
+	if math.Abs(total-100) > 1e-9 {
+		t.Errorf("reported weights sum to %v, want exactly 100", total)
+	}
+}
+
+func TestBacktestNarrowsToTheRequestedYears(t *testing.T) {
+	// Five Decembers, so a start year has a December before it to measure from.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"ONE": {
+			{Date: "2017-12-28", Close: 100},
+			{Date: "2018-12-28", Close: 110},
+			{Date: "2019-12-28", Close: 120},
+			{Date: "2020-12-28", Close: 130},
+			{Date: "2021-12-28", Close: 140},
+		},
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "ONE", Weight: 100}},
+		InitialAmount: 1000,
+		StartYear:     2019,
+		EndYear:       2020,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	// 2019's return is measured from the end of 2018, not from January.
+	if result.Start != "2018-12" {
+		t.Errorf("started at %s; a run from 2019 needs the December 2018 close as its baseline", result.Start)
+	}
+	if result.End != "2020-12" {
+		t.Errorf("ended at %s, want 2020-12", result.End)
+	}
+}
+
+func TestBacktestRefusesSymbolsTheSourceCannotPrice(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising})
+
+	_, err := eng.Backtest(context.Background(), spec(
+		store.Holding{Symbol: "UP", Weight: 50},
+		store.Holding{Symbol: "NOPE", Weight: 50},
+	))
+	if err == nil {
+		t.Fatal("a holding with no history anywhere produced a backtest")
+	}
+	// A typo in the form is the caller's to fix; reporting it as a server
+	// failure sends somebody to the logs for a problem they can see.
+	if !errors.Is(err, ErrBadSpec) {
+		t.Errorf("error %v is not an ErrBadSpec, so the API will answer 500 for a typo", err)
+	}
+	if !strings.Contains(err.Error(), "NOPE") {
+		t.Errorf("error %q does not name the holding that failed", err)
+	}
+}
+
+func TestBacktestRefusesAPeriodTooShortForAReturn(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"ONE": monthlyBars("2020-01", 100),
+	})
+
+	_, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "ONE", Weight: 100}))
+	if !errors.Is(err, ErrBadSpec) {
+		t.Errorf("a single month of history gave %v, want ErrBadSpec", err)
+	}
+}
+
+func TestBacktestNeedsAProviderThatKnowsThePast(t *testing.T) {
+	eng, _ := newTestEngine(t, &fakeProvider{prices: map[string]float64{"VTI": 300}})
+
+	_, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "VTI", Weight: 100}))
+	if !errors.Is(err, quotes.ErrNoHistory) {
+		t.Errorf("error = %v, want ErrNoHistory — a source that can only price today makes the "+
+			"feature unavailable, not broken", err)
+	}
+}
+
+func TestBacktestSharesItsHistoryWithThePerformanceSheet(t *testing.T) {
+	eng, provider := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	for i := 0; i < 3; i++ {
+		if _, err := eng.Backtest(context.Background(), spec(half()...)); err != nil {
+			t.Fatalf("backtest %d: %v", i, err)
+		}
+	}
+
+	// Caching by symbol is what keeps a portfolio of funds somebody also
+	// charts from costing a fetch per view.
+	if calls := provider.callsFor("UP"); calls != 1 {
+		t.Errorf("fetched UP %d times for three backtests, want 1", calls)
+	}
+}
+
+func TestBacktestPricesABenchmarkThatIsAlsoAHoldingOnce(t *testing.T) {
+	eng, provider := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	withBenchmark := spec(half()...)
+	withBenchmark.Benchmark = "UP"
+	if _, err := eng.Backtest(context.Background(), withBenchmark); err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if calls := provider.callsFor("UP"); calls != 1 {
+		t.Errorf("fetched UP %d times when it was both a holding and the benchmark, want 1", calls)
+	}
+}
+
+func TestMaxDrawdownIsThePeakToTroughFallAndWhenItWasRecovered(t *testing.T) {
+	months := []string{"2020-01", "2020-02", "2020-03", "2020-04", "2020-05", "2020-06"}
+	balances := []float64{100, 120, 60, 90, 130, 110}
+
+	depth, peak, trough, recovered := maxDrawdown(months, balances)
+
+	if math.Abs(depth-50) > 1e-9 {
+		t.Errorf("drawdown = %.4f%%, want 50 (120 down to 60)", depth)
+	}
+	if peak != "2020-02" || trough != "2020-03" {
+		t.Errorf("drawdown ran %s → %s, want 2020-02 → 2020-03", peak, trough)
+	}
+	// The later, shallower fall from 130 must not be reported as the deepest
+	// just because it is the most recent.
+	if recovered != "2020-05" {
+		t.Errorf("recovered at %q, want 2020-05 — the first month back above the old peak", recovered)
+	}
+}
+
+func TestMaxDrawdownLeavesAnUnrecoveredFallOpen(t *testing.T) {
+	months := []string{"2020-01", "2020-02", "2020-03"}
+	_, _, _, recovered := maxDrawdown(months, []float64{100, 50, 70})
+
+	if recovered != "" {
+		t.Errorf("recovered = %q; a portfolio still below its peak has not recovered, and saying "+
+			"it did is the one thing a drawdown row must not do", recovered)
+	}
+}
+
+func TestMeasureWithholdsAnAnnualRateFromARunTooShortToHaveOne(t *testing.T) {
+	months := []string{"2020-01", "2020-02", "2020-03"}
+	balances := []float64{1000, 1100, 1200}
+
+	m := measure("Portfolio", months, balances, annualReturns(months, balances))
+
+	if m.CAGR != nil {
+		t.Errorf("CAGR = %v for a two-month run; annualising that is a forecast wearing a "+
+			"measurement's clothes", *m.CAGR)
+	}
+	if math.Abs(m.TotalPercent-20) > 1e-9 {
+		t.Errorf("total = %.4f%%, want 20 — the number a short run does have", m.TotalPercent)
+	}
+}
+
+func TestMeasureCompoundsTheAnnualRateOverTheRunsRealLength(t *testing.T) {
+	months := make([]string, 25)
+	balances := make([]float64, 25)
+	for i := range months {
+		months[i] = time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, i, 0).Format("2006-01")
+		// Doubling over exactly two years.
+		balances[i] = 1000 * math.Pow(2, float64(i)/24)
+	}
+
+	m := measure("Portfolio", months, balances, annualReturns(months, balances))
+
+	if m.CAGR == nil {
+		t.Fatal("no CAGR for a two-year run")
+	}
+	want := (math.Sqrt2 - 1) * 100
+	if math.Abs(*m.CAGR-want) > 1e-6 {
+		t.Errorf("CAGR = %.6f%%, want %.6f%% — doubling over two years", *m.CAGR, want)
+	}
+}

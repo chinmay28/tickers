@@ -192,6 +192,11 @@ const state = {
    *  sent, and which range chip is selected. Outside #view for the same
    *  reason `matches` is. */
   perf: null,
+  /** The last backtest asked for: which portfolio (or 'draft' for an unsaved
+   *  allocation), whether it is in flight, and what came back. One at a time —
+   *  the page shows the result under the list, and running a second replaces
+   *  the first rather than growing a stack of them. */
+  backtest: null,
   runs: [],
   busy: false,
   /** An inline, non-`act` request is in flight (a button showing "Testing…"),
@@ -366,7 +371,7 @@ function restoreFocus(snap) {
  * Router
  * ------------------------------------------------------------------ */
 
-const ROUTES = ['watchlist', 'publishing', 'settings'];
+const ROUTES = ['watchlist', 'portfolios', 'publishing', 'settings'];
 
 function route() {
   const hash = location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -378,9 +383,17 @@ function syncNav() {
   for (const link of $$('[data-route]')) {
     link.classList.toggle('is-active', link.dataset.route === current);
   }
-  // The floating button is the watchlist's create action; on Publishing,
-  // Activity or Settings there is nothing for it to add.
-  $('#add-fab').hidden = current !== 'watchlist';
+  // The floating button is the create action for the two pages that have one —
+  // a ticker on the Watchlist, an allocation on Portfolios. On Publishing and
+  // Settings there is nothing for it to add.
+  const fab = $('#add-fab');
+  const creates = current === 'watchlist' || current === 'portfolios';
+  fab.hidden = !creates;
+  if (creates) {
+    const what = current === 'watchlist' ? 'a ticker or a ratio' : 'a portfolio';
+    fab.title = `Add ${what}`;
+    fab.setAttribute('aria-label', `Add ${what}`);
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -423,6 +436,9 @@ function render({ force = false } = {}) {
   const focus = captureFocus();
 
   switch (route()) {
+    case 'portfolios':
+      view.innerHTML = renderPortfolios(data);
+      break;
     case 'publishing':
       view.innerHTML = renderPublishing(data);
       break;
@@ -640,6 +656,363 @@ async function drawSparklines() {
       `<path d="${path}" fill="none" stroke="var(--${rising ? 'up' : 'down'})" ` +
       `stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" opacity="0.9" />`;
   }
+}
+
+/* --------------------------- Portfolios ----------------------------
+ *
+ * A saved allocation and what it would have done. The result comes from
+ * /api/backtest, which is monthly: the provider's daily closes reduced to one
+ * per month, because a portfolio's answer does not get more true at daily
+ * resolution — it gets forty times bigger and starts implying the rebalance
+ * happened on a particular Tuesday.
+ * ------------------------------------------------------------------ */
+
+/** A balance, rounded to whole units. Cents on a forty-year growth curve are
+ *  six digits of noise in front of the two that matter. */
+function amount(value) {
+  if (value === null || value === undefined) return '—';
+  return Math.round(value).toLocaleString();
+}
+
+/** A percentage that keeps its sign, for the return columns. */
+function percent(value, digits = 2) {
+  if (value === null || value === undefined) return '—';
+  return `${signed(value, digits)}%`;
+}
+
+function direction(value) {
+  if (value === null || value === undefined) return 'flat';
+  return value > 0 ? 'up' : value < 0 ? 'down' : 'flat';
+}
+
+/** A month key as something to read. "2004-11" is a key; "Nov 2004" is a date. */
+function monthName(key) {
+  if (!key) return '—';
+  const [year, month] = String(key).split('-');
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return names[Number(month) - 1] ? `${names[Number(month) - 1]} ${year}` : key;
+}
+
+const REBALANCE_LABELS = {
+  none: 'never rebalanced',
+  annually: 'rebalanced annually',
+  quarterly: 'rebalanced quarterly',
+  monthly: 'rebalanced monthly',
+};
+
+function renderPortfolios(data) {
+  const portfolios = data.portfolios ?? [];
+
+  return `
+    <div class="page-head">
+      <div>
+        <h1>Portfolios</h1>
+        <p>
+          What an allocation would have done. Growth is compounded month by
+          month from the quote source's own closes — adjusted for splits and
+          dividends, so distributions are already reinvested — over the longest
+          period every holding shares.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card__head">
+        <h2 class="card__title">${portfolios.length} ${
+          portfolios.length === 1 ? 'portfolio' : 'portfolios'
+        }</h2>
+        <button class="btn btn--sm btn--primary" data-action="new-portfolio" type="button">New portfolio</button>
+      </div>
+      <div class="card__body">
+        ${
+          portfolios.length === 0
+            ? `<div class="empty"><strong>No portfolios yet</strong>Add one to see what a mix of funds would have returned. Holdings don't have to be on the watchlist.</div>`
+            : portfolios.map(portfolioRow).join('')
+        }
+      </div>
+    </div>
+
+    ${renderBacktest(data)}
+  `;
+}
+
+function portfolioRow(p) {
+  const period = [
+    p.startYear ? `from ${p.startYear}` : 'from as early as the data goes',
+    p.endYear ? `to ${p.endYear}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return `
+    <div class="card" style="margin-top:0.7rem">
+      <div class="card__head">
+        <h3 class="card__title">
+          ${esc(p.name)}
+          ${p.benchmark ? `<span class="chip">vs ${esc(p.benchmark)}</span>` : ''}
+        </h3>
+        <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
+          <button class="btn btn--sm btn--primary" data-action="run-portfolio" data-id="${esc(p.id)}">Run</button>
+          <button class="btn btn--sm btn--ghost" data-action="edit-portfolio" data-id="${esc(p.id)}">Edit</button>
+          <button class="btn btn--sm btn--danger" data-action="delete-portfolio" data-id="${esc(p.id)}">Remove</button>
+        </div>
+      </div>
+      <div class="card__body">
+        <div class="allocation-chips">
+          ${(p.holdings ?? [])
+            .map(
+              (h) =>
+                `<span class="chip chip--weight"><strong>${esc(h.symbol)}</strong> ${esc(
+                  Number(h.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+                )}%</span>`,
+            )
+            .join('')}
+        </div>
+        <p class="field__hint" style="margin:0.55rem 0 0">
+          ${esc(amount(p.initialAmount))} · ${esc(period)} ·
+          ${esc(REBALANCE_LABELS[p.rebalance] ?? p.rebalance)}
+        </p>
+      </div>
+    </div>
+  `;
+}
+
+/** The result panel: whichever run was asked for last, in whatever state it is
+ *  in. Nothing at all before the first run — an empty chart frame implies the
+ *  answer is "flat" rather than "not asked yet". */
+function renderBacktest(data) {
+  const run = state.backtest;
+  if (!run) return '';
+
+  const name =
+    run.id === 'draft'
+      ? 'Unsaved allocation'
+      : data.portfolios?.find((p) => p.id === run.id)?.name ?? 'Portfolio';
+
+  if (run.status === 'loading') {
+    return `
+      <div class="page-head page-head--sub"><div><h2>${esc(name)}</h2></div></div>
+      <div class="card"><div class="card__body">
+        <div class="empty"><strong>Working through the history</strong>Every holding's closes since it listed, compounded a month at a time.</div>
+      </div></div>`;
+  }
+  if (run.status === 'error') {
+    return `
+      <div class="page-head page-head--sub"><div><h2>${esc(name)}</h2></div></div>
+      <div class="card"><div class="card__body">
+        <div class="empty"><strong>Couldn't run it</strong>${esc(run.error)}</div>
+      </div></div>`;
+  }
+
+  const b = run.data;
+  const gain = b.portfolio.end - b.initial;
+
+  return `
+    <div class="page-head page-head--sub">
+      <div>
+        <h2>${esc(name)}</h2>
+        <p>
+          ${esc(amount(b.initial))} from ${esc(monthName(b.start))} to
+          ${esc(monthName(b.end))} — ${b.months} ${b.months === 1 ? 'month' : 'months'}${
+            b.rebalances ? `, rebalanced ${b.rebalances} ${b.rebalances === 1 ? 'time' : 'times'}` : ''
+          }.
+        </p>
+      </div>
+      <div class="perf-head__delta">
+        <div class="perf-head__value">${esc(amount(b.portfolio.end))}</div>
+        <div class="perf-change perf-change--${direction(gain)}">${esc(percent(b.portfolio.totalPercent))}</div>
+      </div>
+    </div>
+
+    ${(b.notes ?? []).map((note) => `<p class="field__hint backtest-note">${esc(note)}</p>`).join('')}
+
+    <div class="card">
+      <div class="card__body">
+        ${growthChart(b)}
+        ${growthLegend(b)}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card__head"><h3 class="card__title">Summary</h3></div>
+      <div class="card__body">${metricsTable(b)}</div>
+    </div>
+
+    <div class="card">
+      <div class="card__head"><h3 class="card__title">Calendar years</h3></div>
+      <div class="card__body">${annualTable(b)}</div>
+    </div>
+
+    <p class="field__hint perf-note">
+      Monthly closes, adjusted for splits and dividends where the source reports
+      them — which is what makes this a total return rather than a price chart.
+      Nothing here models fees, taxes, spreads or contributions, so it is what
+      the allocation did, not what an account holding it would have.
+    </p>
+  `;
+}
+
+/** The growth curve, and the benchmark's alongside it when there is one.
+ *
+ *  Points are placed by index rather than by date, which the performance sheet
+ *  deliberately does not do — there the series changes resolution partway
+ *  through, and here every point is exactly one month after the last. */
+function growthChart(b) {
+  // The performance sheet's geometry exactly, so the two charts in this app
+  // reuse one rule and one aspect ratio rather than drifting apart.
+  const W = 640;
+  const H = 240;
+  const points = b.points ?? [];
+  if (points.length < 2) return '<div class="empty">Nothing to chart.</div>';
+
+  const values = points.flatMap((p) =>
+    p.benchmark === null || p.benchmark === undefined ? [p.value] : [p.value, p.benchmark],
+  );
+  const lo = Math.min(...values, 0);
+  const hi = Math.max(...values);
+  const max = hi + (hi - lo) * 0.06 || 1;
+  const min = lo;
+
+  const ticks = [max, (max + min) / 2, min].map(amount);
+  const widest = Math.max(...ticks.map((t) => t.length));
+  const pad = { l: Math.min(130, 16 + widest * 6.7), r: 12, t: 12, b: 24 };
+
+  const x = (i) => pad.l + (i / (points.length - 1)) * (W - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - (v - min) / (max - min || 1)) * (H - pad.t - pad.b);
+
+  const path = (pick) =>
+    points
+      .map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(pick(p)).toFixed(1)}`)
+      .join(' ');
+
+  const line = path((p) => p.value);
+  const floor = (H - pad.b).toFixed(1);
+  const area = `${line} L${x(points.length - 1).toFixed(1)} ${floor} L${x(0).toFixed(1)} ${floor} Z`;
+  const stroke = `var(--${b.portfolio.end >= b.initial ? 'up' : 'down'})`;
+
+  const grid = [max, (max + min) / 2, min]
+    .map(
+      (v, i) => `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"
+                    stroke="var(--border)" stroke-width="1" />
+               <text x="${pad.l - 7}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end"
+                     class="perf-chart__tick">${esc(ticks[i])}</text>`,
+    )
+    .join('');
+
+  const benchmark =
+    b.benchmark && points[0].benchmark !== null && points[0].benchmark !== undefined
+      ? `<path d="${path((p) => p.benchmark)}" fill="none" stroke="var(--muted)" stroke-width="1.5"
+               stroke-dasharray="5 4" stroke-linejoin="round" />`
+      : '';
+
+  return `
+    <svg class="perf-chart" viewBox="0 0 ${W} ${H}" role="img"
+         aria-label="Growth of ${esc(amount(b.initial))} from ${esc(b.start)} to ${esc(b.end)}">
+      ${grid}
+      <path d="${area}" fill="${stroke}" opacity="0.12" />
+      ${benchmark}
+      <path d="${line}" fill="none" stroke="${stroke}" stroke-width="1.8"
+            stroke-linejoin="round" stroke-linecap="round" />
+      <text x="${pad.l}" y="${H - 6}" class="perf-chart__tick">${esc(monthName(b.start))}</text>
+      <text x="${W - pad.r}" y="${H - 6}" text-anchor="end" class="perf-chart__tick">${esc(monthName(b.end))}</text>
+    </svg>`;
+}
+
+function growthLegend(b) {
+  if (!b.benchmark) return '';
+  return `
+    <div class="chart-legend">
+      <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--line"></span>Portfolio</span>
+      <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--dash"></span>${esc(
+        b.benchmark.label,
+      )}</span>
+    </div>`;
+}
+
+/** The summary table. One column per strategy, so a portfolio and its benchmark
+ *  are read across a row rather than by holding two tables in your head. */
+function metricsTable(b) {
+  const columns = [b.portfolio, b.benchmark].filter(Boolean);
+  const cells = (pick) => columns.map((m) => `<td>${pick(m)}</td>`).join('');
+
+  const year = (y) =>
+    y ? `<span class="perf-change perf-change--${direction(y.percent)}">${esc(percent(y.percent))}</span>
+         <span class="perf-when">${y.year}</span>`
+      : '<span class="field__hint">no full year</span>';
+
+  return `<div class="table-scroll"><table class="table">
+      <thead><tr><th></th>${columns.map((m) => `<th>${esc(m.label)}</th>`).join('')}</tr></thead>
+      <tbody>
+        <tr><th>Final balance</th>${cells((m) => esc(amount(m.end)))}</tr>
+        <tr><th>Total return</th>${cells(
+          (m) =>
+            `<span class="perf-change perf-change--${direction(m.totalPercent)}">${esc(
+              percent(m.totalPercent),
+            )}</span>`,
+        )}</tr>
+        <tr><th>Annualised</th>${cells((m) =>
+          m.cagrPercent === null || m.cagrPercent === undefined
+            ? '<span class="field__hint">under a year</span>'
+            : `<span class="perf-change perf-change--${direction(m.cagrPercent)}">${esc(
+                percent(m.cagrPercent),
+              )}</span>`,
+        )}</tr>
+        <tr><th title="Annualised standard deviation of the monthly returns">Volatility</th>${cells((m) =>
+          m.stdevPercent === null || m.stdevPercent === undefined
+            ? '—'
+            : `${esc(m.stdevPercent.toFixed(2))}%`,
+        )}</tr>
+        <tr><th>Best year</th>${cells((m) => year(m.bestYear))}</tr>
+        <tr><th>Worst year</th>${cells((m) => year(m.worstYear))}</tr>
+        <tr><th>Deepest fall</th>${cells((m) => drawdownCell(m))}</tr>
+      </tbody>
+    </table></div>`;
+}
+
+/** The drawdown cell says how far down, from when to when, and — the part that
+ *  matters most — whether it ever came back. */
+function drawdownCell(m) {
+  if (!m.maxDrawdownPercent) return '<span class="field__hint">never fell</span>';
+  const span = `${monthName(m.drawdownPeak)} → ${monthName(m.drawdownTrough)}`;
+  const recovery = m.drawdownRecovered
+    ? `back by ${monthName(m.drawdownRecovered)}`
+    : 'not yet recovered';
+  return `<span class="perf-change perf-change--down">−${esc(m.maxDrawdownPercent.toFixed(2))}%</span>
+          <span class="perf-when">${esc(span)} · ${esc(recovery)}</span>`;
+}
+
+function annualTable(b) {
+  const rows = b.annual ?? [];
+  if (!rows.length) return '<div class="empty">The run is too short to cover a calendar year.</div>';
+  const hasBenchmark = Boolean(b.benchmark);
+
+  return `<div class="table-scroll"><table class="table">
+      <thead><tr>
+        <th>Year</th><th>Portfolio</th>${hasBenchmark ? `<th>${esc(b.benchmark.label)}</th>` : ''}
+      </tr></thead>
+      <tbody>${rows
+        .map(
+          (r) => `<tr>
+            <th>${r.year}${
+              // A part-year is shown and labelled rather than dropped: hiding it
+              // loses real information, and printing it unmarked claims a full
+              // year the run never covered.
+              r.partial ? ' <span class="field__hint">part year</span>' : ''
+            }</th>
+            <td><span class="perf-change perf-change--${direction(r.percent)}">${esc(
+              percent(r.percent),
+            )}</span></td>
+            ${
+              hasBenchmark
+                ? `<td><span class="perf-change perf-change--${direction(
+                    r.benchmark,
+                  )}">${esc(percent(r.benchmark))}</span></td>`
+                : ''
+            }
+          </tr>`,
+        )
+        .join('')}</tbody>
+    </table></div>`;
 }
 
 /* --------------------------- Publishing ----------------------------
@@ -1088,6 +1461,25 @@ $('#view').addEventListener('click', (event) => {
       break;
     }
 
+    case 'new-portfolio':
+      openPortfolio(null);
+      break;
+    case 'edit-portfolio':
+      openPortfolio(state.data.portfolios.find((p) => p.id === id));
+      break;
+    case 'run-portfolio':
+      runBacktest(id);
+      break;
+    case 'delete-portfolio': {
+      const p = state.data.portfolios.find((x) => x.id === id);
+      if (!confirm(`Remove the portfolio "${p?.name ?? ''}"?`)) return;
+      // Its result is on screen under the list; leaving it there after the
+      // portfolio it belongs to is gone reads as a bug.
+      if (state.backtest?.id === id) state.backtest = null;
+      act(() => del(`/portfolios/${id}`), { success: 'Portfolio removed' });
+      break;
+    }
+
     case 'new-sink':
       state.editingSinks.add('new');
       render({ force: true });
@@ -1369,7 +1761,10 @@ function openAdd() {
   $('#add-symbol').focus();
 }
 
-$('#add-fab').addEventListener('click', openAdd);
+$('#add-fab').addEventListener('click', () => {
+  if (route() === 'portfolios') openPortfolio(null);
+  else openAdd();
+});
 $('#add-cancel').addEventListener('click', () => addDialog.close());
 
 /* Clicking the backdrop closes it. The backdrop is not a child, so it surfaces
@@ -1451,6 +1846,193 @@ addDialog.addEventListener('click', async (event) => {
     $('#add-symbol').focus();
   }
 });
+
+/* ------------------------------------------------------------------ *
+ * The allocation editor
+ *
+ * In the shell, like the add dialog, and for a stronger reason: its rows are
+ * added and removed as you type, and a background redraw of #view landing in
+ * the middle of that would take the half-typed row with it. Out here nothing
+ * ever replaces it, so there is no draft to stash and no focus to restore.
+ * ------------------------------------------------------------------ */
+
+const portfolioDialog = $('#portfolio-dialog');
+
+/** Which portfolio the dialog is editing, or null for a new one. Kept out of
+ *  the form so a save knows whether to POST or PATCH. */
+let editingPortfolio = null;
+
+function openPortfolio(portfolio) {
+  editingPortfolio = portfolio ?? null;
+  const form = $('#portfolio-form');
+  form.reset();
+
+  $('#portfolio-dialog-title').textContent = portfolio ? `Edit ${portfolio.name}` : 'New portfolio';
+  form.elements.name.value = portfolio?.name ?? '';
+  form.elements.initialAmount.value = portfolio?.initialAmount ?? 10000;
+  form.elements.rebalance.value = portfolio?.rebalance ?? 'annually';
+  form.elements.startYear.value = portfolio?.startYear || '';
+  form.elements.endYear.value = portfolio?.endYear || '';
+  form.elements.benchmark.value = portfolio?.benchmark ?? '';
+
+  // One blank row to start typing into, so a new portfolio is never an empty
+  // panel with a button you have to find first.
+  paintAllocation(portfolio?.holdings?.length ? portfolio.holdings : [{ symbol: '', weight: '' }]);
+
+  if (!portfolioDialog.open) portfolioDialog.showModal();
+  $('#allocation-rows input')?.focus();
+}
+
+/** Repaint the allocation rows from a list of holdings. Only called when the
+ *  *set* of rows changes — typing in one never repaints, so nothing you are in
+ *  the middle of is ever replaced. */
+function paintAllocation(holdings) {
+  $('#allocation-rows').innerHTML = holdings
+    .map(
+      (h, i) => `
+      <div class="allocation-row" data-row="${i}">
+        <input class="input input--mono" name="symbol" value="${esc(h.symbol ?? '')}"
+               placeholder="VTSMX" aria-label="Symbol" />
+        <div class="allocation-row__weight">
+          <input class="input" name="weight" type="number" min="0" max="100" step="any"
+                 value="${esc(h.weight ?? '')}" placeholder="0" aria-label="Weight in percent" />
+          <span aria-hidden="true">%</span>
+        </div>
+        <button class="btn btn--sm btn--ghost" type="button" data-drop-row="${i}"
+                aria-label="Remove this holding">×</button>
+      </div>`,
+    )
+    .join('');
+  paintAllocationTotal();
+}
+
+/** Read the rows back out. The DOM is the state here — there is no model to
+ *  keep in step with it, because nothing else ever rewrites these fields. */
+function allocationRows() {
+  return $$('.allocation-row', portfolioDialog).map((row) => ({
+    symbol: $('input[name="symbol"]', row).value.trim().toUpperCase(),
+    weight: Number($('input[name="weight"]', row).value),
+  }));
+}
+
+/** The running total, live under the rows.
+ *
+ *  The server rejects an allocation that doesn't add up to 100, and finding
+ *  that out on submit — after typing eight symbols — is the wrong moment. */
+function paintAllocationTotal() {
+  const rows = allocationRows().filter((h) => h.symbol || h.weight);
+  const total = rows.reduce((sum, h) => sum + (h.weight || 0), 0);
+  const rounded = Math.round(total * 100) / 100;
+  const ok = Math.abs(total - 100) <= 0.05;
+
+  const el = $('#allocation-total');
+  el.textContent = rows.length === 0 ? '' : `${rounded}%${ok ? '' : ' — needs to be 100%'}`;
+  el.classList.toggle('allocation-total--ok', ok && rows.length > 0);
+  el.classList.toggle('allocation-total--off', !ok && rows.length > 0);
+}
+
+/** Everything the form says, in the shape both /portfolios and /backtest take. */
+function portfolioPayload() {
+  const form = $('#portfolio-form');
+  const values = Object.fromEntries(new FormData(form).entries());
+  return {
+    name: (values.name || '').trim(),
+    holdings: allocationRows().filter((h) => h.symbol || h.weight),
+    initialAmount: Number(values.initialAmount) || 10000,
+    // An empty year field means "as far as the data goes", which reaches the
+    // server as 0 rather than being dropped — otherwise clearing it on an
+    // existing portfolio would leave the old year in place.
+    startYear: Number(values.startYear) || 0,
+    endYear: Number(values.endYear) || 0,
+    rebalance: values.rebalance || 'annually',
+    benchmark: (values.benchmark || '').trim().toUpperCase(),
+  };
+}
+
+$('#allocation-add').addEventListener('click', () => {
+  paintAllocation([...allocationRows(), { symbol: '', weight: '' }]);
+  // Focus the row that was just added — the reason the button was pressed.
+  const rows = $$('.allocation-row input[name="symbol"]', portfolioDialog);
+  rows[rows.length - 1]?.focus();
+});
+
+portfolioDialog.addEventListener('click', (event) => {
+  const drop = event.target.closest('[data-drop-row]');
+  if (drop) {
+    const at = Number(drop.dataset.dropRow);
+    const rest = allocationRows().filter((_, i) => i !== at);
+    paintAllocation(rest.length ? rest : [{ symbol: '', weight: '' }]);
+    return;
+  }
+
+  // Same backdrop-click close as the other dialogs: the backdrop is not a
+  // child, so it arrives as a click on the dialog with coordinates outside it.
+  if (event.target !== portfolioDialog) return;
+  const box = portfolioDialog.getBoundingClientRect();
+  if (
+    event.clientX < box.left ||
+    event.clientX > box.right ||
+    event.clientY < box.top ||
+    event.clientY > box.bottom
+  ) {
+    portfolioDialog.close();
+  }
+});
+
+portfolioDialog.addEventListener('input', (event) => {
+  if (event.target.name === 'weight' || event.target.name === 'symbol') paintAllocationTotal();
+});
+
+portfolioDialog.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const payload = portfolioPayload();
+  const id = editingPortfolio?.id;
+
+  act(
+    async () => {
+      const body = id ? await patch(`/portfolios/${id}`, payload) : await post('/portfolios', payload);
+      // Only on success: a rejected allocation leaves the dialog open on what
+      // was typed, so the fix is an edit rather than a retype.
+      portfolioDialog.close();
+      // Saving is nearly always followed by wanting to see it, and the result
+      // is the reason the portfolio exists.
+      runBacktest(body.portfolio.id);
+    },
+    { success: id ? 'Portfolio saved' : 'Portfolio added' },
+  );
+});
+
+/* "Run without saving" — the answer to "would this even run?", which is worth
+ * having before committing a portfolio to the database. */
+$('#portfolio-run').addEventListener('click', () => {
+  portfolioDialog.close();
+  runBacktest('draft', portfolioPayload());
+});
+
+$('#portfolio-cancel').addEventListener('click', () => portfolioDialog.close());
+
+/** Run a backtest and paint it under the list. `spec` is given only for the
+ *  unsaved case; a saved portfolio is run by ID so the server reads the stored
+ *  allocation rather than trusting a copy of it. */
+async function runBacktest(id, spec) {
+  if (route() !== 'portfolios') location.hash = '#/portfolios';
+  state.backtest = { id, status: 'loading' };
+  render({ force: true });
+
+  try {
+    const body = spec
+      ? await post('/backtest', spec)
+      : await post(`/portfolios/${id}/backtest`, undefined);
+    // The page may have moved on — another portfolio run, or this one deleted —
+    // while the request was in flight.
+    if (state.backtest?.id !== id) return;
+    state.backtest = { id, status: 'ready', data: body.backtest };
+  } catch (err) {
+    if (state.backtest?.id !== id) return;
+    state.backtest = { id, status: 'error', error: err.message || String(err) };
+  }
+  render({ force: true });
+}
 
 /* ------------------------------------------------------------------ *
  * The performance sheet

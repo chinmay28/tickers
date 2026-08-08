@@ -29,6 +29,7 @@
         <div class="app__header-end">
           <nav class="nav" aria-label="Primary">
             <a class="btn btn--ghost" href="#/" data-route="watchlist">Watchlist</a>
+            <a class="btn btn--ghost" href="#/portfolios" data-route="portfolios">Portfolios</a>
             <a class="btn btn--ghost" href="#/publishing" data-route="publishing">Publishing</a>
             <a class="btn btn--ghost" href="#/settings" data-route="settings">Settings</a>
             <button class="btn btn--primary" id="refresh-now" type="button">Refresh now</button>
@@ -80,6 +81,10 @@
         <a class="tab-bar__item" href="#/" data-route="watchlist">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 17l5-6 4 4 4-7 5 6"/><path d="M3 21h18"/></svg>
           <span>Watchlist</span>
+        </a>
+        <a class="tab-bar__item" href="#/portfolios" data-route="portfolios">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M14 3.2A9 9 0 0 1 20.8 10H14z"/></svg>
+          <span>Portfolios</span>
         </a>
         <a class="tab-bar__item" href="#/publishing" data-route="publishing">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 3v13"/><path d="m8 7 4-4 4 4"/></svg>
@@ -144,6 +149,81 @@
       <div class="sheet__foot">
         <button class="btn btn--primary" type="submit" form="add-form">Add</button>
         <button class="btn btn--outline" type="button" id="search-btn">Search by name</button>
+      </div>
+    </dialog>
+
+    <!-- The allocation editor.
+         In the shell for the same reason the add form is, and more so: it is a
+         repeating form whose rows are added and removed as you type, and a
+         ten-second redraw of #view landing in the middle of that would take the
+         half-typed row with it. Its rows are painted by app.js into
+         #allocation-rows; nothing else here is ever replaced. -->
+    <dialog class="sheet sheet--wide" id="portfolio-dialog" aria-labelledby="portfolio-dialog-title">
+      <div class="sheet__head">
+        <h2 class="sheet__title" id="portfolio-dialog-title">Portfolio</h2>
+        <button class="sheet__close" type="button" id="portfolio-cancel" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="sheet__body">
+        <form id="portfolio-form" autocomplete="off">
+          <div class="field">
+            <label class="field__label" for="portfolio-name">Name <span style="text-transform:none">(optional)</span></label>
+            <input class="input" id="portfolio-name" name="name" placeholder="Three fund" />
+          </div>
+
+          <h3 class="card__subtitle">Allocation</h3>
+          <div id="allocation-rows"></div>
+          <div class="allocation-foot">
+            <button class="btn btn--sm btn--ghost" type="button" id="allocation-add">Add a holding</button>
+            <span class="allocation-total" id="allocation-total"></span>
+          </div>
+
+          <div class="form-grid" style="margin-top:0.9rem">
+            <div class="field">
+              <label class="field__label" for="portfolio-initial">Initial amount</label>
+              <!-- step="any" because a stepped number field silently invalidates
+                   everything off its own grid: min="1" step="100" makes 10,000
+                   an invalid value, and the form then refuses to submit with
+                   nothing on screen to say why. Any positive amount is a
+                   legitimate thing to backtest. -->
+              <input class="input" id="portfolio-initial" name="initialAmount" type="number"
+                     min="1" step="any" value="10000" />
+            </div>
+            <div class="field">
+              <label class="field__label" for="portfolio-rebalance">Rebalance</label>
+              <select class="select" id="portfolio-rebalance" name="rebalance">
+                <option value="annually">annually</option>
+                <option value="quarterly">quarterly</option>
+                <option value="monthly">monthly</option>
+                <option value="none">never — let the weights drift</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="portfolio-start">Start year <span style="text-transform:none">(optional)</span></label>
+              <input class="input" id="portfolio-start" name="startYear" type="number"
+                     min="1900" max="2200" step="1" placeholder="as early as the data goes" />
+            </div>
+            <div class="field">
+              <label class="field__label" for="portfolio-end">End year <span style="text-transform:none">(optional)</span></label>
+              <input class="input" id="portfolio-end" name="endYear" type="number"
+                     min="1900" max="2200" step="1" placeholder="today" />
+            </div>
+            <div class="field">
+              <label class="field__label" for="portfolio-benchmark">Benchmark <span style="text-transform:none">(optional)</span></label>
+              <input class="input input--mono" id="portfolio-benchmark" name="benchmark" placeholder="VFINX" />
+              <span class="field__hint">
+                One symbol, run at 100% over the same months. Both sides are cut
+                to the period they share, so the two curves can be read against
+                each other.
+              </span>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="sheet__foot">
+        <button class="btn btn--primary" type="submit" form="portfolio-form">Save</button>
+        <button class="btn btn--outline" type="button" id="portfolio-run">Run without saving</button>
       </div>
     </dialog>
 

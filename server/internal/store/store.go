@@ -34,6 +34,12 @@ var ErrDuplicateSymbol = errors.New("symbol already on the watchlist")
 // set this package could match on.
 var ErrInvalidExpression = errors.New("invalid composite formula")
 
+// ErrInvalidPortfolio wraps everything an allocation can be wrong about — a
+// missing symbol, a weight of zero, weights that don't add up. Like
+// ErrInvalidExpression it exists because the API has to answer 400 for all of
+// them while each message stays a sentence written for the person who typed it.
+var ErrInvalidPortfolio = errors.New("invalid portfolio")
+
 // Store is a handle on the database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
