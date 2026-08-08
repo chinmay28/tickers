@@ -984,3 +984,68 @@ func findTicker(t *testing.T, state map[string]any, symbol string) map[string]an
 	t.Fatalf("%s is not on the watchlist", symbol)
 	return nil
 }
+
+func TestLogoEndpointServesCachedImage(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+
+	png := []byte{0x89, 'P', 'N', 'G', 13, 10, 26, 10}
+	if err := h.store.SaveLogo(store.Logo{
+		Symbol: "VTI", Status: store.LogoOK, ContentType: "image/png", Bytes: png,
+	}); err != nil {
+		t.Fatalf("save logo: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/logos/VTI", nil)
+	rec := httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logo returned %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("content type = %q, want image/png", got)
+	}
+	if rec.Body.String() != string(png) {
+		t.Errorf("served %q, want the cached bytes", rec.Body.String())
+	}
+	// The bytes came from a third party and are served from this origin, so
+	// the browser must not be left to decide what they are.
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if rec.Header().Get("Cache-Control") == "" {
+		t.Error("no Cache-Control on a logo; a watchlist redraw would re-fetch every image")
+	}
+
+	// A symbol with no cached image is a 404, not an empty 200 — the client
+	// only asks for the ones state said it had.
+	req = httptest.NewRequest(http.MethodGet, "/api/logos/GLD", nil)
+	rec = httptest.NewRecorder()
+	h.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("uncached logo returned %d, want 404", rec.Code)
+	}
+}
+
+func TestStateListsCachedLogos(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+
+	if err := h.store.SaveLogo(store.Logo{
+		Symbol: "VTI", Status: store.LogoOK, ContentType: "image/png", Bytes: []byte{1, 2},
+	}); err != nil {
+		t.Fatalf("save logo: %v", err)
+	}
+	if err := h.store.SaveLogo(store.Logo{Symbol: "GLD", Status: store.LogoNone}); err != nil {
+		t.Fatalf("save tombstone: %v", err)
+	}
+
+	_, body := h.do(t, http.MethodGet, "/api/state", nil)
+	logos, ok := body["logos"].([]any)
+	if !ok {
+		t.Fatalf("state has no logos list: %v", body["logos"])
+	}
+	if len(logos) != 1 || logos[0] != "VTI" {
+		t.Errorf("state listed %v, want just VTI — a symbol with no logo must not be listed, "+
+			"or the client draws a broken image for it", logos)
+	}
+}

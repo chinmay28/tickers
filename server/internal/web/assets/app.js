@@ -143,17 +143,27 @@ function markInitials(symbol) {
   return (text.replace(/[^A-Za-z0-9]/g, '').slice(0, 2) || text.slice(0, 2)).toUpperCase();
 }
 
+/** Does the server hold a real logo for this symbol?
+ *
+ *  The list rides along with the state payload rather than being guessed at.
+ *  Pointing an `<img>` at every symbol and letting the misses 404 would cost a
+ *  failed request per fund, per crypto pair and per composite on every load. */
+function hasLogo(symbol) {
+  return Boolean(state.data?.logos?.includes(symbol));
+}
+
 /** The square that sits in front of a symbol wherever one is listed.
  *
- *  There is no logo to show: fetching one would mean a request per row to a
- *  third party from a box on someone's home network, and the one static binary
- *  has nowhere to cache the results. So the mark is derived from the symbol
- *  itself — initials over a hashed hue — which costs nothing and is stable.
+ *  Most of them are drawn, not fetched: initials over a hue hashed out of the
+ *  symbol, which costs nothing, works offline and is the same on every device.
+ *  When logos are turned on the server caches a real one per symbol and this
+ *  puts it in the same box — the drawn mark stays underneath, so a picture
+ *  that fails to load leaves the initials showing rather than a hole.
  *
- *  The two computed kinds take a glyph in their own hue instead. Neither is a
- *  symbol anyone issued, and initials over `VTI/GLD` would claim otherwise;
- *  the obelus and the pie say "priced from a formula" and "priced from a
- *  basket", which is the same thing the row's outline says. */
+ *  The two computed kinds take a glyph in their own hue instead, and never a
+ *  logo. Neither is a symbol anyone issued, and a picture over `VTI/GLD` would
+ *  claim otherwise; the obelus and the pie say "priced from a formula" and
+ *  "priced from a basket", which is what the row's outline says too. */
 function symbolMark(symbol, kind = '') {
   if (kind === 'composite') {
     return `<span class="mark mark--composite" aria-hidden="true">
@@ -167,9 +177,15 @@ function symbolMark(symbol, kind = '') {
         <path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M14 3.2A9 9 0 0 1 20.8 10H14z"/>
       </svg></span>`;
   }
-  return `<span class="mark" style="--mark-h:${markHue(symbol)}" aria-hidden="true">${esc(
-    markInitials(symbol),
-  )}</span>`;
+  // The image sits on top of the initials rather than instead of them: with an
+  // empty alt a picture that never arrives collapses to nothing and the drawn
+  // mark is simply still there. No error handler, no second render pass.
+  const logo = hasLogo(symbol)
+    ? `<img class="mark__logo" src="/api/logos/${encodeURIComponent(symbol)}" alt="" loading="lazy" />`
+    : '';
+  return `<span class="mark${logo ? ' mark--logo' : ''}" style="--mark-h:${markHue(
+    symbol,
+  )}" aria-hidden="true">${esc(markInitials(symbol))}${logo}</span>`;
 }
 
 function clock(iso) {
@@ -1509,6 +1525,21 @@ function renderSettings(data) {
             </label>
             <span class="field__hint">Off means quotes are still stored, but only sent when you press Publish now.</span>
           </div>
+          <div class="field">
+            <label class="field__label">Symbol logos</label>
+            <label class="checkbox">
+              <input type="checkbox" name="logos" ${s.logos ? 'checked' : ''} />
+              Fetch a real logo for each symbol
+            </label>
+            <span class="field__hint">
+              Off by default, because this is the one setting that has the
+              server ask the quote source about your symbols by name. Each logo
+              is fetched once and cached here, so your browser never talks to
+              anyone else and the watchlist still works offline. Symbols with
+              no logo — funds, crypto, ratios, portfolios — keep the mark drawn
+              from their name. Turning it off again empties the cache.
+            </span>
+          </div>
         </div>
 
         <h3 class="card__subtitle">Pinned tickers</h3>
@@ -1805,6 +1836,7 @@ $('#view').addEventListener('submit', (event) => {
       refreshSeconds: Number(values.refreshSeconds),
       historyHours: Number(values.historyHours),
       publishOnRefresh: form.elements.publishOnRefresh.checked,
+      logos: form.elements.logos.checked,
       // An emptied field means "pin nothing", so it has to reach the server as
       // an empty list rather than being dropped from the payload.
       pinnedSymbols: symbolList(values.pinnedSymbols),

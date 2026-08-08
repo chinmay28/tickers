@@ -282,6 +282,16 @@ func (e *Engine) RunCycle(ctx context.Context, trigger string) (store.Run, error
 				return e.finish(run, err)
 			}
 		}
+
+		// After the prices, never instead of them: a logo is decoration and a
+		// cycle that failed to price the watchlist because it was collecting
+		// pictures would have its priorities exactly backwards. The list is
+		// the one just fetched, so a composite's leg and a portfolio's holding
+		// — which have chips in the UI and no rows of their own — are covered
+		// by the same pass.
+		if cfg.Logos {
+			e.refreshLogos(ctx, plan.symbols)
+		}
 	}
 
 	if _, err := e.store.PruneHistory(cfg.HistoryRetention()); err != nil {

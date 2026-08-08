@@ -6,6 +6,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -97,6 +98,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tickers/{id}/history", s.handleTickerHistory)
 	mux.HandleFunc("GET /api/tickers/{id}/performance", s.handleTickerPerformance)
 
+	mux.HandleFunc("GET /api/logos/{symbol}", s.handleLogo)
+
 	mux.HandleFunc("GET /api/portfolios", s.handleListPortfolios)
 	mux.HandleFunc("POST /api/portfolios", s.handleCreatePortfolio)
 	mux.HandleFunc("PATCH /api/portfolios/{id}", s.handleUpdatePortfolio)
@@ -181,8 +184,13 @@ type stateResponse struct {
 	// Provider is the quote source's effective settings, with every default
 	// resolved — nil for a provider that can't be reconfigured, which is what
 	// the UI keys off to hide those fields.
-	Provider *providerView  `json:"provider"`
-	Meta     map[string]any `json:"meta"`
+	Provider *providerView `json:"provider"`
+	// Logos is every symbol with a cached image, so the client knows which
+	// marks to draw as a picture and which to draw from the name. Sending the
+	// list beats letting the client guess: an <img> per symbol would 404 for
+	// every fund and every crypto pair on every load.
+	Logos []string       `json:"logos"`
+	Meta  map[string]any `json:"meta"`
 }
 
 // providerView is what the Settings page renders for the quote source: the
@@ -245,6 +253,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	logos, err := s.store.LogoSymbols()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 
 	// The preview is the exact payload the default format would publish right
 	// now. Showing it next to the destination list is the cheapest way to make
@@ -265,6 +278,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		Preview:    preview,
 		Runtime:    s.runtime,
 		Provider:   s.providerView(),
+		Logos:      logos,
 		Meta: map[string]any{
 			"minRefreshSeconds": store.MinRefreshSeconds,
 			"minQuoteTimeout":   store.MinQuoteTimeout,
@@ -432,6 +446,31 @@ func (s *Server) handleTickerHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"symbol": t.Symbol, "points": points})
+}
+
+// handleLogo serves a cached image. It is the only endpoint that answers with
+// something other than JSON, and the only one worth caching in a browser: the
+// bytes for a symbol change approximately never, and the client asks for one
+// per row on every load.
+func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
+	logo, err := s.store.Logo(r.PathValue("symbol"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", logo.ContentType)
+	// A day is long enough that a watchlist redraw costs nothing and short
+	// enough that a logo the source has since changed is not pinned forever.
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// The image came from a third party. It is served from this app's own
+	// origin, so it is worth saying plainly that it is only ever an image:
+	// nosniff stops a browser deciding otherwise about bytes we sniffed once
+	// already, and the disposition keeps a hand-typed URL from rendering it as
+	// a page in its own right.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", "inline")
+	http.ServeContent(w, r, "", logo.FetchedAt, bytes.NewReader(logo.Bytes))
 }
 
 // handleTickerPerformance answers the watchlist's history sheet: the daily

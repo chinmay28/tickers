@@ -143,6 +143,30 @@ found by shape and colour before the text is read.
 A search result whose name was long enough could already push its row past the
 edge of the add dialog; it now ellipsises as it was meant to.
 
+### Real logos, for anyone who wants them
+
+**Symbol logos** in Settings — off by default — fetches an actual logo per
+symbol and shows it in the mark's place.
+
+- **The server fetches; your browser never does.** Each image is fetched once,
+  cached in the database, and served from this app's own origin. An `<img>`
+  pointed straight at a logo host would tell that host what you track from
+  every browser that opened the page, cost a request per row per load, and
+  leave a dashboard with no internet full of broken pictures.
+- **Off until you turn it on**, because it is the one setting that makes an
+  install talk to a host it otherwise wouldn't, about your symbols by name.
+  Turning it off again empties the cache.
+- **"There isn't one" is an answer and is stored as one.** Most symbols have no
+  logo — funds, indices, crypto pairs — and without recording that, every one of
+  them would be asked about again on every cycle forever. A timeout is *not*
+  recorded, so a network blink is retried and a real answer is not.
+- **A cycle fetches at most six**, so a first run on a long watchlist doesn't
+  open a connection per symbol at a host that owes it nothing. The rest arrive
+  over the next few cycles, and then the fetching stops for good.
+- Composites and portfolios never get one, and the drawn mark stays underneath
+  every logo, so anything missing or slow to load leaves initials rather than an
+  empty square.
+
 ### Contributions, risk-adjusted returns and yield
 
 - **Pay into a portfolio** on a cadence. Money paid in is not growth, so every

@@ -136,10 +136,11 @@ Override defaults with env vars (`PORT`, `HOST`, `TICKERS_INSTALL`,
 bottom-right corner is how you add one; it opens a sheet that takes a symbol or
 a formula, with **Search by name** for when you don't know the ticker. Each row
 shows the last price, the move from the previous close, a sparkline from stored
-history, and when it was last read. Each carries a small **mark** — the symbol's
-initials over a colour derived from the symbol itself, drawn locally rather than
-fetched from anywhere, so rows are told apart at a glance without a logo service
-knowing what you track. Pinned symbols carry a `pinned` chip and
+history, and when it was last read. Each carries a small **mark**: by default the
+symbol's initials over a colour derived from the symbol itself, drawn locally so
+rows are told apart at a glance without a logo service knowing what you track.
+Turn **Symbol logos** on in Settings and the server fetches a real logo for each
+symbol and caches it — see below. Pinned symbols carry a `pinned` chip and
 always sort above the rest;
 **Pin**/**Unpin** on a row edits the same list the Settings page shows as text.
 Drag to reorder on a desktop, or use ↑↓ on a phone; **the watchlist order is
@@ -300,6 +301,11 @@ here rather than on a page of its own because almost every question it answers
 - *Pinned tickers* — the comma-separated symbols that sort to the top of the
   watchlist, up to 50. A symbol that isn't on the watchlist is ignored, so
   removing a ticker never means editing this too.
+- *Symbol logos* — off by default. On, the **server** fetches a real logo per
+  symbol from the quote source and caches the image in the database, so it is
+  fetched once and your browser never talks to anyone else. Symbols with no
+  logo — funds, crypto pairs, composites, portfolios — keep the drawn mark.
+  Turning it off again empties the cache.
 - *Quote source* — the **server URL** prices come from, the request timeout,
   and the User-Agent sent upstream. Leave a field blank to fall back to the
   default, which the field shows as its placeholder. **Test connection** fetches

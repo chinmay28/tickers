@@ -427,6 +427,27 @@ svg {
   --mark-key: var(--portfolio);
   color: var(--portfolio);
 }
+/* A real logo, when the server has one cached. It covers the initials rather
+   than replacing them, so an image that fails to load leaves the drawn mark
+   showing instead of a hole. */
+.mark--logo {
+  position: relative;
+  /* Logos are drawn for a white page and plenty of them are dark artwork on
+     transparency, which would vanish into the dark theme. A plate under every
+     one of them costs a paler square and is the only way they all read. */
+  --mark-key: #cbd5db;
+  background: #f4f6f7;
+}
+.mark__logo {
+  position: absolute;
+  inset: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  /* contain, not cover: a wordmark cropped to a square is a different mark. */
+  object-fit: contain;
+  border-radius: inherit;
+}
+
 /* Inside a chip the mark is a hue with a hint of letters in it — a holding's
    symbol is already spelled out an inch to the right. */
 .chip .mark {
