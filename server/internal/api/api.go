@@ -490,7 +490,10 @@ func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 	// a page in its own right.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", "inline")
-	http.ServeContent(w, r, "", logo.FetchedAt, bytes.NewReader(logo.Bytes))
+	// The modtime is when the image changed, not when it was last checked, so a
+	// conditional request from a browser gets a 304 for a logo that has only
+	// been re-validated upstream.
+	http.ServeContent(w, r, "", logo.UpdatedAt, bytes.NewReader(logo.Bytes))
 }
 
 // handleUploadLogo stores an image somebody chose for a symbol.

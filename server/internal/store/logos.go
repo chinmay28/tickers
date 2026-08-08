@@ -41,8 +41,19 @@ type Logo struct {
 	// the difference between "this fund hasn't got one" and "the URL you
 	// configured answers 404 for everything", which the Settings page shows
 	// rather than leaving to be dug out of the database.
-	Reason    string    `json:"reason"`
+	Reason string `json:"reason"`
+	// ETag and LastModified are what the source said about this image, sent
+	// back on the next check so it can answer "unchanged" instead of resending
+	// the bytes. They are the source's own opaque strings; nothing here reads
+	// them, it only hands them back.
+	ETag         string `json:"etag"`
+	LastModified string `json:"lastModified"`
+	// FetchedAt is when the source was last asked; UpdatedAt is when the image
+	// itself last changed. They are the same on a fresh store and drift apart
+	// on every re-check that finds nothing new — which is nearly all of them,
+	// and is exactly the case where the version the client sees must not move.
 	FetchedAt time.Time `json:"fetchedAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // SaveLogo records what a source said about a symbol, or stores an upload.
@@ -84,10 +95,15 @@ func (s *Store) SaveLogo(l Logo) error {
 	if l.FetchedAt.IsZero() {
 		l.FetchedAt = time.Now().UTC()
 	}
+	// Storing an image *is* the image changing: every caller of this either has
+	// new bytes or is replacing them. A re-check that found nothing new calls
+	// TouchLogo instead, precisely so it does not land here.
+	l.UpdatedAt = l.FetchedAt
 
 	_, err := s.db.Exec(`
-		INSERT INTO logos (symbol, status, origin, content_type, bytes, source, reason, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO logos (symbol, status, origin, content_type, bytes, source, reason,
+		                   etag, last_modified, fetched_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (symbol) DO UPDATE SET
 		  status = excluded.status,
 		  origin = excluded.origin,
@@ -95,9 +111,14 @@ func (s *Store) SaveLogo(l Logo) error {
 		  bytes = excluded.bytes,
 		  source = excluded.source,
 		  reason = excluded.reason,
-		  fetched_at = excluded.fetched_at`,
+		  etag = excluded.etag,
+		  last_modified = excluded.last_modified,
+		  fetched_at = excluded.fetched_at,
+		  updated_at = excluded.updated_at`,
 		symbol, l.Status, l.Origin, l.ContentType, l.Bytes, l.Source, l.Reason,
-		l.FetchedAt.UTC().Format(time.RFC3339Nano))
+		l.ETag, l.LastModified,
+		l.FetchedAt.UTC().Format(time.RFC3339Nano),
+		l.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -106,14 +127,16 @@ func (s *Store) SaveLogo(l Logo) error {
 // is identical either way.
 func (s *Store) Logo(symbol string) (Logo, error) {
 	var (
-		l  Logo
-		at string
+		l           Logo
+		at, updated string
 	)
 	err := s.db.QueryRow(`
-		SELECT symbol, status, origin, content_type, bytes, source, reason, fetched_at
+		SELECT symbol, status, origin, content_type, bytes, source, reason,
+		       etag, last_modified, fetched_at, updated_at
 		FROM logos WHERE symbol = ? AND status = ?`,
 		NormalizeSymbol(symbol), LogoOK).
-		Scan(&l.Symbol, &l.Status, &l.Origin, &l.ContentType, &l.Bytes, &l.Source, &l.Reason, &at)
+		Scan(&l.Symbol, &l.Status, &l.Origin, &l.ContentType, &l.Bytes, &l.Source, &l.Reason,
+			&l.ETag, &l.LastModified, &at, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Logo{}, ErrNotFound
 	}
@@ -121,14 +144,17 @@ func (s *Store) Logo(symbol string) (Logo, error) {
 		return Logo{}, err
 	}
 	l.FetchedAt = parseTime(at)
+	l.UpdatedAt = parseTime(updated)
 	return l, nil
 }
 
 // LogoMark is what the client is told about one symbol's image.
 type LogoMark struct {
-	// Version is the second the image was stored, and it goes in the URL: the
-	// bytes are served with a day of browser caching, so without it a replaced
-	// logo would keep showing the old one until tomorrow.
+	// Version is the second the image last *changed*, and it goes in the URL:
+	// the bytes are served with a day of browser caching, so without it a
+	// replaced logo would keep showing the old one until tomorrow — and if it
+	// moved on every re-check instead, every browser would re-download an
+	// unchanged image daily.
 	Version int64 `json:"v"`
 	// Custom marks an upload. The UI needs it to know whether "remove" means
 	// "delete my picture" or "throw away a cached one that will be back
@@ -141,7 +167,7 @@ type LogoMark struct {
 // It rides along with the state payload because the client cannot guess it: an
 // <img> per symbol would 404 for every fund and crypto pair on every load.
 func (s *Store) LogoVersions() (map[string]LogoMark, error) {
-	rows, err := s.db.Query(`SELECT symbol, origin, fetched_at FROM logos WHERE status = ?`, LogoOK)
+	rows, err := s.db.Query(`SELECT symbol, origin, updated_at FROM logos WHERE status = ?`, LogoOK)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +210,64 @@ func (s *Store) SettledLogos(since time.Time) (map[string]bool, error) {
 		settled[symbol] = true
 	}
 	return settled, rows.Err()
+}
+
+// LogoChecks is what to send when each symbol is next re-checked: the
+// validators the last fetch left behind, and the bytes it stored.
+//
+// The bytes are here because not every source offers a validator. Against one
+// that doesn't, "has this changed?" can still be answered — by fetching it and
+// comparing — and the answer is worth having either way: an unchanged image
+// should not rewrite a row, and a changed one should not be missed.
+type LogoCheck struct {
+	ETag         string
+	LastModified string
+	Bytes        []byte
+}
+
+// LogoChecks returns one entry per fetched row. Uploads are left out: they are
+// never re-checked, so there is nothing to send.
+func (s *Store) LogoChecks() (map[string]LogoCheck, error) {
+	rows, err := s.db.Query(`
+		SELECT symbol, etag, last_modified, bytes FROM logos WHERE origin = ?`, LogoFetched)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]LogoCheck{}
+	for rows.Next() {
+		var (
+			symbol string
+			check  LogoCheck
+		)
+		if err := rows.Scan(&symbol, &check.ETag, &check.LastModified, &check.Bytes); err != nil {
+			return nil, err
+		}
+		out[symbol] = check
+	}
+	return out, rows.Err()
+}
+
+// TouchLogo records that a row was re-checked and found current, without
+// rewriting the image.
+//
+// It is what a 304 — or a byte-identical re-fetch — comes to. The row's age is
+// the only thing that moved, and that is exactly what has to move: it is what
+// stops the symbol being asked about again tomorrow.
+func (s *Store) TouchLogo(symbol string, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	res, err := s.db.Exec(`UPDATE logos SET fetched_at = ? WHERE symbol = ? AND origin = ?`,
+		at.UTC().Format(time.RFC3339Nano), NormalizeSymbol(symbol), LogoFetched)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteLogo drops one symbol's row, whoever put it there. Removing an upload

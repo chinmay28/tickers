@@ -405,3 +405,80 @@ func TestDeleteLogo(t *testing.T) {
 		t.Errorf("deleting a logo that isn't there gave %v, want ErrNotFound", err)
 	}
 }
+
+func TestTouchingALogoAgesItWithoutChangingIt(t *testing.T) {
+	st := newTestStore(t)
+
+	if err := st.SaveLogo(Logo{
+		Symbol: "AAPL", Status: LogoOK, ContentType: "image/png", Bytes: []byte{1, 2, 3},
+		ETag: `"v1"`, FetchedAt: time.Now().Add(-48 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	before, err := st.Logo("AAPL")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if err := st.TouchLogo("AAPL", time.Now()); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	after, err := st.Logo("AAPL")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if !after.FetchedAt.After(before.FetchedAt) {
+		t.Error("the check time did not move, so the symbol is due a check again immediately")
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Error("the image's version moved without the image changing; every browser would " +
+			"re-download it")
+	}
+	if string(after.Bytes) != string(before.Bytes) || after.ETag != before.ETag {
+		t.Error("touching a row disturbed the image or its validator")
+	}
+
+	// An upload is never re-checked, so there is nothing to touch.
+	if err := st.SaveLogo(Logo{
+		Symbol: "MINE", Status: LogoOK, Origin: LogoCustom,
+		ContentType: "image/png", Bytes: []byte{9},
+	}); err != nil {
+		t.Fatalf("save upload: %v", err)
+	}
+	if err := st.TouchLogo("MINE", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("touching an uploaded logo gave %v, want ErrNotFound", err)
+	}
+}
+
+func TestLogoChecksCarryWhatTheNextRequestNeeds(t *testing.T) {
+	st := newTestStore(t)
+
+	if err := st.SaveLogo(Logo{
+		Symbol: "AAPL", Status: LogoOK, ContentType: "image/png", Bytes: []byte{1, 2},
+		ETag: `"v1"`, LastModified: "Wed, 21 Oct 2026 07:28:00 GMT",
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := st.SaveLogo(Logo{
+		Symbol: "MINE", Status: LogoOK, Origin: LogoCustom,
+		ContentType: "image/png", Bytes: []byte{9},
+	}); err != nil {
+		t.Fatalf("save upload: %v", err)
+	}
+
+	checks, err := st.LogoChecks()
+	if err != nil {
+		t.Fatalf("checks: %v", err)
+	}
+	if checks["AAPL"].ETag != `"v1"` || checks["AAPL"].LastModified == "" {
+		t.Errorf("AAPL's validators came back as %+v", checks["AAPL"])
+	}
+	if len(checks["AAPL"].Bytes) == 0 {
+		t.Error("the stored bytes are missing; a source with no validators could not be " +
+			"compared against what we already have")
+	}
+	if _, listed := checks["MINE"]; listed {
+		t.Error("an uploaded logo is listed for re-checking; it is never asked about")
+	}
+}

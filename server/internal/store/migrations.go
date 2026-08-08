@@ -226,4 +226,28 @@ ALTER TABLE logos ADD COLUMN reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE logos ADD COLUMN origin TEXT NOT NULL DEFAULT 'fetched';
 `,
 	},
+	{
+		// What the source said about this image last time, so the daily
+		// re-check can ask "has it changed?" instead of "give it to me again".
+		// Empty — which is what every existing row gets — means the next check
+		// is an ordinary request, which is exactly right: nothing was recorded
+		// because nothing had been asked conditionally yet.
+		//
+		// `updated_at` splits a question `fetched_at` was answering badly.
+		// "When did we last look?" decides whether a symbol is due a check;
+		// "when did the picture last change?" is what the client puts in the
+		// image URL to get past a day of browser caching. With one column, a
+		// re-check that found nothing new still moved the version, and every
+		// browser re-downloaded an image it already had. It is backfilled from
+		// fetched_at, which is the best available answer for a row stored
+		// before the distinction existed and a harmless one: it means those
+		// images are re-downloaded once.
+		ID: "010_logo_validators",
+		SQL: `
+ALTER TABLE logos ADD COLUMN etag TEXT NOT NULL DEFAULT '';
+ALTER TABLE logos ADD COLUMN last_modified TEXT NOT NULL DEFAULT '';
+ALTER TABLE logos ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+UPDATE logos SET updated_at = fetched_at WHERE updated_at = '';
+`,
+	},
 }

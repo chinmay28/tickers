@@ -308,8 +308,9 @@ here rather than on a page of its own because almost every question it answers
   and caches the image in the database, so it is fetched once and your browser
   never talks to anyone else. Symbols with no logo — funds, crypto pairs,
   composites, portfolios — keep the drawn mark. A cached answer is re-checked
-  **once a day**, which is often enough for something that changes when a
-  company rebrands and slow enough to cost nothing. Turning the setting off
+  **once a day**, and the check asks the source *whether the image has changed*
+  rather than downloading it again — so a day's re-checking of a whole watchlist
+  normally transfers nothing at all. Turning the setting off
   empties the fetched cache; **uploads are never touched**, by that or by the
   daily refresh.
 

@@ -186,6 +186,14 @@ symbol and shows it in the mark's place.
   worse than it looked: it turned a wrong URL, an expired key, and a source that
   was down for an hour into permanent answers that only clearing the cache by
   hand could undo. A day fixes those overnight.
+- **The re-check asks whether anything changed**, rather than downloading the
+  image again. The ETag and Last-Modified from the last fetch go back as
+  `If-None-Match` and `If-Modified-Since`, so a source that supports them
+  answers `304` and sends nothing; against one that doesn't, the bytes are
+  compared with what is already stored. Either way an unchanged logo is not
+  rewritten — which matters because the client puts the image's version in its
+  URL, and moving it would make every browser re-download a picture it already
+  had, once a day, forever.
 - Composites and portfolios never get one, and the drawn mark stays underneath
   every logo, so anything missing or slow to load leaves initials rather than an
   empty square.

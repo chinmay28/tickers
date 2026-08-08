@@ -441,7 +441,7 @@ const maxLogoBytes = 256 << 10
 // brand image here at all. That is ErrNoLogo rather than a failure, and the
 // distinction is the whole reason this returns a sentinel — a caller that
 // treated "no logo" as an error would ask again forever.
-func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
+func (y *Yahoo) Logo(ctx context.Context, symbol string, known LogoValidators) (Logo, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
 		return Logo{}, errors.New("a symbol is required")
@@ -454,7 +454,7 @@ func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
 	// have their choice second-guessed by a fallback that mostly returns
 	// nothing.
 	if settings.LogoURL != "" {
-		return y.image(ctx, ExpandLogoURL(settings.LogoURL, symbol, settings.LogoKey))
+		return y.image(ctx, ExpandLogoURL(settings.LogoURL, symbol, settings.LogoKey), known)
 	}
 
 	endpoint := fmt.Sprintf("%s/v1/finance/search?q=%s&quotesCount=6&newsCount=0&listsCount=0",
@@ -491,11 +491,18 @@ func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
 		// things to have to debug.
 		return Logo{}, fmt.Errorf("%w: the quote source's search result carries no logo", ErrNoLogo)
 	}
-	return y.image(ctx, src)
+	return y.image(ctx, src, known)
 }
 
-// image fetches one picture, given the URL a search result pointed at.
-func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
+// image fetches one picture, given the URL a search result or a template
+// produced.
+//
+// The request is conditional when there is anything to be conditional about.
+// A logo is re-checked daily and changes when a company rebrands, so nearly
+// every one of those checks should end in a 304 and no bytes at all — which is
+// the difference between a re-check that is free and one that downloads the
+// whole watchlist's pictures every day.
+func (y *Yahoo) image(ctx context.Context, src string, known LogoValidators) (Logo, error) {
 	settings, client := y.current()
 	// Everything written down about this request uses the redacted form: the
 	// real URL is used once, to make the request, and never again.
@@ -518,6 +525,12 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 	}
 	req.Header.Set("User-Agent", settings.UserAgent)
 	req.Header.Set("Accept", "image/*")
+	if known.ETag != "" {
+		req.Header.Set("If-None-Match", known.ETag)
+	}
+	if known.LastModified != "" {
+		req.Header.Set("If-Modified-Since", known.LastModified)
+	}
 	// A key with nowhere to go in the URL is a server-side credential, and a
 	// bearer header is where those belong: it stays out of the request line,
 	// out of the other end's access log, and out of any redirect target.
@@ -531,6 +544,9 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		return Logo{}, ErrLogoUnchanged
+	}
 	if resp.StatusCode == http.StatusNotFound {
 		return Logo{}, fmt.Errorf("%w: nothing at %s", ErrNoLogo, safe)
 	}
@@ -573,7 +589,15 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 	}
 	// The stored provenance is the redacted URL too — the cache is read by
 	// anyone who can open the database or the Settings page.
-	return Logo{ContentType: kind, Bytes: body, Source: safe}, nil
+	return Logo{
+		ContentType: kind,
+		Bytes:       body,
+		Source:      safe,
+		Validators: LogoValidators{
+			ETag:         resp.Header.Get("ETag"),
+			LastModified: resp.Header.Get("Last-Modified"),
+		},
+	}, nil
 }
 
 // maxBody caps how much of a response we will read. The endpoints return tens

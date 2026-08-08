@@ -174,6 +174,17 @@ type Distributor interface {
 	Dividends(ctx context.Context, symbol string, since time.Time) ([]Distribution, error)
 }
 
+// LogoValidators is what a previous fetch left behind so the next one can be
+// conditional: an ETag, a Last-Modified date, or neither.
+//
+// They travel back to the provider rather than being interpreted here — their
+// only meaning is "what the source said last time", and only the source knows
+// whether that is still true.
+type LogoValidators struct {
+	ETag         string
+	LastModified string
+}
+
 // Logo is one symbol's brand image, as bytes. It is bytes rather than a URL
 // because the caller caches it: the point of the feature is that a browser
 // never talks to whoever drew it, and a URL handed to the client would defeat
@@ -181,6 +192,8 @@ type Distributor interface {
 type Logo struct {
 	ContentType string
 	Bytes       []byte
+	// Validators are what to send on the next check.
+	Validators LogoValidators
 	// Source is the URL the image came from, kept for the record. Nothing
 	// reads it at runtime — it is there so "where did this picture come from?"
 	// is answerable from the database.
@@ -194,10 +207,14 @@ type Logo struct {
 // provider that would rather not do that simply doesn't implement it and the
 // feature disappears rather than half-works.
 type Iconographer interface {
-	// Logo returns the image for a symbol, or ErrNoLogo if the source knows
-	// the symbol and has no picture of it. Anything else is a real failure and
-	// is worth retrying later.
-	Logo(ctx context.Context, symbol string) (Logo, error)
+	// Logo returns the image for a symbol, or ErrNoLogo if the source knows the
+	// symbol and has no picture of it. Anything else is a real failure and is
+	// worth retrying later.
+	//
+	// `known` is what the last fetch of this symbol left behind, zero if there
+	// wasn't one. A provider that can make the request conditional should, and
+	// returns ErrLogoUnchanged when the source says nothing has moved.
+	Logo(ctx context.Context, symbol string, known LogoValidators) (Logo, error)
 }
 
 // ErrNoSearch is returned by providers that can only price a known symbol.
@@ -206,6 +223,11 @@ var ErrNoSearch = errors.New("this quote provider does not support symbol search
 // ErrNoLogos is what a caller gets when the quote source cannot supply logos
 // at all — the marks stay as they are drawn rather than anything being broken.
 var ErrNoLogos = errors.New("this quote provider does not supply logos")
+
+// ErrLogoUnchanged means the source was asked whether the image had changed and
+// said no. It is the good outcome of a re-check: nothing was transferred, and
+// the caller's stored copy is still current.
+var ErrLogoUnchanged = errors.New("that logo has not changed")
 
 // ErrNoLogo means the source looked and this particular symbol hasn't got one.
 // It is a durable answer, not a failure: an index fund has no logo today and
