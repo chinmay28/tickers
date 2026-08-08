@@ -212,8 +212,10 @@ Two formats:
 | `minion` (default) | `{"VTI": "295.50", "VTI/GLD": "0.9478", "BTC-USD": "N/A", "timestamp": "08/07 14:03:22"}` — the original script's shape, for existing consumers |
 | `detailed` | per-symbol objects with `price`, `previousClose`, `change`, `changePercent`, `currency`, `status`, plus an ISO timestamp |
 
-**Activity** — the last refresh cycles, with per-symbol counts, which verb each
-destination accepted, and the failures in full.
+Below those, **Recent cycles** — the last refresh cycles, with per-symbol
+counts, which verb each destination accepted, and the failures in full. It sits
+here rather than on a page of its own because almost every question it answers
+("did it go?", "why didn't it?") is about a destination listed above it.
 
 **Settings** — three groups, all live:
 

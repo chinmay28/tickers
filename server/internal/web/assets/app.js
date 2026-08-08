@@ -219,7 +219,7 @@ async function loadState(opts) {
 
 /** Reload everything the current view needs, then redraw. */
 async function refreshView(opts) {
-  if (route() === 'activity') {
+  if (route() === 'publishing') {
     try {
       state.runs = (await api('/runs?limit=40'))?.runs ?? [];
     } catch {
@@ -366,7 +366,7 @@ function restoreFocus(snap) {
  * Router
  * ------------------------------------------------------------------ */
 
-const ROUTES = ['watchlist', 'publishing', 'activity', 'settings'];
+const ROUTES = ['watchlist', 'publishing', 'settings'];
 
 function route() {
   const hash = location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -425,9 +425,6 @@ function render({ force = false } = {}) {
   switch (route()) {
     case 'publishing':
       view.innerHTML = renderPublishing(data);
-      break;
-    case 'activity':
-      view.innerHTML = renderActivity(data);
       break;
     case 'settings':
       view.innerHTML = renderSettings(data);
@@ -645,7 +642,13 @@ async function drawSparklines() {
   }
 }
 
-/* --------------------------- Publishing ---------------------------- */
+/* --------------------------- Publishing ----------------------------
+ *
+ * Destinations, the payload they receive, and the cycles that sent it. The
+ * last of those was its own Activity page until the run log turned out to be
+ * read almost exclusively to answer a publishing question — "did it go?", "why
+ * didn't it?" — which is one page away from the destination it is asking
+ * about. It reads better underneath them than beside them. */
 
 function renderPublishing(data) {
   const preview = JSON.stringify(data.preview, null, 2);
@@ -696,6 +699,47 @@ function renderPublishing(data) {
       </div>
       <div class="card__body">
         <pre class="code">${esc(preview)}</pre>
+      </div>
+    </div>
+
+    ${renderCycles(data)}
+  `;
+}
+
+/** The refresh loop's state and its audit log — every cycle, whether it
+ *  succeeded or not, and what each destination did with it. */
+function renderCycles(data) {
+  const runs = state.runs;
+  const engine = data.engine;
+
+  return `
+    <div class="page-head page-head--sub">
+      <div>
+        <h2>Recent cycles</h2>
+        <p>The last ${runs.length} refresh cycles, newest first. Every cycle is recorded whether it succeeded or not.</p>
+      </div>
+      <button class="btn btn--outline" id="refresh-view" type="button">Reload</button>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat"><div class="stat__label">Status</div><div class="stat__value">${engine.running ? 'refreshing' : 'idle'}</div></div>
+      <div class="stat"><div class="stat__label">Next run</div><div class="stat__value">${esc(clock(engine.nextRun))}</div></div>
+      <div class="stat"><div class="stat__label">Interval</div><div class="stat__value">${esc(duration(data.settings.refreshSeconds))}</div></div>
+      <div class="stat"><div class="stat__label">Provider</div><div class="stat__value">${esc(engine.provider)}</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card__body" style="padding:0">
+        ${
+          runs.length === 0
+            ? `<div class="empty"><strong>No runs recorded yet</strong>The first cycle runs at startup.</div>`
+            : `<div class="table-scroll"><table class="table">
+                <thead><tr>
+                  <th>When</th><th>Trigger</th><th>Quotes</th><th>Published</th><th>Took</th><th>Detail</th>
+                </tr></thead>
+                <tbody>${runs.map(runRow).join('')}</tbody>
+              </table></div>`
+        }
       </div>
     </div>
   `;
@@ -786,45 +830,6 @@ function sinkForm(s, data) {
         </div>
       </div>
     </form>
-  `;
-}
-
-/* ---------------------------- Activity ----------------------------- */
-
-function renderActivity(data) {
-  const runs = state.runs;
-  const engine = data.engine;
-
-  return `
-    <div class="page-head">
-      <div>
-        <h1>Activity</h1>
-        <p>The last ${runs.length} refresh cycles, newest first. Every cycle is recorded whether it succeeded or not.</p>
-      </div>
-      <button class="btn btn--outline" id="refresh-view" type="button">Reload</button>
-    </div>
-
-    <div class="stat-row">
-      <div class="stat"><div class="stat__label">Status</div><div class="stat__value">${engine.running ? 'refreshing' : 'idle'}</div></div>
-      <div class="stat"><div class="stat__label">Next run</div><div class="stat__value">${esc(clock(engine.nextRun))}</div></div>
-      <div class="stat"><div class="stat__label">Interval</div><div class="stat__value">${esc(duration(data.settings.refreshSeconds))}</div></div>
-      <div class="stat"><div class="stat__label">Provider</div><div class="stat__value">${esc(engine.provider)}</div></div>
-    </div>
-
-    <div class="card">
-      <div class="card__body" style="padding:0">
-        ${
-          runs.length === 0
-            ? `<div class="empty"><strong>No runs recorded yet</strong>The first cycle runs at startup.</div>`
-            : `<div class="table-scroll"><table class="table">
-                <thead><tr>
-                  <th>When</th><th>Trigger</th><th>Quotes</th><th>Published</th><th>Took</th><th>Detail</th>
-                </tr></thead>
-                <tbody>${runs.map(runRow).join('')}</tbody>
-              </table></div>`
-        }
-      </div>
-    </div>
   `;
 }
 
