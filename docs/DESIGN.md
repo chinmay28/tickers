@@ -434,7 +434,7 @@ as `"N/A"`. A consumer watching for a key is better served by a key that says
 what an existing consumer receives, those tests fail.
 
 `Publish` does the PUT-then-POST dance per sink and records which verb landed,
-so Activity can distinguish "updated" from "created" without guessing. When both
+so the cycle log can distinguish "updated" from "created" without guessing. When both
 fail it reports **both** errors — being told only about the POST sends people
 looking at the wrong endpoint, and the PUT's status is usually the one that
 explains what the store actually wants.

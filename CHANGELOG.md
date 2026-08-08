@@ -7,6 +7,14 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Activity folded into Publishing
+
+The run log has moved under the destinations it describes, as a **Recent
+cycles** section on the **Publishing** page, and the Activity tab is gone.
+Nothing about the log itself changed — same cycles, same counts, same
+per-destination detail. It was always read to answer a publishing question, and
+that answer now sits on the same page as the destination it is about.
+
 ### Historical performance, on a double-tap
 
 **Double-tap (or double-click) a watchlist row** and it opens a sheet with a
