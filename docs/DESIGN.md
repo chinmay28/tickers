@@ -122,12 +122,22 @@ correct formula and a useless payload key — and at twenty holdings it would
 also blow through `expr.MaxLen`.
 
 The row is a **holding, not a target**. Its units — the weight's share of the
-initial amount over the price when the portfolio was last saved — are stored on
-the holdings and left alone between saves, so the weights drift exactly as a
-real account's would. Recomputing them every cycle would make the row silently
-rebalance itself every thirty seconds, which is a different portfolio and not
-one anybody asked for; rebalancing belongs to the backtest, where there is a
-period to rebalance over.
+initial amount over the price when the allocation was last set — are stored on
+the holdings, so the row starts at exactly the initial amount and the weights
+drift from there as a real account's would. Recomputing them every cycle would
+make the row silently rebalance itself every thirty seconds, which is a
+different portfolio and not one anybody asked for; rebalancing belongs to the
+backtest, where there is a period to rebalance over.
+
+Recomputing them re-bases the row and throws away whatever it had grown by, so
+it happens only when the **allocation or the initial amount** moved. That cannot
+be decided from which fields the patch carried: the editor posts the whole
+allocation on every save and posts it *without* units, so "holdings were in the
+patch" is true even for a rename. `carryUnits` compares what the units actually
+depend on instead, and it is all-or-nothing — a row holding some old units and
+one freshly priced would be worth neither the initial amount nor what it had
+grown to. `LinkPortfolio` then prices only the holdings whose units are missing,
+which also means a rename makes no upstream request at all.
 
 Two consequences worth naming. A portfolio's row **fails whole**: three quarters
 of an allocation is not three quarters of its value, it is an unknown amount,

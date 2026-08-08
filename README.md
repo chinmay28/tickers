@@ -152,12 +152,20 @@ as `FOUR-FUND`), carry a `portfolio` chip, and are managed from the Portfolios
 page: **Open** takes you there, and there is no **Remove**, because removing one
 means deleting the portfolio.
 
-A portfolio row is a **holding, not a target**. Its units are fixed when the
-portfolio is saved, so its weights drift exactly as a real account's would, and
-it never quietly rebalances itself between refreshes — rebalancing belongs to
-the backtest, where there is a period to rebalance over. Every holding has to
-price for the row to have a value: three quarters of a portfolio is not what it
-is worth.
+A portfolio row is a **holding, not a target**. It starts at exactly the
+portfolio's initial amount and moves with the holdings from there; its units are
+fixed, so the weights drift exactly as a real account's would and it never
+quietly rebalances itself between refreshes — rebalancing belongs to the
+backtest, where there is a period to rebalance over. Every holding has to price
+for the row to have a value: three quarters of a portfolio is not what it is
+worth.
+
+The baseline is only reset when the **allocation or the initial amount** changes,
+because different holdings are genuinely different units. Renaming a portfolio,
+changing its benchmark, its start or end year, its rebalancing cadence, its
+contributions or a replacement all leave the row alone — none of them change
+what is held, and none of them should reset a number you have been watching
+climb.
 
 **History** — **double-tap (or double-click) a row** to open its performance
 sheet: a chart of the daily closes behind it, and a table underneath. Pick a

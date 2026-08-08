@@ -119,6 +119,7 @@ func (s *Store) UpdatePortfolio(id string, patch PortfolioPatch) (Portfolio, err
 	if err != nil {
 		return Portfolio{}, err
 	}
+	before := p
 	if patch.Name != nil {
 		p.Name = strings.TrimSpace(*patch.Name)
 	}
@@ -150,6 +151,7 @@ func (s *Store) UpdatePortfolio(id string, patch PortfolioPatch) (Portfolio, err
 	if err := ValidatePortfolio(p); err != nil {
 		return Portfolio{}, err
 	}
+	p.Holdings = carryUnits(before, p)
 
 	allocations, err := json.Marshal(p.Holdings)
 	if err != nil {
@@ -165,6 +167,53 @@ func (s *Store) UpdatePortfolio(id string, patch PortfolioPatch) (Portfolio, err
 		return Portfolio{}, err
 	}
 	return s.Portfolio(id)
+}
+
+// carryUnits keeps the watchlist row's baseline across an edit that did not
+// move the allocation.
+//
+// The row's units are what make it start at the initial amount and grow from
+// there, so recomputing them re-bases it to the initial amount and throws away
+// however much it had made. That is right when the allocation itself changed —
+// different holdings are different units — and wrong for everything else. A
+// rename, a benchmark, a start year, a cadence, a replacement: none of them
+// touch what is held, and none of them should reset the number somebody has
+// been watching climb.
+//
+// It cannot be decided from which fields the patch carried. The editor posts
+// the whole allocation on every save, and posts it without units, so "holdings
+// were in the patch" is true even for a rename. What the units depend on is
+// compared instead.
+//
+// All or nothing: if one weight moved, every unit is recomputed. Keeping the
+// others would leave the row a mixture of two baselines, worth neither the
+// initial amount nor what it had grown to.
+func carryUnits(before, after Portfolio) []Holding {
+	holdings := make([]Holding, len(after.Holdings))
+	copy(holdings, after.Holdings)
+
+	reprice := func() []Holding {
+		for i := range holdings {
+			holdings[i].Units = 0
+		}
+		return holdings
+	}
+	if before.InitialAmount != after.InitialAmount || len(before.Holdings) != len(holdings) {
+		return reprice()
+	}
+
+	previous := make(map[string]Holding, len(before.Holdings))
+	for _, h := range before.Holdings {
+		previous[h.Symbol] = h
+	}
+	for i := range holdings {
+		old, ok := previous[holdings[i].Symbol]
+		if !ok || old.Weight != holdings[i].Weight {
+			return reprice()
+		}
+		holdings[i].Units = old.Units
+	}
+	return holdings
 }
 
 // DeletePortfolio removes a saved allocation and the watchlist row that stood

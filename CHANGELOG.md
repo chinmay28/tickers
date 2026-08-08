@@ -41,10 +41,17 @@ published with everything else. A portfolio named `Four fund` publishes as
 `FOUR-FUND`, which is the point: a home dashboard can read a whole allocation's
 value under one key instead of adding up four symbols itself.
 
-- The row is a **holding, not a target**. Its units are fixed when the portfolio
-  is saved, so its weights drift as a real account's would and it never quietly
-  rebalances itself between refreshes. Rebalancing stays in the backtest, where
-  there is a period to rebalance over.
+- The row is a **holding, not a target**. It starts at exactly the portfolio's
+  initial amount and moves with the holdings from there; its units are fixed, so
+  its weights drift as a real account's would and it never quietly rebalances
+  itself between refreshes. Rebalancing stays in the backtest, where there is a
+  period to rebalance over.
+- That baseline is **only reset when the allocation or the initial amount
+  changes**. A rename, a benchmark, a start year, a cadence, a contribution or a
+  replacement all leave it alone — none of them change what is held. It cannot
+  be decided from which fields a save carried, because the editor posts the
+  whole allocation every time and posts it without units, so what the units
+  depend on is compared instead.
 - The daily change is the true **value-weighted** move of the holdings, so a
   70/30 row moves 70/30 with its legs.
 - **All or nothing**: a portfolio missing one of its four funds is not worth
