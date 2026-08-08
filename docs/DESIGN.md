@@ -86,6 +86,8 @@ quotes(ticker_id PK → tickers, symbol, price, previous_close, currency,
        short_name, market_state, status, error, fetched_at)
 quote_history(id, symbol, price, at)
 sinks(id, name, base_url, key, category, format, enabled, timeout_ms, …)
+portfolios(id, name, allocations, initial_amount, start_year, end_year,
+           rebalance, benchmark, position, created_at, updated_at)
 runs(id, started_at, finished_at, trigger, ok_count, error_count, publishes, error)
 settings(key PK, value)
 schema_migrations(id PK, applied_at)
@@ -106,6 +108,13 @@ from it, and unpinning drops it straight back into the slot it would otherwise
 have had. Ordering the pinned group by the settings list instead would have
 made dragging a pinned row do nothing — with the shipped watchlist pinned by
 default, that is every row on a fresh install.
+
+**A portfolio's allocation is one JSON column, not a child table.** Nothing
+joins a holding to anything — a portfolio leg is fetched the way a composite's
+leg is, and need not be on the watchlist — nothing queries across portfolios by
+symbol, and the whole list is written and read as a unit. That is the same shape
+`runs.publishes` already has, and a `portfolio_holdings` table would have bought
+a join and a second set of ordering rules for none of it.
 
 **A composite is a ticker with an `expression`, and nothing else.** A row whose
 `expression` is non-empty is priced by evaluating that formula over other
@@ -352,6 +361,53 @@ Two things follow, and both are load-bearing:
   computed from the *full* series before any of this, so thinning changes what
   is drawn and never what is claimed.
 
+### Backtesting an allocation
+
+A portfolio is simulated from the same daily series the performance sheet reads,
+through the same per-symbol cache — which is the whole reason this cost so
+little to add. A portfolio over funds somebody also charts fetches nothing extra,
+and two portfolios sharing a fund fetch it once between them.
+
+Everything about the simulation is **monthly**. Daily bars are what the provider
+gives, but a portfolio's answer does not get more true at daily resolution: it
+gets forty times bigger on the wire, and it starts implying the rebalance
+happened on a particular Tuesday. Each month is reduced to its last session's
+close, and because that close is the provider's *adjusted* one, dividends are
+already reinvested — nothing here has to model a distribution.
+
+The decisions worth naming:
+
+- **Every leg is intersected, the benchmark included.** Same reasoning as
+  composite legs: a month one holding didn't trade would otherwise contribute a
+  return on one side of the portfolio and a flat line on the other, which is a
+  rebalance nobody performed. For the benchmark it is stronger still — two
+  curves drawn over different months cannot be read against each other, which is
+  the only thing a benchmark is for.
+- **The run starts where its latest holding does**, and says which one that was.
+  The date alone leaves a reader to work out which holding to change.
+- **Weights are renormalised to sum to exactly 1.** Three holdings of 33.33 are
+  simulated as three exact thirds rather than as a portfolio quietly starting
+  0.01% in nothing. The store still rejects weights that miss 100 by more than a
+  rounding tolerance, because weights summing to 90 are a typo, not a position
+  in cash — nothing here models cash.
+- **Between rebalances the weights drift**, which is the point: a 60/40 left
+  alone for a decade is a 78/22, and holding it at 60/40 would report a strategy
+  nobody ran. Boundaries are calendar ones — December for an annual rebalance,
+  not twelve months after the run happened to start — because that is when
+  somebody doing this by hand would do it.
+- **A part calendar year is shown and labelled**, at both ends. Dropping it
+  loses real information; printing it unmarked claims a year the run never
+  covered. Best and worst year use full years only, so a run starting in October
+  cannot report its first three months as its worst year.
+- **The drawdown row says whether it was recovered.** A depth and two dates
+  without that leaves out the thing a reader actually wants.
+
+`ErrBadSpec` covers every way a portfolio is un-runnable because of what was
+asked for — an unknown symbol, histories that don't overlap, a window too short
+for one monthly return — so the API can answer 400 for all of them. Telling
+somebody their portfolio is a server error sends them to the logs for a problem
+they can fix in the form.
+
 ## Configuration precedence
 
 Two kinds of configuration, split by a single question: *can this change while
@@ -471,6 +527,10 @@ its life half-updated.
 | POST | `/api/tickers/reorder` | `{ids: [...]}` |
 | GET | `/api/tickers/{id}/history` | sparkline points |
 | GET | `/api/tickers/{id}/performance` | five years of daily closes + returns |
+| GET/POST | `/api/portfolios` | list / add |
+| PATCH/DELETE | `/api/portfolios/{id}` | edit / remove |
+| POST | `/api/portfolios/{id}/backtest` | simulate a saved allocation |
+| POST | `/api/backtest` | simulate one that hasn't been saved |
 | GET/POST | `/api/sinks` | list / add |
 | PATCH/DELETE | `/api/sinks/{id}` | edit / remove |
 | POST | `/api/sinks/{id}/test` | send the real payload to one destination |
@@ -491,7 +551,16 @@ Conventions:
   symbols can still add `VTI/GLD`.
 - Errors are `{"error": "…"}`. `404` for a missing row, `409` for a duplicate
   symbol, `400` for anything the caller can fix (including a formula that
-  won't parse, which carries the parser's own message), `500` otherwise.
+  won't parse and an allocation that can't be simulated, each carrying its own
+  message), `500` otherwise.
+- The backtest endpoints are `POST` despite changing nothing. The first run of
+  a portfolio fans out to one full-history request per holding, and a URL a
+  browser is free to prefetch, retry or cache is the wrong shape for that. Both
+  answer `501` when the quote source has no history at all — a configuration
+  somebody chose, not a fault, the same way `/performance` does.
+- `/api/state` carries saved portfolios but never their results. A backtest is
+  slow and large; riding along with a ten-second poll would turn every redraw
+  into a fan of upstream requests.
 - A path or method under `/api/` that matches nothing gets a JSON 404 — never
   the HTML shell, which a client would then try to JSON-parse.
 - `/api/search` returns `200` with a warning even when the upstream search
@@ -556,6 +625,27 @@ add-a-ticker card from the top of the watchlist left the button as the only way
 in. Its distance from the bottom is a token (`--fab-inset`) because the toasts
 read it too and stack above the button rather than landing on it, and because
 the phone layout has to lift both clear of the tab bar.
+
+### The allocation editor
+
+Same shell, for a stronger reason. It is a *repeating* form: rows are added and
+removed as you type, and a background redraw of `#view` landing mid-row would
+take the half-typed row with it. Out in the shell nothing replaces it, so the
+DOM is the state — `allocationRows()` reads the fields back rather than keeping
+a model in step with them, and only a change to the *set* of rows repaints
+anything.
+
+The running weight total under the rows exists because the server rejects an
+allocation that doesn't add up to 100, and finding that out on submit, after
+typing eight symbols, is the wrong moment. Saving runs the portfolio, because
+the result is what the portfolio is for; **Run without saving** answers "would
+this even work?" without committing anything to the database.
+
+One thing this cost an hour to learn: a `type="number"` field with `min="1"` and
+`step="100"` makes 10,000 an *invalid* value, and the browser then refuses to
+submit the form with nothing on screen to explain it. Stepped number inputs
+silently invalidate everything off their own grid; `step="any"` is the default
+worth reaching for unless the grid is the point.
 
 ### The performance sheet
 
@@ -645,8 +735,10 @@ and exactly one writable path.
 
 ## Deliberate non-goals
 
-- **Portfolios, holdings, P&L.** This publishes prices. Whatever consumes them
-  can do the arithmetic.
+- **Holdings, cost basis, P&L.** Portfolios here are hypothetical allocations to
+  backtest, not an account: there are no lots, no contributions, no fees, no tax
+  and no inflation adjustment. The published payload is still prices and nothing
+  else — whatever consumes it does its own arithmetic.
 - **Alerting.** The downstream key-value store already has consumers; alerting
   belongs there.
 - **Multiple users.** No accounts means no per-user watchlists, and that is the

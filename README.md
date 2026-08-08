@@ -198,6 +198,33 @@ pin, pause, reorder, publish.
 - If a leg can't be priced, the row says which one and why, the same way a
   broken symbol does.
 
+**Portfolios** — what an allocation would have done. Give it a set of symbols
+and weights adding up to 100%, an initial amount, and a rebalancing cadence, and
+it compounds the mix month by month from the quote source's own closes. Those
+closes are adjusted for splits and dividends, so distributions are already
+reinvested — this is a total return, not a price chart.
+
+- **Growth** from the initial amount, with an optional **benchmark** symbol run
+  at 100% alongside it. Both sides are cut to the period they share, so the two
+  curves can be read against each other.
+- **CAGR, volatility, best and worst calendar year, and the deepest
+  peak-to-trough fall** — with the months it ran between and whether it was ever
+  recovered.
+- **Every calendar year**, with the first and last labelled *part year* where
+  the run doesn't cover them end to end.
+- The run starts at the latest month all of its holdings have data for, whatever
+  start year you ask for, and **says which holding set that date**. A four-fund
+  portfolio asked for 1985 will start in 1996 if one of its funds launched then.
+- Holdings need not be on the watchlist, and a holding you also chart costs no
+  extra request — the daily series is shared with the performance sheet.
+- **Rebalancing** happens on calendar boundaries (December for annual), not
+  twelve months after the run began. *Never* lets the weights drift, which over
+  decades is a materially different portfolio from the one it started as.
+
+Nothing here models fees, taxes, spreads or contributions, and there is no
+inflation adjustment: it is what the allocation did, not what an account holding
+it would have.
+
 **Publishing** — where snapshots go. A destination is a base URL, a key, an
 optional category, and a format. After every refresh the snapshot is
 `PUT {base}/{key}`; if that fails (typically a 404 because the entry doesn't

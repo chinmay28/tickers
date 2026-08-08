@@ -121,6 +121,58 @@ type Sink struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Rebalance cadences. A portfolio's weights drift as its holdings move;
+// rebalancing sells what grew and buys what didn't, back to the target.
+const (
+	// RebalanceNone lets the weights drift for the whole run — "buy once and
+	// never touch it", which over decades is a materially different portfolio
+	// from the one it started as.
+	RebalanceNone      = "none"
+	RebalanceAnnually  = "annually"
+	RebalanceQuarterly = "quarterly"
+	RebalanceMonthly   = "monthly"
+)
+
+// MaxHoldings bounds one portfolio. Each holding is an upstream request the
+// first time it is priced, and a Raspberry Pi asking for forty full-history
+// series at once is how you collect timeouts rather than a backtest.
+const MaxHoldings = 20
+
+// weightTolerance is how far a portfolio's weights may sum from 100 and still
+// be accepted. Three holdings of a third each is the case that matters: 33.33
+// three times is 99.99, and rejecting that would be arithmetic pedantry aimed
+// at the one person who typed the honest thing.
+const weightTolerance = 0.05
+
+// Holding is one line of an allocation: a symbol and its target weight in
+// percent. It is not a Ticker — a portfolio can hold something that was never
+// on the watchlist, and adding one doesn't add a row to be polled every cycle.
+type Holding struct {
+	Symbol string  `json:"symbol"`
+	Weight float64 `json:"weight"`
+}
+
+// Portfolio is a saved allocation to backtest.
+//
+// StartYear and EndYear are years rather than dates because that is the
+// granularity the answer has: the simulation steps a month at a time, so a
+// start of "1996" and one of "3 May 1996" produce the same run. Zero means
+// "as far as the data goes", in both directions.
+type Portfolio struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Holdings      []Holding `json:"holdings"`
+	InitialAmount float64   `json:"initialAmount"`
+	StartYear     int       `json:"startYear"`
+	EndYear       int       `json:"endYear"`
+	Rebalance     string    `json:"rebalance"`
+	// Benchmark is a single symbol to run alongside at 100%, or empty for none.
+	Benchmark string    `json:"benchmark"`
+	Position  int       `json:"position"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 // Run triggers.
 const (
 	TriggerSchedule = "schedule"

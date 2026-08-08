@@ -719,6 +719,103 @@ svg {
   font-weight: 650;
 }
 
+/* ------------------------------------------------------------------ *
+ * Portfolios
+ * ------------------------------------------------------------------ */
+
+/* One line of the allocation editor: a symbol, a weight, and a way to drop it.
+   The weight column is fixed so the % signs line up down the form — a ragged
+   column of them reads as a list of unrelated numbers. */
+.allocation-row {
+  display: grid;
+  grid-template-columns: 1fr 6.5rem auto;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+.allocation-row__weight {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.allocation-row__weight .input {
+  text-align: right;
+}
+.allocation-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+/* The running total. It is the one number that decides whether the form will
+   be accepted, so it says which way it is wrong while there is still something
+   to type rather than after the submit. */
+.allocation-total {
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--muted);
+}
+.allocation-total--ok {
+  color: var(--up);
+}
+.allocation-total--off {
+  color: var(--down);
+}
+
+.allocation-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+/* A holding and its weight read as one unit, so the weight is not uppercased
+   and letter-spaced like a label. */
+.chip--weight {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 550;
+  font-size: 0.75rem;
+}
+.chip--weight strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.chart-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.chart-legend__swatch {
+  width: 1.1rem;
+  height: 0;
+  border-top-width: 2px;
+}
+.chart-legend__swatch--line {
+  border-top-style: solid;
+  border-top-color: var(--up);
+}
+.chart-legend__swatch--dash {
+  border-top-style: dashed;
+  border-top-color: var(--muted);
+}
+
+/* Why the run doesn't start where you asked. It sits above the chart because
+   it changes how every number under it should be read. */
+.backtest-note {
+  margin: 0 0 0.8rem;
+}
+
 /* Interval preset chips under the seconds field. */
 .presets {
   display: flex;
