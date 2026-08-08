@@ -707,12 +707,7 @@ function renderPortfolios(data) {
     <div class="page-head">
       <div>
         <h1>Portfolios</h1>
-        <p>
-          What an allocation would have done. Growth is compounded month by
-          month from the quote source's own closes — adjusted for splits and
-          dividends, so distributions are already reinvested — over the longest
-          period every holding shares.
-        </p>
+        <p>Backtest an allocation.</p>
       </div>
     </div>
 
@@ -764,7 +759,13 @@ function portfolioRow(p) {
               (h) =>
                 `<span class="chip chip--weight"><strong>${esc(h.symbol)}</strong> ${esc(
                   Number(h.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-                )}%</span>`,
+                )}%${
+                  h.replacement
+                    ? ` <span class="chip__stand" title="Stands in before ${esc(
+                        h.symbol,
+                      )}'s own history begins">← ${esc(h.replacement)}</span>`
+                    : ''
+                }</span>`,
             )
             .join('')}
         </div>
@@ -850,33 +851,6 @@ function renderBacktest(data) {
       <div class="card__body">${annualTable(b)}</div>
     </div>
 
-    <p class="field__hint perf-note">
-      Monthly closes, adjusted for splits and dividends where the source reports
-      them — which is what makes this a total return rather than a price chart.
-      ${
-        b.contributed
-          ? `Returns are <strong>time-weighted</strong>: money paid in raises the
-             balance without having earned anything, so it is excluded from every
-             percentage here and shown as its own row instead.`
-          : ''
-      }
-      ${
-        b.riskFree
-          ? `Sharpe and Sortino are measured against <code>${esc(b.riskFree)}</code>,
-             the 13-week Treasury bill.`
-          : ''
-      }
-      ${
-        b.portfolio.yieldPercent === null || b.portfolio.yieldPercent === undefined
-          ? ''
-          : `Yields are the cash actually distributed, divided by what the
-             portfolio was worth when the year opened — income the growth
-             figures already contain, shown separately because it is a
-             different question.`
-      }
-      Nothing here models fees, taxes or spreads, so it is what the allocation
-      did, not what an account holding it would have.
-    </p>
   `;
 }
 
@@ -968,7 +942,7 @@ function metricsTable(b) {
          <span class="perf-when">${y.year}</span>`
       : '<span class="field__hint">no full year</span>';
 
-  return `<div class="table-scroll"><table class="table">
+  return `<div class="table-scroll"><table class="table table--summary">
       <thead><tr><th></th>${columns.map((m) => `<th>${esc(m.label)}</th>`).join('')}</tr></thead>
       <tbody>
         <tr><th>Final balance</th>${cells((m) => esc(amount(m.end)))}</tr>
@@ -1960,11 +1934,13 @@ function openPortfolio(portfolio) {
 
   // One blank row to start typing into, so a new portfolio is never an empty
   // panel with a button you have to find first.
-  paintAllocation(portfolio?.holdings?.length ? portfolio.holdings : [{ symbol: '', weight: '' }]);
+  paintAllocation(portfolio?.holdings?.length ? portfolio.holdings : [blankHolding()]);
 
   if (!portfolioDialog.open) portfolioDialog.showModal();
   $('#allocation-rows input')?.focus();
 }
+
+const blankHolding = () => ({ symbol: '', weight: '', replacement: '' });
 
 /** Repaint the allocation rows from a list of holdings. Only called when the
  *  *set* of rows changes — typing in one never repaints, so nothing you are in
@@ -1974,15 +1950,18 @@ function paintAllocation(holdings) {
     .map(
       (h, i) => `
       <div class="allocation-row" data-row="${i}">
-        <input class="input input--mono" name="symbol" value="${esc(h.symbol ?? '')}"
-               placeholder="VTSMX" aria-label="Symbol" />
+        <input class="input input--mono allocation-row__symbol" name="symbol"
+               value="${esc(h.symbol ?? '')}" placeholder="VTSMX" aria-label="Symbol" />
         <div class="allocation-row__weight">
           <input class="input" name="weight" type="number" min="0" max="100" step="any"
                  value="${esc(h.weight ?? '')}" placeholder="0" aria-label="Weight in percent" />
           <span aria-hidden="true">%</span>
         </div>
-        <button class="btn btn--sm btn--ghost" type="button" data-drop-row="${i}"
+        <button class="btn btn--ghost allocation-row__drop" type="button" data-drop-row="${i}"
                 aria-label="Remove this holding">×</button>
+        <input class="input input--mono allocation-row__stand" name="replacement"
+               value="${esc(h.replacement ?? '')}" placeholder="replacement (optional)"
+               aria-label="Replacement for historical data" />
       </div>`,
     )
     .join('');
@@ -1995,6 +1974,7 @@ function allocationRows() {
   return $$('.allocation-row', portfolioDialog).map((row) => ({
     symbol: $('input[name="symbol"]', row).value.trim().toUpperCase(),
     weight: Number($('input[name="weight"]', row).value),
+    replacement: $('input[name="replacement"]', row).value.trim().toUpperCase(),
   }));
 }
 
@@ -2035,7 +2015,7 @@ function portfolioPayload() {
 }
 
 $('#allocation-add').addEventListener('click', () => {
-  paintAllocation([...allocationRows(), { symbol: '', weight: '' }]);
+  paintAllocation([...allocationRows(), blankHolding()]);
   // Focus the row that was just added — the reason the button was pressed.
   const rows = $$('.allocation-row input[name="symbol"]', portfolioDialog);
   rows[rows.length - 1]?.focus();
@@ -2046,7 +2026,7 @@ portfolioDialog.addEventListener('click', (event) => {
   if (drop) {
     const at = Number(drop.dataset.dropRow);
     const rest = allocationRows().filter((_, i) => i !== at);
-    paintAllocation(rest.length ? rest : [{ symbol: '', weight: '' }]);
+    paintAllocation(rest.length ? rest : [blankHolding()]);
     return;
   }
 
