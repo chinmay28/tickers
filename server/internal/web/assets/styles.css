@@ -723,17 +723,22 @@ svg {
  * Portfolios
  * ------------------------------------------------------------------ */
 
-/* One line of the allocation editor: a symbol, a weight, and a way to drop it.
-   The weight column is fixed so the % signs line up down the form — a ragged
-   column of them reads as a list of unrelated numbers. */
+/* One line of the allocation editor: a symbol, a weight, an optional stand-in
+   and a way to drop it. The weight column is fixed so the % signs line up down
+   the form — a ragged column of them reads as a list of unrelated numbers. */
 .allocation-row {
   display: grid;
-  grid-template-columns: 1fr 6.5rem auto;
+  grid-template-columns: minmax(0, 1fr) 6.5rem minmax(0, 9rem) auto;
+  grid-template-areas: "symbol weight stand drop";
   gap: 0.4rem;
   align-items: center;
   margin-bottom: 0.4rem;
 }
+.allocation-row__symbol {
+  grid-area: symbol;
+}
 .allocation-row__weight {
+  grid-area: weight;
   display: flex;
   align-items: center;
   gap: 0.25rem;
@@ -742,6 +747,30 @@ svg {
 }
 .allocation-row__weight .input {
   text-align: right;
+  min-width: 0;
+}
+.allocation-row__stand {
+  grid-area: stand;
+  /* Quieter than the symbol beside it. It is the exception, and a field that
+     looks as important as the one it qualifies invites people to fill it in. */
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.allocation-row__stand:focus {
+  color: var(--text);
+}
+/* The field uppercases what you type, because a symbol is uppercase. Its
+   placeholder is a sentence, and shouting it makes the optional field the
+   loudest thing in the row. */
+.allocation-row__stand::placeholder {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.allocation-row__drop {
+  grid-area: drop;
+  padding: 0.35rem 0.6rem;
+  font-size: 1.1rem;
+  line-height: 1;
 }
 .allocation-foot {
   display: flex;
@@ -781,6 +810,30 @@ svg {
 .chip--weight strong {
   color: var(--text);
   font-weight: 700;
+}
+/* The stand-in, inside the holding's own chip — it qualifies that holding and
+   is meaningless on its own, so it is not a chip of its own. */
+.chip__stand {
+  color: var(--composite);
+  font-size: 0.7rem;
+}
+
+/* The contribution amount and its cadence are one setting in two controls, so
+   they sit on one line and wrap together rather than being split across the
+   form grid. */
+.field__pair {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.field__pair .input {
+  flex: 1 1 6rem;
+  min-width: 0;
+}
+.field__pair .select {
+  flex: 1 1 8rem;
+  min-width: 0;
 }
 
 .chart-legend {
@@ -1244,6 +1297,55 @@ svg {
      "Search by name". */
   .sheet__foot .btn {
     flex: 1 1 8rem;
+  }
+
+  /* The allocation editor at 390px. Four controls will not share one line once
+     each is 44px tall, and squeezing them leaves a symbol field five characters
+     wide. The stand-in drops to its own row underneath instead — it is the
+     optional one, and it reads as a qualifier of the line above rather than as
+     a fourth thing to fill in. */
+  .allocation-row {
+    grid-template-columns: minmax(0, 1fr) 5.5rem auto;
+    grid-template-areas:
+      "symbol weight drop"
+      "stand  stand  stand";
+    gap: 0.35rem;
+    padding-bottom: 0.55rem;
+    margin-bottom: 0.55rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .allocation-row:last-child {
+    border-bottom: 0;
+  }
+  /* 16px like every other field here, or tapping it zooms the page. Its
+     quietness comes from the colour instead. */
+  .allocation-row__stand {
+    font-size: 16px;
+  }
+  /* A 44px square, because × is the only way to undo an added row. */
+  .allocation-row__drop {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    padding: 0.35rem;
+  }
+  /* The sheet's own scroll is what the keyboard shrinks, so the fields have
+     room to breathe rather than being packed to fit a viewport that moves. */
+  .sheet .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Inside an `overflow-x: auto` container a table lays out at max-content and
+     never wraps, so the drawdown row's "Dec 2015 → Dec 2016 · back by Jul 2020"
+     alone pushed the benchmark column entirely off a 390px screen. It was
+     scrollable, which is not the same as findable — nobody scrolls sideways
+     through a table whose second column they have no reason to think exists.
+     Capping the value columns makes that one cell wrap instead. */
+  .table--summary td {
+    max-width: 8.5rem;
+    white-space: normal;
+  }
+  .table--summary th {
+    max-width: 7rem;
   }
 
   /* Bottom chrome gets out of the keyboard's way instead of floating over it.

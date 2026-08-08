@@ -110,9 +110,16 @@ type HoldingResult struct {
 	// — three holdings of 33.33 are simulated as three exact thirds rather
 	// than as a portfolio that quietly starts 0.01% in nothing.
 	Weight float64 `json:"weight"`
-	// FirstMonth is the earliest month this symbol has a close for, which is
-	// what sets the run's start when it is the latest of them.
+	// FirstMonth is the earliest month this holding has a value for — its own,
+	// or its stand-in's — which is what sets the run's start when it is the
+	// latest of them.
 	FirstMonth string `json:"firstMonth"`
+	// Replacement is the symbol asked to stand in before this one's history
+	// begins, and ReplacedUntil is the month its own data takes over. Both are
+	// reported whether or not the stand-in was needed, so a reader can tell
+	// "no substitution happened" from "no substitution was configured".
+	Replacement   string `json:"replacement"`
+	ReplacedUntil string `json:"replacedUntil"`
 }
 
 // Metrics is the summary table: what a strategy returned and what it put you
@@ -293,6 +300,11 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		if err := e.loadMonthly(ctx, historian, h.Symbol, series, raw, firstMonth); err != nil {
 			return Backtest{}, err
 		}
+		if h.Replacement != "" {
+			if err := e.loadMonthly(ctx, historian, h.Replacement, series, raw, firstMonth); err != nil {
+				return Backtest{}, err
+			}
+		}
 	}
 	if benchmark != "" {
 		if err := e.loadMonthly(ctx, historian, benchmark, series, raw, firstMonth); err != nil {
@@ -300,11 +312,41 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		}
 	}
 
+	// What each holding is actually priced from: its own series, or its own
+	// grafted onto a stand-in's earlier one. Kept separate from `series` so the
+	// benchmark is never quietly substituted — it answers a different question,
+	// and a benchmark with a proxy stitched into it is not a benchmark.
+	effective, effectiveRaw := map[string]map[string]float64{}, map[string]map[string]float64{}
+	for i, h := range holdings {
+		effective[h.Symbol], effectiveRaw[h.Symbol] = series[h.Symbol], raw[h.Symbol]
+		if h.Replacement == "" {
+			holdings[i].FirstMonth = firstMonth[h.Symbol]
+			continue
+		}
+		at := firstMonth[h.Symbol]
+		joined, spliced := spliceMonths(series[h.Symbol], series[h.Replacement], at)
+		if !spliced {
+			holdings[i].FirstMonth = firstMonth[h.Symbol]
+			continue
+		}
+		effective[h.Symbol] = joined
+		effectiveRaw[h.Symbol], _ = spliceMonths(raw[h.Symbol], raw[h.Replacement], at)
+		holdings[i].FirstMonth = earliest(joined)
+		holdings[i].ReplacedUntil = at
+	}
+
 	// Every leg is intersected, the benchmark included. A comparison drawn over
 	// months one side didn't trade is not a comparison, and truncating both to
 	// the common period is the only way the two curves on the chart can be read
 	// against each other at all.
-	months := window(commonMonths(series), spec.StartYear, spec.EndYear)
+	legs := map[string]map[string]float64{}
+	for symbol, closes := range effective {
+		legs[symbol] = closes
+	}
+	if benchmark != "" {
+		legs[benchmark] = series[benchmark]
+	}
+	months := window(commonMonths(legs), spec.StartYear, spec.EndYear)
 	if len(months) < 2 {
 		return Backtest{}, fmt.Errorf(
 			"%w: its holdings share %d month(s) of history in that period, which is not enough for a single monthly return",
@@ -339,15 +381,28 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 	if distributor, ok := e.provider.(quotes.Distributor); ok {
 		for _, h := range holdings {
 			payouts[h.Symbol] = e.symbolDividends(ctx, distributor, h.Symbol)
+			if h.ReplacedUntil == "" {
+				continue
+			}
+			// In the stand-in's units, matching the prices it was spliced at,
+			// so a proxied year's income reads as the stand-in's own yield on
+			// the money held.
+			factor := 1.0
+			if anchor := raw[h.Replacement][h.ReplacedUntil]; anchor > 0 {
+				factor = raw[h.Symbol][h.ReplacedUntil] / anchor
+			}
+			payouts[h.Symbol] = splicePayouts(
+				payouts[h.Symbol], e.symbolDividends(ctx, distributor, h.Replacement),
+				h.ReplacedUntil, factor)
 		}
 		if benchmark != "" {
 			payouts[benchmark] = e.symbolDividends(ctx, distributor, benchmark)
 		}
 	}
 
-	run := simulate(holdings, series, months, cash)
+	run := simulate(holdings, effective, months, cash)
 	annual := annualReturns(months, run.index)
-	applyYields(annual, annualYields(months, run, holdings, raw, payouts), len(payouts) > 0)
+	applyYields(annual, annualYields(months, run, holdings, effectiveRaw, payouts), len(payouts) > 0)
 
 	out := Backtest{
 		Start:       months[0],
@@ -360,7 +415,7 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		Annual:      annual,
 		Holdings:    make([]HoldingResult, len(holdings)),
 		Portfolio:   measure("Portfolio", months, run, annual, rates),
-		Notes:       startNotes(months[0], holdings, benchmark, firstMonth),
+		Notes:       startNotes(months[0], holdings, benchmark, firstMonth[benchmark]),
 	}
 	if rates != nil {
 		out.RiskFree = riskFreeSymbol
@@ -403,10 +458,7 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 			out.Points[i].Benchmark = &value
 		}
 	}
-	for i, h := range holdings {
-		h.FirstMonth = firstMonth[h.Symbol]
-		out.Holdings[i] = h
-	}
+	copy(out.Holdings, holdings)
 	return out, nil
 }
 
@@ -633,21 +685,37 @@ func window(months []string, startYear, endYear int) []string {
 // startNotes explains a start date that isn't the one the reader expected, by
 // naming the holding responsible. "Starts 1996-06" is a fact; "starts 1996-06
 // because VGSIX has nothing earlier" is the fact plus what to change.
-func startNotes(start string, holdings []HoldingResult, benchmark string, firstMonth map[string]string) []string {
+func startNotes(start string, holdings []HoldingResult, benchmark, benchmarkFirst string) []string {
+	notes := []string{}
+
+	// Substitutions first, and one note each rather than a combined one. A
+	// stand-in is the strongest caveat on the page — most of the run may not be
+	// the holding the reader typed — so it is never compressed into a list.
+	for _, h := range holdings {
+		if h.ReplacedUntil == "" {
+			continue
+		}
+		notes = append(notes, fmt.Sprintf(
+			"%s has no history before %s, so %s stands in for every month before it.",
+			h.Symbol, h.ReplacedUntil, h.Replacement))
+	}
+
 	late := []string{}
 	for _, h := range holdings {
-		if firstMonth[h.Symbol] == start {
+		// A holding with a stand-in has already been explained, and its start
+		// is the stand-in's rather than its own.
+		if h.FirstMonth == start && h.ReplacedUntil == "" {
 			late = append(late, h.Symbol)
 		}
 	}
-	if benchmark != "" && firstMonth[benchmark] == start {
+	if benchmark != "" && benchmarkFirst == start {
 		late = append(late, benchmark)
 	}
-	if len(late) == 0 {
-		return []string{}
+	if len(late) > 0 {
+		notes = append(notes, fmt.Sprintf("%s has no history before %s, which is where the run begins.",
+			strings.Join(late, " and "), start))
 	}
-	return []string{fmt.Sprintf("%s has no history before %s, which is where the run begins.",
-		strings.Join(late, " and "), start)}
+	return notes
 }
 
 // weights renormalises the allocation to sum to exactly 1 and rejects what
@@ -676,12 +744,87 @@ func weights(holdings []store.Holding) ([]HoldingResult, error) {
 
 	out := make([]HoldingResult, 0, len(holdings))
 	for _, h := range holdings {
+		symbol := store.NormalizeSymbol(h.Symbol)
+		replacement := store.NormalizeSymbol(h.Replacement)
+		if replacement == symbol {
+			return nil, fmt.Errorf("%w: %s cannot stand in for itself", ErrBadSpec, symbol)
+		}
 		out = append(out, HoldingResult{
-			Symbol: store.NormalizeSymbol(h.Symbol),
-			Weight: h.Weight / total * 100,
+			Symbol:      symbol,
+			Weight:      h.Weight / total * 100,
+			Replacement: replacement,
 		})
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Replacements for historical data
+// ---------------------------------------------------------------------------
+
+// spliceMonths grafts a stand-in's returns onto the months before a holding's
+// own series begins.
+//
+// The graft is a level shift, not an average: the stand-in is scaled so it
+// meets the real series exactly at the month the real one starts, which leaves
+// the stand-in's month-to-month *returns* untouched and the joined series
+// continuous. Anything else would invent a jump on the splice date and report
+// it as a return.
+//
+// It refuses when the stand-in has no value at that month — there is nothing to
+// anchor the scale to, and guessing one would silently shift every earlier
+// month by an unknown factor.
+func spliceMonths(own, stand map[string]float64, at string) (map[string]float64, bool) {
+	anchor, ok := stand[at]
+	if !ok || anchor <= 0 || own[at] <= 0 {
+		return own, false
+	}
+	factor := own[at] / anchor
+
+	joined := make(map[string]float64, len(own)+len(stand))
+	for month, value := range stand {
+		if month < at {
+			joined[month] = value * factor
+		}
+	}
+	for month, value := range own {
+		joined[month] = value
+	}
+	return joined, true
+}
+
+// splicePayouts does the same for the distributions, in the same units.
+//
+// The scale has to be the stand-in's *price* factor rather than the adjusted
+// one, because a payout is per share and a share is priced by the unadjusted
+// series. Scaling both together is what makes "value ÷ price × dividend" come
+// out as the stand-in's own yield on the money held, which is the only
+// defensible reading of a proxied year's income.
+func splicePayouts(own, stand []quotes.Distribution, at string, factor float64) []quotes.Distribution {
+	joined := make([]quotes.Distribution, 0, len(own)+len(stand))
+	for _, d := range stand {
+		if len(d.Date) >= 7 && d.Date[:7] < at {
+			joined = append(joined, quotes.Distribution{Date: d.Date, Amount: d.Amount * factor})
+		}
+	}
+	for _, d := range own {
+		if len(d.Date) >= 7 && d.Date[:7] >= at {
+			joined = append(joined, d)
+		}
+	}
+	sort.Slice(joined, func(i, j int) bool { return joined[i].Date < joined[j].Date })
+	return joined
+}
+
+// earliest is the lowest month key in a series.
+func earliest(series map[string]float64) string {
+	first := ""
+	for month := range series {
+		if first == "" || month < first {
+			first = month
+		}
+	}
+	return first
 }
 
 // plan is the money side of a simulation: what goes in, and when.

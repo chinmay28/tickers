@@ -189,6 +189,7 @@ func normalizePortfolio(p *Portfolio) {
 	holdings := make([]Holding, 0, len(p.Holdings))
 	for _, h := range p.Holdings {
 		h.Symbol = NormalizeSymbol(h.Symbol)
+		h.Replacement = NormalizeSymbol(h.Replacement)
 		if h.Symbol == "" && h.Weight == 0 {
 			continue
 		}
@@ -249,6 +250,9 @@ func ValidatePortfolio(p Portfolio) error {
 		seen[h.Symbol] = true
 		if h.Weight <= 0 {
 			return invalidPortfolio("%s needs a weight above 0%%", h.Symbol)
+		}
+		if h.Replacement == h.Symbol {
+			return invalidPortfolio("%s cannot stand in for itself", h.Symbol)
 		}
 		total += h.Weight
 	}

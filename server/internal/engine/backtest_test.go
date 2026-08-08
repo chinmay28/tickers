@@ -869,6 +869,179 @@ func TestYieldWeighsHoldingsByWhatIsActuallyHeld(t *testing.T) {
 	}
 }
 
+func TestReplacementExtendsAHoldingBackwardsWithoutInventingAJump(t *testing.T) {
+	// NEW lists in March at 200. OLD ran from January, doubling each month.
+	// Splicing has to carry OLD's *returns* back from NEW's first close, not
+	// OLD's prices — the level is scaled to meet at the splice, so the joined
+	// series is continuous and no month reports a jump nobody experienced.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"OLD": monthlyBars("2020-01", 25, 50, 100, 200),
+		"NEW": {
+			{Date: "2020-03-28", Close: 200},
+			{Date: "2020-04-28", Close: 220},
+		},
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "NEW", Weight: 100, Replacement: "OLD"}},
+		InitialAmount: 1000,
+		Rebalance:     store.RebalanceNone,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Start != "2020-01" {
+		t.Fatalf("ran from %s; the stand-in's history is what the run should reach back to", result.Start)
+	}
+	// Jan→Mar is OLD's ×4 (25→100), then Mar→Apr is NEW's ×1.1: 1000 → 4,400.
+	// Splicing OLD's *prices* instead would start the run at 25 and end at 220,
+	// an ×8.8 that neither instrument ever delivered.
+	if math.Abs(result.Portfolio.End-4400) > 1e-6 {
+		t.Errorf("final balance = %.4f, want 4400 — the stand-in contributes its returns, not its prices",
+			result.Portfolio.End)
+	}
+	h := result.Holdings[0]
+	if h.Replacement != "OLD" || h.ReplacedUntil != "2020-03" || h.FirstMonth != "2020-01" {
+		t.Errorf("holding reports %+v; it has to say what stood in and until when", h)
+	}
+}
+
+func TestReplacementIsAlwaysDisclosed(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"OLD": monthlyBars("2020-01", 100, 110, 121, 133),
+		"NEW": {
+			{Date: "2020-03-28", Close: 50},
+			{Date: "2020-04-28", Close: 55},
+		},
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "NEW", Weight: 100, Replacement: "OLD"}},
+		InitialAmount: 1000,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	// Most of this run is not the symbol the reader typed. A proxy nobody was
+	// told about is a fabrication, so the note is not optional.
+	if len(result.Notes) == 0 {
+		t.Fatal("a substituted holding produced no note at all")
+	}
+	note := result.Notes[0]
+	for _, want := range []string{"NEW", "OLD", "2020-03"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note %q does not mention %q", note, want)
+		}
+	}
+}
+
+func TestReplacementIsIgnoredWhenTheStandInCannotBeAnchored(t *testing.T) {
+	// The stand-in stops before the holding starts, so there is no month to
+	// scale it against. Guessing one would shift every earlier month by an
+	// unknown factor, so the run falls back to the holding's own history.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"GONE": monthlyBars("2018-01", 100, 110, 121),
+		"NEW":  monthlyBars("2020-01", 50, 55, 60),
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "NEW", Weight: 100, Replacement: "GONE"}},
+		InitialAmount: 1000,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if result.Start != "2020-01" {
+		t.Errorf("ran from %s, want 2020-01 — an unanchorable stand-in is not used", result.Start)
+	}
+	if result.Holdings[0].ReplacedUntil != "" {
+		t.Errorf("reported a substitution at %q that did not happen", result.Holdings[0].ReplacedUntil)
+	}
+	// And the configured replacement is still echoed, so a reader can tell
+	// "it wasn't used" from "none was set".
+	if result.Holdings[0].Replacement != "GONE" {
+		t.Errorf("the configured stand-in was dropped from the result: %+v", result.Holdings[0])
+	}
+}
+
+func TestReplacementNeverTouchesTheBenchmark(t *testing.T) {
+	// The benchmark answers "what would the plain index have done", and a proxy
+	// stitched into it is not a benchmark.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"OLD":   monthlyBars("2020-01", 100, 110, 121, 133),
+		"NEW":   {{Date: "2020-03-28", Close: 50}, {Date: "2020-04-28", Close: 55}},
+		"BENCH": monthlyBars("2020-01", 10, 11, 12, 13),
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "NEW", Weight: 100, Replacement: "OLD"}},
+		InitialAmount: 1000,
+		Benchmark:     "BENCH",
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if result.Benchmark == nil {
+		t.Fatal("no benchmark")
+	}
+	// 10 → 13 over the whole run, untouched by the holding's substitution.
+	if math.Abs(result.Benchmark.End-1300) > 1e-6 {
+		t.Errorf("benchmark ended at %.4f, want 1300", result.Benchmark.End)
+	}
+}
+
+func TestReplacementRefusesToStandInForItself(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising})
+
+	_, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "UP", Weight: 100, Replacement: "up"}},
+		InitialAmount: 1000,
+	})
+	if !errors.Is(err, ErrBadSpec) {
+		t.Errorf("error = %v, want ErrBadSpec", err)
+	}
+}
+
+func TestReplacedYearsReportTheStandInsIncome(t *testing.T) {
+	// The holding lists in 2021. 2020 is entirely the stand-in's, so its yield
+	// is the stand-in's — anything else would report a year of income the
+	// portfolio's own symbol never paid, or none at all.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{
+			"OLD": flatWithRaw("2019-12", 25, 100, 100),
+			"NEW": flatWithRaw("2021-01", 12, 100, 100),
+		},
+		map[string][]quotes.Distribution{
+			"OLD": {{Date: "2020-06-15", Amount: 4}},
+			"NEW": nil,
+		})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "NEW", Weight: 100, Replacement: "OLD"}},
+		InitialAmount: 1000,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	var yield2020 *float64
+	for _, year := range result.Annual {
+		if year.Year == 2020 {
+			yield2020 = year.Yield
+		}
+	}
+	if yield2020 == nil {
+		t.Fatalf("no 2020 yield: %+v", result.Annual)
+	}
+	// 10 shares at 100 collecting 4 each is 40 on 1,000.
+	if math.Abs(*yield2020-4) > 1e-6 {
+		t.Errorf("2020 yielded %.4f%%, want 4 — the stand-in's income for a year that was entirely its own",
+			*yield2020)
+	}
+}
+
 func TestMaxDrawdownIsThePeakToTroughFallAndWhenItWasRecovered(t *testing.T) {
 	months := []string{"2020-01", "2020-02", "2020-03", "2020-04", "2020-05", "2020-06"}
 	balances := []float64{100, 120, 60, 90, 130, 110}

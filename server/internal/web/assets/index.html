@@ -173,6 +173,13 @@
           </div>
 
           <h3 class="card__subtitle">Allocation</h3>
+          <span class="field__hint" style="display:block;margin-bottom:0.55rem">
+            A <strong>replacement</strong> is a stand-in for the months before a
+            holding has any history of its own — <code>QQQ</code> behind
+            <code>HOOD</code>, say, so one recent listing doesn't cut a thirty-year
+            run down to four. The stand-in's returns are used up to the day the
+            real ones begin, and the result says which months were which.
+          </span>
           <div id="allocation-rows"></div>
           <div class="allocation-foot">
             <button class="btn btn--sm btn--ghost" type="button" id="allocation-add">Add a holding</button>
@@ -201,7 +208,7 @@
             </div>
             <div class="field">
               <label class="field__label" for="portfolio-contribution">Contribution <span style="text-transform:none">(optional)</span></label>
-              <div class="allocation-row__weight">
+              <div class="field__pair">
                 <input class="input" id="portfolio-contribution" name="contribution" type="number"
                        min="0" step="any" placeholder="0" />
                 <select class="select" id="portfolio-contribution-frequency" name="contributionFrequency">

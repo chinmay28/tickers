@@ -421,6 +421,38 @@ for one monthly return — so the API can answer 400 for all of them. Telling
 somebody their portfolio is a server error sends them to the logs for a problem
 they can fix in the form.
 
+#### Replacements for historical data
+
+A holding can name a stand-in whose returns cover the months before its own
+history begins — a broad fund behind a recent listing, so one four-year-old
+holding doesn't truncate a thirty-year portfolio to four.
+
+The graft is a **level shift, not an average**. The stand-in is scaled so it
+meets the real series exactly at the month the real one starts, which leaves its
+month-to-month returns untouched and the joined series continuous. Splicing the
+stand-in's *prices* instead would invent a jump on the splice date and report it
+as a return — the test pins a case where doing so would turn a ×4.4 run into an
+×8.8 one.
+
+Three rules around it, each preventing a specific dishonesty:
+
+- **Every substitution is disclosed**, in its own note, naming the holding, the
+  stand-in and the month the real data takes over. Most of a run can be a proxy.
+  The holding rows also carry the configured replacement whether or not it was
+  used, so "it wasn't needed" is distinguishable from "none was set".
+- **The benchmark is never substituted.** It answers "what would the plain index
+  have done"; a proxy stitched into it is not a benchmark. That is why the
+  effective series live in their own map rather than replacing the raw ones.
+- **An unanchorable stand-in is ignored, not guessed at.** If it has no value at
+  the splice month there is nothing to scale against, and picking a factor would
+  silently shift every earlier month by an unknown amount. The run falls back to
+  the holding's own history.
+
+Payouts are spliced in the stand-in's units — scaled by the *unadjusted* price
+factor, so `value ÷ price × dividend` comes out as the stand-in's own yield on
+the money held. Without that a proxied year would read as zero income rather
+than as the income the stand-in actually produced.
+
 #### Money and returns are two different series
 
 A portfolio can be paid into on a cadence, and that breaks every return figure
@@ -715,6 +747,12 @@ One thing this cost an hour to learn: a `type="number"` field with `min="1"` and
 submit the form with nothing on screen to explain it. Stepped number inputs
 silently invalidate everything off their own grid; `step="any"` is the default
 worth reaching for unless the grid is the point.
+
+On a phone the row carries four controls, and four will not share 390px once
+each is 44px tall — squeezing them leaves a symbol field five characters wide.
+The replacement drops to its own line underneath instead, which is also the
+right reading order: it qualifies the holding above it rather than being a
+fourth thing to fill in. One grid, two `grid-template-areas`, no JavaScript.
 
 ### The performance sheet
 

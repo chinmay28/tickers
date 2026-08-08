@@ -166,6 +166,16 @@ const weightTolerance = 0.05
 type Holding struct {
 	Symbol string  `json:"symbol"`
 	Weight float64 `json:"weight"`
+	// Replacement is a stand-in for the months before this symbol has any
+	// history of its own — a broad fund in place of something that listed
+	// recently, so a five-year-old holding doesn't truncate a thirty-year
+	// backtest to five. Empty means the run simply starts where the symbol does.
+	//
+	// It is a substitution, not a blend: the stand-in's returns are used up to
+	// the day the real series begins, and the real one from there. The result
+	// always says which months were which, because a proxy nobody was told
+	// about is a fabrication.
+	Replacement string `json:"replacement"`
 }
 
 // Portfolio is a saved allocation to backtest.

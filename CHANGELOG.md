@@ -34,6 +34,45 @@ initial amount, a rebalancing cadence, and an optional benchmark.
 Nothing models fees, taxes or spreads, and there is no inflation adjustment. It
 is what the allocation did, not what an account holding it would have.
 
+### Replacements for historical data
+
+A holding can name a **replacement** — a stand-in symbol whose returns cover the
+months before that holding has any history of its own. `QQQ` behind `HOOD` turns
+a five-year backtest into a twenty-five-year one instead of letting one recent
+listing truncate the whole portfolio.
+
+- The stand-in is **scaled to meet the real series** at the month it takes over,
+  so its month-to-month returns are carried over unchanged and no month reports
+  a jump nobody experienced. Splicing prices instead would do exactly that.
+- **Always disclosed.** Every substitution gets its own note naming the holding,
+  the stand-in and the month the real data starts, and the holding rows carry
+  both. Most of a run can be a proxy, and one nobody was told about is a
+  fabrication.
+- A **proxied year's income** is the stand-in's, in the stand-in's units, so a
+  yield column doesn't silently read zero for the years before a holding listed.
+- The **benchmark is never substituted** — it answers "what would the plain
+  index have done", and a proxy stitched into it is not a benchmark.
+- A stand-in with no data at the splice month is **ignored rather than guessed
+  at**: there is nothing to anchor the scale to, and the run falls back to the
+  holding's own history.
+
+### Portfolios on a phone
+
+The allocation editor now drops the replacement field to its own line below the
+symbol and weight rather than squeezing four controls onto one, the ✕ that
+removes a holding is a full 44px target, and the contribution amount and its
+cadence stay together as one field.
+
+The summary table was the worse problem: inside a horizontally scrolling
+container a table lays out at max-content and never wraps, so the drawdown row's
+dates alone pushed the benchmark column entirely off a 390px screen. Scrollable
+is not findable. The value columns are capped on phones so that cell wraps
+instead, and both columns fit.
+
+The page's description is now just "Backtest an allocation", and the paragraph
+of caveats under every result has gone — the notes that matter are attached to
+the runs they apply to.
+
 ### Contributions, risk-adjusted returns and yield
 
 - **Pay into a portfolio** on a cadence. Money paid in is not growth, so every

@@ -224,6 +224,13 @@ reinvested — this is a total return, not a price chart.
 - The run starts at the latest month all of its holdings have data for, whatever
   start year you ask for, and **says which holding set that date**. A four-fund
   portfolio asked for 1985 will start in 1996 if one of its funds launched then.
+- **Replacements for historical data** — give a holding a stand-in symbol and
+  the stand-in's returns cover every month before the holding's own history
+  begins. `QQQ` behind `HOOD` turns a five-year run into a twenty-five-year one.
+  The stand-in is scaled to meet the real series exactly where it starts, so
+  nothing invents a jump on the splice date, and the result always names the
+  substitution — a proxy nobody was told about is a fabrication. The benchmark
+  is never substituted.
 - Holdings need not be on the watchlist, and a holding you also chart costs no
   extra request — the daily series is shared with the performance sheet.
 - **Rebalancing** happens on calendar boundaries (December for annual), not

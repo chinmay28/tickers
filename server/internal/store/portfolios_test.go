@@ -150,6 +150,45 @@ func TestPortfolioAcceptsThirdsThatDoNotQuiteMakeAHundred(t *testing.T) {
 	}
 }
 
+func TestHoldingsCarryTheirReplacementThroughTheJSONColumn(t *testing.T) {
+	st := newTestStore(t)
+
+	p, err := st.CreatePortfolio(NewPortfolio{
+		Name: "Recent listing",
+		Holdings: []Holding{
+			{Symbol: "HOOD", Weight: 20, Replacement: " qqq "},
+			{Symbol: "VTI", Weight: 80},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	read, err := st.Portfolio(p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if read.Holdings[0].Replacement != "QQQ" {
+		t.Errorf("replacement = %q, want QQQ normalised and stored", read.Holdings[0].Replacement)
+	}
+	if read.Holdings[1].Replacement != "" {
+		t.Errorf("a holding with no stand-in came back with %q", read.Holdings[1].Replacement)
+	}
+
+	// A symbol standing in for itself is a typo that would otherwise look like
+	// a working configuration and change nothing.
+	_, err = st.CreatePortfolio(NewPortfolio{
+		Name:     "Circular",
+		Holdings: []Holding{{Symbol: "VTI", Weight: 100, Replacement: "vti"}},
+	})
+	if err == nil {
+		t.Fatal("a holding standing in for itself was accepted")
+	}
+	if !errors.Is(err, ErrInvalidPortfolio) {
+		t.Errorf("error %v is not an ErrInvalidPortfolio", err)
+	}
+}
+
 func TestContributionAndItsCadenceOnlyMeanAnythingTogether(t *testing.T) {
 	st := newTestStore(t)
 
