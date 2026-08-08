@@ -451,21 +451,11 @@ function renderFooter(data) {
 /* ---------------------------- Watchlist ---------------------------- */
 
 function renderWatchlist(data) {
-  const pinned = data.tickers.filter((t) => t.pinned).length;
-
   return `
     <div class="page-head">
       <div>
         <h1>Watchlist</h1>
         <p>
-          Every enabled symbol is fetched on the schedule and published to your
-          destinations. ${
-            pinned
-              ? `<strong>${pinned}</strong> ${
-                  pinned === 1 ? 'symbol is' : 'symbols are'
-                } pinned to the top — edit the list in <a href="#/settings">Settings</a>.`
-              : 'Nothing is pinned; <a href="#/settings">Settings</a> is where you choose what stays on top.'
-          }
           Use <strong>+</strong> to add a symbol, or a ratio like
           <code>VTI/GLD</code>.
         </p>
