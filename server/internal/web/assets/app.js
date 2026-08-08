@@ -115,9 +115,12 @@ function symbolList(raw) {
  *  mean something: --up and --down are on the same card as the mark, and
  *  --composite and --portfolio say what kind of row this is. A green AAPL
  *  beside a red change, or a violet GLD that isn't a composite, would each be
- *  a colour arguing with the one next to it. What's left is warm, blue and
- *  magenta, far enough apart to tell two rows apart at a glance. */
-const MARK_HUES = [26, 48, 96, 214, 300, 330];
+ *  a colour arguing with the one next to it. What is left is three bands —
+ *  warm, blue, magenta — and they are stepped through finely rather than
+ *  coarsely: with a handful of hues a four-holding card regularly drew three
+ *  of the same one, and two neighbours a step apart still look less alike
+ *  than two that are identical. */
+const MARK_HUES = [20, 34, 48, 62, 78, 90, 210, 222, 234, 292, 312, 332];
 
 /** Pick a symbol's hue. The hash is only here so the mark comes out the same
  *  on every device and after every reload without a byte being stored or
@@ -833,14 +836,18 @@ function portfolioRow(p) {
   ]
     .filter(Boolean)
     .join(' ');
+  const held = (p.holdings ?? []).length;
 
   return `
     <div class="card" style="margin-top:0.7rem">
       <div class="card__head">
-        <h3 class="card__title">
-          ${esc(p.name)}
-          ${p.benchmark ? `<span class="chip">vs ${esc(p.benchmark)}</span>` : ''}
-        </h3>
+        <div class="card__heading">
+          <h3 class="card__title">
+            ${esc(p.name)}
+            ${p.benchmark ? `<span class="chip">vs ${esc(p.benchmark)}</span>` : ''}
+          </h3>
+          <span class="card__meta">${held} ${held === 1 ? 'holding' : 'holdings'}</span>
+        </div>
         <div style="display:flex;gap:0.3rem;flex-wrap:wrap">
           <button class="btn btn--sm btn--primary" data-action="run-portfolio" data-id="${esc(p.id)}">Run</button>
           <button class="btn btn--sm btn--ghost" data-action="edit-portfolio" data-id="${esc(p.id)}">Edit</button>
