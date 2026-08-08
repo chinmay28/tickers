@@ -497,6 +497,18 @@ svg {
   font-size: 0.95rem;
   font-weight: 650;
 }
+/* A title with a line under it is one block, so the head's buttons stay
+   opposite the pair rather than being pushed around by the taller side. */
+.card__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+.card__meta {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
 .card__body {
   padding: 1rem;
 }

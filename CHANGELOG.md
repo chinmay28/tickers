@@ -30,6 +30,8 @@ initial amount, a rebalancing cadence, and an optional benchmark.
 - Holdings don't have to be on the watchlist, and the daily series is shared
   with the performance sheet — a portfolio over funds you also chart costs no
   extra requests.
+- Each card says **how many holdings** it has under its name, so an allocation
+  is sized before its chips are counted.
 
 Nothing models fees, taxes or spreads, and there is no inflation adjustment. It
 is what the allocation did, not what an account holding it would have.
