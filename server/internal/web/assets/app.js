@@ -532,6 +532,12 @@ function renderQuote(t) {
   // It renders like every other row apart from the outline, the chip and the
   // extra decimals — that sameness is the point of the feature.
   const composite = Boolean(t.expression);
+  // A portfolio's row is the third kind. It is a currency amount, so it takes
+  // a price's two decimals rather than a ratio's six, and its symbol and value
+  // both belong to the Portfolios page — which is why it has no Edit or Remove
+  // here. Removing it from the watchlist would mean deleting the portfolio.
+  const portfolio = Boolean(t.portfolioId);
+  const money2 = !composite || portfolio;
 
   let priceHTML;
   if (q && q.status === 'ok' && q.price !== null) {
@@ -541,9 +547,9 @@ function renderQuote(t) {
         ? ''
         : // The change is shown to the same precision as the value it moved,
           // so a row never disagrees with itself about how exact it is.
-          `${signed(t.change, composite ? ratioDigits(q.price) : 2)} (${signed(t.changePercent, 2)}%)`;
+          `${signed(t.change, money2 ? 2 : ratioDigits(q.price))} (${signed(t.changePercent, 2)}%)`;
     priceHTML = `
-      <span class="quote__value">${esc(composite ? ratio(q.price) : money(q.price, q.currency))}</span>
+      <span class="quote__value">${esc(money2 ? money(q.price, q.currency) : ratio(q.price))}</span>
       ${change ? `<span class="quote__change quote__change--${dir}">${esc(change)}</span>` : ''}
       <span class="quote__change quote__change--flat">${esc(ago(q.fetchedAt))}</span>`;
   } else {
@@ -553,7 +559,7 @@ function renderQuote(t) {
 
   return `
     <article class="quote${t.enabled ? '' : ' quote--disabled'}${
-      composite ? ' quote--composite' : ''
+      portfolio ? ' quote--portfolio' : composite ? ' quote--composite' : ''
     }" data-id="${esc(t.id)}" draggable="true">
       <button class="quote__handle" type="button" aria-label="Reorder ${esc(t.symbol)}" tabindex="-1">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -563,7 +569,13 @@ function renderQuote(t) {
 
       <div class="quote__head">
         <span class="quote__symbol">${esc(t.symbol)}</span>
-        ${composite ? `<span class="chip chip--composite">composite</span>` : ''}
+        ${
+          portfolio
+            ? `<span class="chip chip--portfolio">portfolio</span>`
+            : composite
+              ? `<span class="chip chip--composite">composite</span>`
+              : ''
+        }
         ${
           // The symbol is the formula with its spaces removed, so it is only
           // worth printing the formula as well when the two actually differ.
@@ -584,7 +596,11 @@ function renderQuote(t) {
       ${failed ? `<div class="quote__error">${esc(q.error)}</div>` : ''}
 
       <div class="quote__actions">
-        <button class="btn btn--sm btn--outline" data-action="edit" data-id="${esc(t.id)}">Edit</button>
+        ${
+          portfolio
+            ? `<a class="btn btn--sm btn--outline" href="#/portfolios">Open</a>`
+            : `<button class="btn btn--sm btn--outline" data-action="edit" data-id="${esc(t.id)}">Edit</button>`
+        }
         <button class="btn btn--sm btn--ghost" data-action="pin" data-id="${esc(t.id)}">
           ${t.pinned ? 'Unpin' : 'Pin'}
         </button>
@@ -593,7 +609,11 @@ function renderQuote(t) {
         </button>
         <button class="btn btn--sm btn--ghost" data-action="up" data-id="${esc(t.id)}" aria-label="Move up">↑</button>
         <button class="btn btn--sm btn--ghost" data-action="down" data-id="${esc(t.id)}" aria-label="Move down">↓</button>
-        <button class="btn btn--sm btn--danger" data-action="delete" data-id="${esc(t.id)}">Remove</button>
+        ${
+          portfolio
+            ? ''
+            : `<button class="btn btn--sm btn--danger" data-action="delete" data-id="${esc(t.id)}">Remove</button>`
+        }
       </div>
 
       ${
@@ -707,7 +727,10 @@ function renderPortfolios(data) {
     <div class="page-head">
       <div>
         <h1>Portfolios</h1>
-        <p>Backtest an allocation.</p>
+        <p>
+          Backtest an allocation. Each one also appears on the watchlist, priced
+          live and published with everything else.
+        </p>
       </div>
     </div>
 
@@ -731,6 +754,13 @@ function renderPortfolios(data) {
   `;
 }
 
+/** The watchlist symbol a portfolio is published under, read off its own row
+ *  rather than re-derived here — the server decides, and a second
+ *  implementation of the rule would eventually disagree with it. */
+function portfolioSymbol(p) {
+  return state.data?.tickers.find((t) => t.portfolioId === p.id)?.symbol ?? '';
+}
+
 function portfolioRow(p) {
   const period = [
     p.startYear ? `from ${p.startYear}` : 'from as early as the data goes',
@@ -744,6 +774,14 @@ function portfolioRow(p) {
       <div class="card__head">
         <h3 class="card__title">
           ${esc(p.name)}
+          ${
+            // Every portfolio has a watchlist row, and this is the key it is
+            // published under — the thing a downstream dashboard reads it by,
+            // so it is worth saying here rather than only on the watchlist.
+            portfolioSymbol(p)
+              ? `<span class="chip chip--portfolio">${esc(portfolioSymbol(p))}</span>`
+              : ''
+          }
           ${p.benchmark ? `<span class="chip">vs ${esc(p.benchmark)}</span>` : ''}
         </h3>
         <div style="display:flex;gap:0.3rem;flex-wrap:wrap">

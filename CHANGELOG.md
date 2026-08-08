@@ -34,6 +34,35 @@ initial amount, a rebalancing cadence, and an optional benchmark.
 Nothing models fees, taxes or spreads, and there is no inflation adjustment. It
 is what the allocation did, not what an account holding it would have.
 
+### Portfolios on the watchlist
+
+**Every saved portfolio now has a watchlist row**, priced every cycle and
+published with everything else. A portfolio named `Four fund` publishes as
+`FOUR-FUND`, which is the point: a home dashboard can read a whole allocation's
+value under one key instead of adding up four symbols itself.
+
+- The row is a **holding, not a target**. Its units are fixed when the portfolio
+  is saved, so its weights drift as a real account's would and it never quietly
+  rebalances itself between refreshes. Rebalancing stays in the backtest, where
+  there is a period to rebalance over.
+- The daily change is the true **value-weighted** move of the holdings, so a
+  70/30 row moves 70/30 with its legs.
+- **All or nothing**: a portfolio missing one of its four funds is not worth
+  three quarters of itself, it is worth an unknown amount. The row says which
+  holding failed and why, exactly as a composite does.
+- Holdings are fetched **alongside the watchlist and deduplicated against it**,
+  so a portfolio over symbols already tracked costs no extra requests.
+- Renaming a portfolio moves the key; deleting one takes the row with it. The
+  row cannot be re-pointed from the watchlist — its symbol is the portfolio's
+  name and its value comes from the allocation — but its label is still yours.
+- **Double-tap it** for a chart, the same as any row: the holding's units valued
+  against past closes, with returns rather than ranges, because unlike a ratio
+  there is capital in it to have returned something.
+
+A third row kind means a third colour: portfolio rows are outlined in their own
+hue, not the composite's, because "this is a basket" and "this is a ratio" are
+different statements.
+
 ### Replacements for historical data
 
 A holding can name a **replacement** — a stand-in symbol whose returns cover the

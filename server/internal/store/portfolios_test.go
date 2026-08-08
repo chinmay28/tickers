@@ -282,3 +282,127 @@ func TestPortfoliosAreListedInDisplayOrderAndDeletable(t *testing.T) {
 		t.Errorf("reading a missing portfolio gave %v, want ErrNotFound", err)
 	}
 }
+
+func TestPortfolioSymbolIsPublishable(t *testing.T) {
+	cases := map[string]string{
+		"Four fund":        "FOUR-FUND",
+		"  60/40  ":        "60-40",
+		"Rainy-day fund!!": "RAINY-DAY-FUND",
+		"VTI":              "VTI",
+		"!!!":              "",
+	}
+	for name, want := range cases {
+		// A space survives SQLite and JSON and then breaks the first consumer
+		// that splits on one, so it never reaches a published key.
+		if got := PortfolioSymbol(name); got != want {
+			t.Errorf("PortfolioSymbol(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestSyncPortfolioTickerCreatesRenamesAndStoresUnits(t *testing.T) {
+	st := newTestStore(t)
+	p, err := st.CreatePortfolio(NewPortfolio{Name: "Two fund", Holdings: sixtyForty()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	row, err := st.SyncPortfolioTicker(p, map[string]float64{"VTI": 20, "BND": 57.14})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if row.Symbol != "TWO-FUND" || !row.IsPortfolio() || row.PortfolioID != p.ID {
+		t.Fatalf("row = %+v, want a portfolio row keyed TWO-FUND", row)
+	}
+	if row.IsComposite() {
+		t.Error("a portfolio's row is not a composite; its symbol is a name, not a formula")
+	}
+
+	// The units are what the refresh cycle prices the row from, so they have to
+	// survive the round trip through the allocations column.
+	saved, err := st.Portfolio(p.ID)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if saved.Holdings[0].Units != 20 {
+		t.Errorf("units = %v, want 20", saved.Holdings[0].Units)
+	}
+
+	// Renaming the portfolio renames the key it publishes under, and does not
+	// leave a second row behind.
+	renamed := "Three fund"
+	p, err = st.UpdatePortfolio(p.ID, PortfolioPatch{Name: &renamed})
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := st.SyncPortfolioTicker(p, map[string]float64{"VTI": 20, "BND": 57.14}); err != nil {
+		t.Fatalf("re-sync: %v", err)
+	}
+	tickers, err := st.Tickers()
+	if err != nil {
+		t.Fatalf("tickers: %v", err)
+	}
+	rows := 0
+	for _, ticker := range tickers {
+		if ticker.IsPortfolio() {
+			rows++
+			if ticker.Symbol != "THREE-FUND" {
+				t.Errorf("row symbol = %q, want THREE-FUND", ticker.Symbol)
+			}
+		}
+	}
+	if rows != 1 {
+		t.Errorf("found %d portfolio rows, want 1 — a rename moves the row, it does not add one", rows)
+	}
+}
+
+func TestDeletingAPortfolioTakesItsRowWithIt(t *testing.T) {
+	st := newTestStore(t)
+	p, err := st.CreatePortfolio(NewPortfolio{Name: "Two fund", Holdings: sixtyForty()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := st.SyncPortfolioTicker(p, map[string]float64{"VTI": 1, "BND": 1}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if err := st.DeletePortfolio(p.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	// Left behind, the row is an unpriceable symbol nothing knows how to value
+	// — and an older binary would try to fetch "TWO-FUND" from the provider
+	// every cycle forever.
+	if _, err := st.PortfolioTicker(p.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the row outlived its portfolio: %v", err)
+	}
+}
+
+func TestAPortfolioRowCannotBeRePointedFromTheWatchlist(t *testing.T) {
+	st := newTestStore(t)
+	p, err := st.CreatePortfolio(NewPortfolio{Name: "Two fund", Holdings: sixtyForty()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	row, err := st.SyncPortfolioTicker(p, map[string]float64{"VTI": 1, "BND": 1})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// Its symbol is the portfolio's name and its value comes from the
+	// allocation; retyping either here would leave a row saying one thing and
+	// pricing another.
+	symbol := "AAPL"
+	if _, err := st.UpdateTicker(row.ID, TickerPatch{Symbol: &symbol}); err == nil {
+		t.Error("a portfolio's row was re-pointed at a symbol")
+	}
+
+	// The label is still the user's.
+	label := "Retirement"
+	updated, err := st.UpdateTicker(row.ID, TickerPatch{Label: &label})
+	if err != nil {
+		t.Fatalf("relabel: %v", err)
+	}
+	if updated.Label != "Retirement" || updated.Symbol != "TWO-FUND" {
+		t.Errorf("row = %+v after relabelling", updated)
+	}
+}

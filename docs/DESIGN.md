@@ -81,7 +81,7 @@ SQLite, WAL mode, one writer. Timestamps are RFC3339 in UTC — sortable as text
 and readable when you open the file by hand.
 
 ```sql
-tickers(id, symbol UNIQUE, expression, label, position, enabled, origin, created_at, updated_at)
+tickers(id, symbol UNIQUE, expression, portfolio_id, label, position, enabled, origin, …)
 quotes(ticker_id PK → tickers, symbol, price, previous_close, currency,
        short_name, market_state, status, error, fetched_at)
 quote_history(id, symbol, price, at)
@@ -108,6 +108,33 @@ from it, and unpinning drops it straight back into the slot it would otherwise
 have had. Ordering the pinned group by the settings list instead would have
 made dragging a pinned row do nothing — with the shipped watchlist pinned by
 default, that is every row on a fresh install.
+
+**A watchlist row is one of three things, and the columns say which.** An empty
+`expression` and an empty `portfolio_id` is a fetched symbol. A non-empty
+`expression` is a composite. A non-empty `portfolio_id` is a saved allocation's
+live value.
+
+The third one is a column rather than another expression, and that is the whole
+reason it exists as a separate concept: a composite's symbol *is* its formula,
+and a portfolio's symbol has to be its **name**, because that is the key a
+downstream dashboard reads the value under. `0.0353*VTSMX+0.0164*VGTSX+…` is a
+correct formula and a useless payload key — and at twenty holdings it would
+also blow through `expr.MaxLen`.
+
+The row is a **holding, not a target**. Its units — the weight's share of the
+initial amount over the price when the portfolio was last saved — are stored on
+the holdings and left alone between saves, so the weights drift exactly as a
+real account's would. Recomputing them every cycle would make the row silently
+rebalance itself every thirty seconds, which is a different portfolio and not
+one anybody asked for; rebalancing belongs to the backtest, where there is a
+period to rebalance over.
+
+Two consequences worth naming. A portfolio's row **fails whole**: three quarters
+of an allocation is not three quarters of its value, it is an unknown amount,
+so one unpriceable holding makes the row an error that names it. And deleting a
+portfolio **deletes its row in the same transaction** — left behind it would be
+an unpriceable symbol nothing knows how to value, which an older binary rolled
+back onto the database would try to fetch from the provider every cycle forever.
 
 **A portfolio's allocation is one JSON column, not a child table.** Nothing
 joins a holding to anything — a portfolio leg is fetched the way a composite's

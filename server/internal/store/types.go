@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Origin values for a Ticker. It records where a row came from — the shipped
 // watchlist or a person — and nothing reads it at runtime; it is provenance
@@ -26,13 +29,19 @@ type Ticker struct {
 	// distinguishes the two. A composite's Symbol is derived from it (the same
 	// formula with the spaces taken out), so a composite still has one stable,
 	// unique, publishable key like every other row.
-	Expression string    `json:"expression"`
-	Label      string    `json:"label"`
-	Position   int       `json:"position"`
-	Enabled    bool      `json:"enabled"`
-	Origin     string    `json:"origin"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	Expression string `json:"expression"`
+	// PortfolioID marks a row that is a saved portfolio's live value rather
+	// than a symbol or a formula. It is the third kind of row, and it is a
+	// column rather than an expression for one reason: the row's symbol has to
+	// be the portfolio's *name*, because that is what a downstream dashboard
+	// reads the value under, and a composite's symbol is its formula.
+	PortfolioID string    `json:"portfolioId"`
+	Label       string    `json:"label"`
+	Position    int       `json:"position"`
+	Enabled     bool      `json:"enabled"`
+	Origin      string    `json:"origin"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 
 	// Pinned is derived, not stored: it says whether this row's symbol is on
 	// the pinned list in Settings. Every query that returns a Ticker stamps it,
@@ -44,6 +53,40 @@ type Ticker struct {
 // IsComposite reports whether this row is priced from a formula rather than
 // fetched from the provider.
 func (t Ticker) IsComposite() bool { return t.Expression != "" }
+
+// IsPortfolio reports whether this row is a saved allocation's live value.
+func (t Ticker) IsPortfolio() bool { return t.PortfolioID != "" }
+
+// OriginPortfolio marks a ticker the app maintains on a portfolio's behalf.
+// Nothing reads it at runtime — IsPortfolio does that — but it keeps the
+// provenance column honest for whoever opens the database.
+const OriginPortfolio = "portfolio"
+
+// PortfolioSymbol turns a portfolio's name into the key its row is published
+// under.
+//
+// Uppercase like every other symbol, with runs of anything else collapsed to a
+// hyphen: "Four fund" publishes as "FOUR-FUND". A space would work in SQLite
+// and in JSON and then quietly break the first consumer that splits on one.
+func PortfolioSymbol(name string) string {
+	var b strings.Builder
+	hyphen := false
+	for _, r := range strings.ToUpper(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			hyphen = false
+		case b.Len() > 0 && !hyphen:
+			b.WriteRune('-')
+			hyphen = true
+		}
+	}
+	symbol := strings.Trim(b.String(), "-")
+	if len(symbol) > 40 {
+		symbol = strings.Trim(symbol[:40], "-")
+	}
+	return symbol
+}
 
 // Quote is the most recent reading for a ticker. A failed fetch is still a
 // quote — status "error" with the reason — because "we tried and it didn't
@@ -166,6 +209,16 @@ const weightTolerance = 0.05
 type Holding struct {
 	Symbol string  `json:"symbol"`
 	Weight float64 `json:"weight"`
+	// Units is how many shares the watchlist row holds — the weight's share of
+	// the initial amount, divided by the price when the portfolio was last
+	// saved. It is stored rather than derived because deriving it would mean
+	// re-reading a historical price on every refresh cycle, and because fixing
+	// it is what makes the row a *holding* whose weights drift rather than a
+	// number that silently rebalances itself every thirty seconds.
+	//
+	// Zero means the row has never been priced — a portfolio saved while the
+	// quote source was unreachable.
+	Units float64 `json:"units"`
 	// Replacement is a stand-in for the months before this symbol has any
 	// history of its own — a broad fund in place of something that listed
 	// recently, so a five-year-old holding doesn't truncate a thirty-year

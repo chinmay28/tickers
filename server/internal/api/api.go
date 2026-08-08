@@ -525,7 +525,25 @@ func (s *Server) handleCreatePortfolio(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"portfolio": p})
+	// Every named portfolio gets a watchlist row, so they are all visible and
+	// publishable without anybody adding them a second time. A failure here is
+	// the caller's to see — most often a name that would collide with a symbol
+	// already on the list — so the portfolio is rolled back with it rather than
+	// left saved but invisible.
+	if _, err := s.engine.LinkPortfolio(r.Context(), p); err != nil {
+		if delErr := s.store.DeletePortfolio(p.ID); delErr != nil {
+			s.log.Error("could not roll back a portfolio whose row failed", "error", delErr)
+		}
+		s.fail(w, err)
+		return
+	}
+	s.priceNow(r, p.Name)
+	saved, err := s.store.Portfolio(p.ID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"portfolio": saved})
 }
 
 func (s *Server) handleUpdatePortfolio(w http.ResponseWriter, r *http.Request) {
@@ -548,7 +566,28 @@ func (s *Server) handleUpdatePortfolio(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"portfolio": p})
+	// Re-price the row: an edited allocation means different units, and a
+	// renamed portfolio means a different published key.
+	if _, err := s.engine.LinkPortfolio(r.Context(), p); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.priceNow(r, p.Name)
+	saved, err := s.store.Portfolio(p.ID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"portfolio": saved})
+}
+
+// priceNow refreshes the watchlist so a portfolio's new row has a value the
+// moment its page redraws, rather than sitting at "N/A" until the next
+// scheduled poll — the same courtesy adding a ticker gets, for the same reason.
+func (s *Server) priceNow(r *http.Request, name string) {
+	if _, err := s.engine.RunCycle(r.Context(), store.TriggerManual); err != nil {
+		s.log.Warn("refresh after saving a portfolio failed", "portfolio", name, "error", err)
+	}
 }
 
 func (s *Server) handleDeletePortfolio(w http.ResponseWriter, r *http.Request) {

@@ -167,16 +167,92 @@ func (s *Store) UpdatePortfolio(id string, patch PortfolioPatch) (Portfolio, err
 	return s.Portfolio(id)
 }
 
-// DeletePortfolio removes a saved allocation.
+// DeletePortfolio removes a saved allocation and the watchlist row that stood
+// for it.
+//
+// The row goes with it rather than being left behind as an unpriceable symbol:
+// nothing else knows how to value it, and a rolled-back binary would try to
+// fetch the portfolio's name from the provider every cycle forever.
 func (s *Store) DeletePortfolio(id string) error {
-	res, err := s.db.Exec(`DELETE FROM portfolios WHERE id = ?`, id)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM tickers WHERE portfolio_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM portfolios WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
+}
+
+// PortfolioTicker is the watchlist row standing for a portfolio, or ErrNotFound
+// when it has none.
+func (s *Store) PortfolioTicker(portfolioID string) (Ticker, error) {
+	row := s.db.QueryRow(`
+		SELECT `+tickerColumns+`
+		FROM tickers WHERE portfolio_id = ?`, portfolioID)
+	t, err := scanTicker(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Ticker{}, ErrNotFound
+	}
+	return t, err
+}
+
+// SyncPortfolioTicker creates or renames the watchlist row for a portfolio, and
+// stores the units its value is computed from.
+//
+// Every named portfolio gets one, which is what makes them all visible without
+// anybody having to add them twice. The units come from the caller because
+// working them out needs live prices, and nothing in this package talks
+// upstream.
+func (s *Store) SyncPortfolioTicker(p Portfolio, units map[string]float64) (Ticker, error) {
+	symbol := PortfolioSymbol(p.Name)
+	if symbol == "" {
+		return Ticker{}, invalidPortfolio("a portfolio's name needs a letter or a number in it to be published under")
+	}
+
+	holdings := make([]Holding, len(p.Holdings))
+	copy(holdings, p.Holdings)
+	for i := range holdings {
+		holdings[i].Units = units[holdings[i].Symbol]
+	}
+	allocations, err := json.Marshal(holdings)
+	if err != nil {
+		return Ticker{}, err
+	}
+	now := nowRFC3339()
+	if _, err := s.db.Exec(`UPDATE portfolios SET allocations = ?, updated_at = ? WHERE id = ?`,
+		string(allocations), now, p.ID); err != nil {
+		return Ticker{}, err
+	}
+
+	existing, err := s.PortfolioTicker(p.ID)
+	switch {
+	case err == nil:
+		_, err = s.db.Exec(`UPDATE tickers SET symbol = ?, label = ?, updated_at = ? WHERE id = ?`,
+			symbol, p.Name, now, existing.ID)
+	case errors.Is(err, ErrNotFound):
+		_, err = s.db.Exec(`
+			INSERT INTO tickers (id, symbol, expression, portfolio_id, label, position, enabled, origin, created_at, updated_at)
+			VALUES (?, ?, '', ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM tickers), 1, ?, ?, ?)`,
+			newID(), symbol, p.ID, p.Name, OriginPortfolio, now, now)
+	}
+	if isUniqueViolation(err) {
+		return Ticker{}, invalidPortfolio(
+			"%q would publish as %s, which is already on the watchlist — rename one of them", p.Name, symbol)
+	}
+	if err != nil {
+		return Ticker{}, err
+	}
+	return s.PortfolioTicker(p.ID)
 }
 
 // normalizePortfolio applies the defaults and tidying that both create and

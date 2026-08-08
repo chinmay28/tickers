@@ -31,6 +31,10 @@
      the accent" or "this went up", and reusing one of those would make a
      falling composite look like two contradictory statements. */
   --composite: #a78bfa;
+  /* A portfolio's row is computed too, but from a holding rather than a
+     formula, and it is the one row whose value is money. Its own hue keeps
+     "this is a basket" from reading as "this is a ratio". */
+  --portfolio: #38bdf8;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 24px 60px rgb(0 0 0 / 0.45);
   --radius: 14px;
@@ -67,6 +71,7 @@
     --down: #c0392b;
     --warn: #b26b00;
     --composite: #6d43c8;
+    --portfolio: #0369a1;
     --shadow: 0 1px 2px rgb(15 30 40 / 0.08);
     --shadow-lg: 0 24px 60px rgb(15 30 40 / 0.16);
   }
@@ -360,6 +365,10 @@ svg {
   border-color: color-mix(in srgb, var(--composite) 55%, transparent);
   color: var(--composite);
 }
+.chip--portfolio {
+  border-color: color-mix(in srgb, var(--portfolio) 55%, transparent);
+  color: var(--portfolio);
+}
 
 /* ------------------------------------------------------------------ *
  * Cards & page furniture
@@ -473,9 +482,14 @@ svg {
   border-color: color-mix(in srgb, var(--composite) 55%, var(--border));
   box-shadow: var(--shadow), inset 3px 0 0 var(--composite);
 }
+.quote--portfolio {
+  border-color: color-mix(in srgb, var(--portfolio) 55%, var(--border));
+  box-shadow: var(--shadow), inset 3px 0 0 var(--portfolio);
+}
 /* The drop target still has to win — you are being told where the row lands,
    not what kind of row it is. */
-.quote--composite.quote--drop-target {
+.quote--composite.quote--drop-target,
+.quote--portfolio.quote--drop-target {
   border-color: var(--primary);
 }
 .quote__formula {

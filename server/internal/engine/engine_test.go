@@ -647,3 +647,119 @@ func TestCompositeAppearsInTheSnapshot(t *testing.T) {
 		t.Errorf("payload[VTI/GLD] = %v, want \"1.5000\"", got)
 	}
 }
+
+func TestPortfolioRowIsPricedFromItsUnits(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "BND": 70}}
+	eng, st := newTestEngine(t, provider)
+
+	p, err := st.CreatePortfolio(store.NewPortfolio{
+		Name:          "Two fund",
+		Holdings:      []store.Holding{{Symbol: "VTI", Weight: 60}, {Symbol: "BND", Weight: 40}},
+		InitialAmount: 10000,
+	})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	row, err := eng.LinkPortfolio(context.Background(), p)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if row.Symbol != "TWO-FUND" {
+		t.Fatalf("row symbol = %q, want TWO-FUND", row.Symbol)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	quotes, err := st.Quotes()
+	if err != nil {
+		t.Fatalf("quotes: %v", err)
+	}
+	q, ok := quotes[row.ID]
+	if !ok || q.Status != store.StatusOK {
+		t.Fatalf("portfolio row = %+v, want a priced reading", q)
+	}
+	// Units were fixed at the prices it was linked at, so marking them to the
+	// same prices gives back exactly the initial amount.
+	if math.Abs(*q.Price-10000) > 1e-6 {
+		t.Errorf("value = %v, want 10000", *q.Price)
+	}
+	// The fake reports a previous close one below each price, so the row's own
+	// previous close is the same units against those — which is what gives the
+	// watchlist a real value-weighted change for the day.
+	want := 10000.0/300*0.6*299 + 10000.0/70*0.4*69
+	if q.PreviousClose == nil || math.Abs(*q.PreviousClose-want) > 1e-6 {
+		t.Errorf("previous close = %v, want %v", deref(q.PreviousClose), want)
+	}
+}
+
+func TestPortfolioRowFailsWholeRatherThanPartly(t *testing.T) {
+	// Three quarters of a portfolio is not what it is worth; it is worth an
+	// unknown amount, and publishing the three-quarter figure is worse than
+	// publishing nothing.
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "BND": 70}}
+	eng, st := newTestEngine(t, provider)
+
+	p, err := st.CreatePortfolio(store.NewPortfolio{
+		Name:          "Two fund",
+		Holdings:      []store.Holding{{Symbol: "VTI", Weight: 60}, {Symbol: "BND", Weight: 40}},
+		InitialAmount: 10000,
+	})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	row, err := eng.LinkPortfolio(context.Background(), p)
+	if err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	provider.fail = map[string]bool{"BND": true}
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	quotes, err := st.Quotes()
+	if err != nil {
+		t.Fatalf("quotes: %v", err)
+	}
+	q := quotes[row.ID]
+	if q.Status != store.StatusError {
+		t.Fatalf("row priced at %v with a holding missing", q.Price)
+	}
+	if !strings.Contains(q.Error, "BND") {
+		t.Errorf("error %q does not name the holding that failed", q.Error)
+	}
+}
+
+func TestPortfolioLegsAreFetchedOnceAlongsideTheWatchlist(t *testing.T) {
+	provider := &fakeProvider{prices: map[string]float64{"VTI": 300, "GLD": 200}}
+	eng, st := newTestEngine(t, provider)
+
+	// VTI is already on the seeded watchlist, so a portfolio holding it must
+	// not cost a second request — the same deduplication composites get.
+	p, err := st.CreatePortfolio(store.NewPortfolio{
+		Name:          "Half half",
+		Holdings:      []store.Holding{{Symbol: "VTI", Weight: 50}, {Symbol: "GLD", Weight: 50}},
+		InitialAmount: 1000,
+	})
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
+	if _, err := eng.LinkPortfolio(context.Background(), p); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	if _, err := eng.RunCycle(context.Background(), store.TriggerManual); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	asked := eng.Provider().(*fakeProvider).lastAsked()
+	seen := map[string]int{}
+	for _, sym := range asked {
+		seen[sym]++
+	}
+	if seen["VTI"] != 1 {
+		t.Errorf("VTI was asked for %d times in one cycle, want 1: %v", seen["VTI"], asked)
+	}
+	if seen["GLD"] != 1 {
+		t.Errorf("GLD (a holding not on the watchlist) was asked for %d times, want 1", seen["GLD"])
+	}
+}

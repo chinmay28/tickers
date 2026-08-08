@@ -144,6 +144,21 @@ the payload order**. Pinning never takes reordering away from a row — it is a
 set, not an order, so the watchlist's own sequence still applies within the
 pinned group.
 
+Three kinds of row share it. A **symbol** is fetched. A **composite** is
+computed from a formula. And a **portfolio** — every saved allocation gets one,
+automatically — is the value of that allocation's holdings, marked to today's
+prices. Portfolio rows are keyed by the portfolio's name (`Four fund` publishes
+as `FOUR-FUND`), carry a `portfolio` chip, and are managed from the Portfolios
+page: **Open** takes you there, and there is no **Remove**, because removing one
+means deleting the portfolio.
+
+A portfolio row is a **holding, not a target**. Its units are fixed when the
+portfolio is saved, so its weights drift exactly as a real account's would, and
+it never quietly rebalances itself between refreshes — rebalancing belongs to
+the backtest, where there is a period to rebalance over. Every holding has to
+price for the row to have a value: three quarters of a portfolio is not what it
+is worth.
+
 **History** — **double-tap (or double-click) a row** to open its performance
 sheet: a chart of the daily closes behind it, and a table underneath. Pick a
 span with the chips above the chart — 1M through 10Y and All — and drag across
@@ -198,7 +213,9 @@ pin, pause, reorder, publish.
 - If a leg can't be priced, the row says which one and why, the same way a
   broken symbol does.
 
-**Portfolios** — what an allocation would have done. Give it a set of symbols
+**Portfolios** — what an allocation would have done, and what it is worth now.
+Every saved portfolio also appears on the watchlist as a live row (above), so it
+is priced every cycle and published with everything else. Give it a set of symbols
 and weights adding up to 100%, an initial amount, and a rebalancing cadence, and
 it compounds the mix month by month from the quote source's own closes. Those
 closes are adjusted for splits and dividends, so distributions are already

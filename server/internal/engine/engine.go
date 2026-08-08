@@ -254,16 +254,23 @@ func (e *Engine) RunCycle(ctx context.Context, trigger string) (store.Run, error
 	}
 
 	if len(tickers) > 0 {
-		plan := newFetchPlan(tickers)
+		portfolios, err := e.portfolioIndex()
+		if err != nil {
+			return e.finish(run, err)
+		}
+		plan := newFetchPlan(tickers, portfolios)
 		fetched, failures := e.provider.Fetch(ctx, plan.symbols)
 		now := time.Now().UTC()
 		prices, closes := readingMaps(fetched)
 
 		for _, t := range tickers {
 			var q store.Quote
-			if t.IsComposite() {
+			switch {
+			case t.IsPortfolio():
+				q = portfolioQuote(t, portfolios[t.PortfolioID], prices, closes, failures, now)
+			case t.IsComposite():
 				q = compositeQuote(t, plan.formulas[t.ID], prices, closes, failures, now)
-			} else {
+			default:
 				q = directQuote(t, fetched, failures, now)
 			}
 			if q.Status == store.StatusOK {
@@ -318,7 +325,7 @@ type fetchPlan struct {
 	formulas map[string]formula
 }
 
-func newFetchPlan(tickers []store.Ticker) fetchPlan {
+func newFetchPlan(tickers []store.Ticker, portfolios map[string]store.Portfolio) fetchPlan {
 	plan := fetchPlan{symbols: []string{}, formulas: map[string]formula{}}
 	seen := map[string]bool{}
 	add := func(sym string) {
@@ -330,6 +337,16 @@ func newFetchPlan(tickers []store.Ticker) fetchPlan {
 	}
 
 	for _, t := range tickers {
+		// A portfolio's holdings are fetched the same way a composite's legs
+		// are, and deduplicated against everything else for the same reason: a
+		// portfolio over symbols already on the watchlist costs no extra
+		// requests.
+		if t.IsPortfolio() {
+			for _, h := range portfolios[t.PortfolioID].Holdings {
+				add(h.Symbol)
+			}
+			continue
+		}
 		if !t.IsComposite() {
 			add(t.Symbol)
 			continue
@@ -422,6 +439,76 @@ func compositeQuote(t store.Ticker, f formula, prices, closes map[string]float64
 	return q
 }
 
+// portfolioIndex reads every saved allocation, keyed by ID, for the cycle to
+// price its rows from.
+func (e *Engine) portfolioIndex() (map[string]store.Portfolio, error) {
+	saved, err := e.store.Portfolios()
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[string]store.Portfolio, len(saved))
+	for _, p := range saved {
+		index[p.ID] = p
+	}
+	return index, nil
+}
+
+// portfolioQuote is the reading for a saved allocation: its units marked to
+// today's prices.
+//
+// The units were fixed when the portfolio was last saved, so this is a holding
+// and not a target — its weights drift exactly as a real one's would, and the
+// row never quietly rebalances itself between refreshes. Rebalancing is the
+// backtest's business, where there is a period to rebalance over.
+//
+// Every holding has to price, and that is deliberate. A portfolio missing one
+// of its four funds is not worth three quarters of itself; it is worth an
+// unknown amount, and publishing the three-quarter figure would be worse than
+// publishing nothing.
+func portfolioQuote(t store.Ticker, p store.Portfolio, prices, closes map[string]float64,
+	failures map[string]error, now time.Time) store.Quote {
+	q := store.Quote{
+		TickerID: t.ID, Symbol: t.Symbol, FetchedAt: now,
+		Status: store.StatusError, Composite: true,
+	}
+	if len(p.Holdings) == 0 {
+		q.Error = "this portfolio has no holdings"
+		return q
+	}
+
+	value := 0.0
+	for _, h := range p.Holdings {
+		if h.Units == 0 {
+			q.Error = "the portfolio has not been priced yet; save it again once the quote source is reachable"
+			return q
+		}
+		price, ok := prices[h.Symbol]
+		if !ok {
+			q.Error = explainEval(&expr.MissingError{Symbol: h.Symbol}, failures)
+			return q
+		}
+		value += h.Units * price
+	}
+	q.Status = store.StatusOK
+	q.Price = &value
+
+	// Best-effort, exactly as a composite's is: without it the row still shows
+	// a value, just no change for the day.
+	previous, complete := 0.0, true
+	for _, h := range p.Holdings {
+		close, ok := closes[h.Symbol]
+		if !ok {
+			complete = false
+			break
+		}
+		previous += h.Units * close
+	}
+	if complete {
+		q.PreviousClose = &previous
+	}
+	return q
+}
+
 // explainEval swaps "no price for GLD" for the provider's own reason that GLD
 // has no price — the difference between someone re-reading a formula that is
 // fine and someone seeing the typo in one of its legs.
@@ -439,6 +526,46 @@ func explainEval(err error, failures map[string]error) string {
 		}
 	}
 	return err.Error()
+}
+
+// LinkPortfolio gives a saved allocation its watchlist row, and works out the
+// units that row is worth.
+//
+// Units are the weight's share of the initial amount divided by today's price,
+// so the row starts at exactly the initial amount and moves with the holdings
+// from there. Recomputing them on every save is what makes an edited allocation
+// take effect; leaving them alone between saves is what makes the row a holding
+// whose weights drift rather than a number that rebalances itself unasked.
+//
+// It fetches once, here, rather than on every cycle. A portfolio saved while
+// the quote source is unreachable gets its row anyway, with no units — the row
+// says so, and the next save fills them in.
+func (e *Engine) LinkPortfolio(ctx context.Context, p store.Portfolio) (store.Ticker, error) {
+	e.syncProvider()
+
+	symbols := make([]string, 0, len(p.Holdings))
+	for _, h := range p.Holdings {
+		symbols = append(symbols, h.Symbol)
+	}
+	fetched, failures := e.provider.Fetch(ctx, symbols)
+
+	units := make(map[string]float64, len(p.Holdings))
+	for _, h := range p.Holdings {
+		q, ok := fetched[h.Symbol]
+		if !ok || q.Price == nil || *q.Price <= 0 {
+			e.log.Warn("could not price a holding when linking a portfolio",
+				"portfolio", p.Name, "symbol", h.Symbol, "error", failures[h.Symbol])
+			continue
+		}
+		units[h.Symbol] = p.InitialAmount * h.Weight / 100 / *q.Price
+	}
+
+	t, err := e.store.SyncPortfolioTicker(p, units)
+	if err != nil {
+		return store.Ticker{}, err
+	}
+	e.Kick()
+	return t, nil
 }
 
 // Publish sends the current snapshot to every enabled sink, without refetching.

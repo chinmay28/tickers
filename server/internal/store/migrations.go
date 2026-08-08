@@ -155,4 +155,18 @@ ALTER TABLE portfolios ADD COLUMN contribution REAL NOT NULL DEFAULT 0;
 ALTER TABLE portfolios ADD COLUMN contribution_frequency TEXT NOT NULL DEFAULT 'none';
 `,
 	},
+	{
+		// A portfolio's watchlist row. The column defaults to empty, which is
+		// what every existing ticker means — "this is not a portfolio" — so an
+		// older binary rolled back onto this database still reads and writes
+		// the table happily. It would price a portfolio row as an ordinary
+		// symbol and fail it, which is why the rows are also deleted when the
+		// portfolio is: nothing is left behind that a rollback would misprice
+		// forever.
+		ID: "006_portfolio_tickers",
+		SQL: `
+ALTER TABLE tickers ADD COLUMN portfolio_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX tickers_portfolio_idx ON tickers (portfolio_id);
+`,
+	},
 }
