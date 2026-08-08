@@ -189,8 +189,14 @@ type stateResponse struct {
 	// marks to draw as a picture and which to draw from the name. Sending the
 	// list beats letting the client guess: an <img> per symbol would 404 for
 	// every fund and every crypto pair on every load.
-	Logos []string       `json:"logos"`
-	Meta  map[string]any `json:"meta"`
+	Logos []string `json:"logos"`
+	// LogoStats is how the cache is doing: how many symbols have a picture,
+	// how many came back without one, and why. A feature that fetches logos
+	// and shows none looks the same whether the symbols haven't got any or the
+	// configured source answers nothing for anything; the Settings page says
+	// which.
+	LogoStats store.LogoStats `json:"logoStats"`
+	Meta      map[string]any  `json:"meta"`
 }
 
 // providerView is what the Settings page renders for the quote source: the
@@ -258,6 +264,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	logoStats, err := s.store.LogoStats()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 
 	// The preview is the exact payload the default format would publish right
 	// now. Showing it next to the destination list is the cheapest way to make
@@ -279,11 +290,13 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		Runtime:    s.runtime,
 		Provider:   s.providerView(),
 		Logos:      logos,
+		LogoStats:  logoStats,
 		Meta: map[string]any{
 			"minRefreshSeconds": store.MinRefreshSeconds,
 			"minQuoteTimeout":   store.MinQuoteTimeout,
 			"maxQuoteTimeout":   store.MaxQuoteTimeout,
 			"maxPinnedSymbols":  store.MaxPinnedSymbols,
+			"logoSymbolToken":   quotes.LogoSymbolToken,
 			"maxHoldings":       store.MaxHoldings,
 			"formats":           []string{store.FormatMinion, store.FormatDetailed},
 			"cadences":          store.Cadences,

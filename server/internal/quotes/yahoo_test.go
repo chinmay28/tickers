@@ -563,7 +563,51 @@ func TestLogoRejectsSomethingThatIsNotAnImage(t *testing.T) {
 	if err == nil {
 		t.Fatal("markup labelled image/png was accepted; it would then be served from this app's own origin")
 	}
-	if errors.Is(err, ErrNoLogo) {
-		t.Error("a bad payload was cached as 'no logo'; it is a failure, not an answer")
+	// Recorded rather than retried: a URL answering with HTML will answer with
+	// HTML again next cycle, and the message is the diagnosis a misconfigured
+	// template needs — which only reaches the Settings page via a tombstone.
+	if !errors.Is(err, ErrNoLogo) {
+		t.Error("a source answering with markup is retried forever instead of being reported")
+	}
+	if !strings.Contains(err.Error(), "not an image") {
+		t.Errorf("error was %q, want it to say what came back instead", err)
+	}
+}
+
+func TestLogoTemplateGoesStraightToTheURL(t *testing.T) {
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(onePixelPNG)
+	}))
+	defer srv.Close()
+
+	y := NewYahoo(Settings{BaseURL: srv.URL, LogoURL: srv.URL + "/logos/{symbol_lower}.png"})
+	logo, err := y.Logo(context.Background(), "AAPL")
+	if err != nil {
+		t.Fatalf("logo: %v", err)
+	}
+	if string(logo.Bytes) != string(onePixelPNG) {
+		t.Error("the configured URL was not what got fetched")
+	}
+	if len(asked) != 1 || asked[0] != "/logos/aapl.png" {
+		t.Errorf("requested %v, want a single /logos/aapl.png — a template must not also "+
+			"cost a symbol search, and {symbol_lower} has to be lower-cased", asked)
+	}
+}
+
+func TestExpandLogoURL(t *testing.T) {
+	cases := []struct{ template, symbol, want string }{
+		{"https://x.test/{symbol}.png", "aapl", "https://x.test/AAPL.png"},
+		{"https://x.test/{symbol_lower}.png", "AAPL", "https://x.test/aapl.png"},
+		{"https://x.test/i?t={symbol}", "BRK-B", "https://x.test/i?t=BRK-B"},
+		// A slash in a symbol would otherwise address a different path.
+		{"https://x.test/{symbol}.png", "A/B", "https://x.test/A%2FB.png"},
+	}
+	for _, c := range cases {
+		if got := ExpandLogoURL(c.template, c.symbol); got != c.want {
+			t.Errorf("ExpandLogoURL(%q, %q) = %q, want %q", c.template, c.symbol, got, c.want)
+		}
 	}
 }

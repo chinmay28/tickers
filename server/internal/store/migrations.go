@@ -193,4 +193,19 @@ CREATE TABLE logos (
 );
 `,
 	},
+	{
+		// Why a symbol has no logo. Without it the cache can say "we asked and
+		// there is nothing" but not whether that means this symbol has no
+		// picture anywhere or the configured source has never returned one for
+		// anything — which are a shrug and a misconfiguration respectively, and
+		// look identical from the outside.
+		//
+		// A column with a default rather than a new table: an older binary
+		// rolled back onto this database keeps reading and writing logos, and
+		// simply never sets it.
+		ID: "008_logo_reason",
+		SQL: `
+ALTER TABLE logos ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+`,
+	},
 }

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -48,7 +49,13 @@ func (e *Engine) refreshLogos(ctx context.Context, symbols []string) {
 		fetched++
 		switch {
 		case errors.Is(err, quotes.ErrNoLogo):
-			if err := e.store.SaveLogo(store.Logo{Symbol: symbol, Status: store.LogoNone}); err != nil {
+			// The reason travels with the tombstone. "No logo" is the same row
+			// whether this fund simply hasn't got one or the configured URL
+			// answers 404 for everything, and the Settings page can only tell
+			// the operator which if the difference was written down.
+			if err := e.store.SaveLogo(store.Logo{
+				Symbol: symbol, Status: store.LogoNone, Reason: reasonFor(err),
+			}); err != nil {
 				e.log.Warn("logo tombstone not saved", "symbol", symbol, "error", err)
 			}
 		case err != nil:
@@ -66,4 +73,12 @@ func (e *Engine) refreshLogos(ctx context.Context, symbols []string) {
 			}
 		}
 	}
+}
+
+// reasonFor is the provider's explanation with the sentinel's own text taken
+// off the front — "that symbol has no logo: nothing at https://…" says the
+// obvious part twice, and it is the second half that is worth reporting.
+func reasonFor(err error) string {
+	reason := strings.TrimPrefix(err.Error(), quotes.ErrNoLogo.Error())
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reason), ":"))
 }

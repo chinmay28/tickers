@@ -125,3 +125,94 @@ func TestLogosDefaultOff(t *testing.T) {
 		t.Error("a fresh install has logo fetching on; nothing should talk to a third party until asked to")
 	}
 }
+
+func TestLogoURLTemplateIsChecked(t *testing.T) {
+	st := newTestStore(t)
+
+	bad := map[string]string{
+		"no placeholder": "https://logos.test/aapl.png",
+		"not a URL":      "logos.test/{symbol}.png",
+		"not http":       "file:///etc/{symbol}",
+		"a line break":   "https://logos.test/{symbol}\nX-Evil: 1",
+	}
+	for name, template := range bad {
+		v := template
+		if _, err := st.UpdateConfig(ConfigPatch{LogoURLTemplate: &v}); err == nil {
+			t.Errorf("%s was accepted as a logo URL", name)
+		}
+	}
+
+	good := "https://logos.test/{symbol_lower}.png"
+	cfg, err := st.UpdateConfig(ConfigPatch{LogoURLTemplate: &good})
+	if err != nil {
+		t.Fatalf("a valid template was rejected: %v", err)
+	}
+	if cfg.LogoURLTemplate != good {
+		t.Errorf("template stored as %q, want %q", cfg.LogoURLTemplate, good)
+	}
+
+	// Blank is how you go back to the provider's own idea of a logo.
+	blank := ""
+	if cfg, err = st.UpdateConfig(ConfigPatch{LogoURLTemplate: &blank}); err != nil {
+		t.Fatalf("clearing the template failed: %v", err)
+	}
+	if cfg.LogoURLTemplate != "" {
+		t.Error("the template could not be cleared")
+	}
+}
+
+func TestChangingTheLogoURLEmptiesTheCache(t *testing.T) {
+	st := newTestStore(t)
+
+	if err := st.SaveLogo(Logo{
+		Symbol: "AAPL", Status: LogoOK, ContentType: "image/png", Bytes: []byte{1, 2},
+	}); err != nil {
+		t.Fatalf("save logo: %v", err)
+	}
+	if err := st.SaveLogo(Logo{Symbol: "GLD", Status: LogoNone, Reason: "no logoUrl"}); err != nil {
+		t.Fatalf("save tombstone: %v", err)
+	}
+
+	next := "https://logos.test/{symbol}.png"
+	if _, err := st.UpdateConfig(ConfigPatch{LogoURLTemplate: &next}); err != nil {
+		t.Fatalf("set template: %v", err)
+	}
+
+	asked, err := st.AskedAboutLogos()
+	if err != nil {
+		t.Fatalf("asked set: %v", err)
+	}
+	if len(asked) != 0 {
+		t.Errorf("%d answers from the old source survived a source change; a working "+
+			"new URL would look broken until they expired", len(asked))
+	}
+}
+
+func TestLogoStatsExplainTheNoes(t *testing.T) {
+	st := newTestStore(t)
+
+	if err := st.SaveLogo(Logo{
+		Symbol: "AAPL", Status: LogoOK, ContentType: "image/png", Bytes: []byte{1},
+	}); err != nil {
+		t.Fatalf("save logo: %v", err)
+	}
+	for _, symbol := range []string{"GLD", "VTI", "IBIT"} {
+		if err := st.SaveLogo(Logo{
+			Symbol: symbol, Status: LogoNone, Reason: "the search result carries no logo",
+		}); err != nil {
+			t.Fatalf("save tombstone: %v", err)
+		}
+	}
+
+	stats, err := st.LogoStats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.OK != 1 || stats.None != 3 {
+		t.Errorf("stats = %d ok / %d none, want 1 and 3", stats.OK, stats.None)
+	}
+	if stats.Reason != "the search result carries no logo" {
+		t.Errorf("reason = %q, want the commonest explanation — without it the Settings "+
+			"page cannot tell a symbol with no logo from a misconfigured source", stats.Reason)
+	}
+}

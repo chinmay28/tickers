@@ -1471,6 +1471,30 @@ const INTERVAL_PRESETS = [
   { label: '1 hour', seconds: 3600 },
 ];
 
+/** What the logo cache has actually managed to fetch.
+ *
+ *  Without this the feature is untestable from the UI: logos on and no logos
+ *  showing is the same picture whether the symbols genuinely haven't got any,
+ *  the configured URL is wrong, or the cycle hasn't got round to them yet. The
+ *  server records why each symbol came back empty; this reports the commonest
+ *  reason, which is the one that says which of those three it is. */
+function logoReport(data) {
+  if (!data.settings.logos) return '';
+  const stats = data.logoStats ?? { ok: 0, none: 0 };
+  if (!stats.ok && !stats.none) {
+    return `<span class="field__hint">Nothing fetched yet — the next refresh starts on it.</span>`;
+  }
+  const answered = stats.ok + stats.none;
+  return `<span class="field__hint">
+    <strong>${stats.ok} of ${answered}</strong> symbols asked about have a logo.
+    ${
+      stats.none
+        ? `${stats.none} came back without one${stats.reason ? `: ${esc(stats.reason)}` : ''}.`
+        : ''
+    }
+  </span>`;
+}
+
 function renderSettings(data) {
   const s = data.settings;
   const min = data.meta.minRefreshSeconds ?? 30;
@@ -1533,11 +1557,25 @@ function renderSettings(data) {
             </label>
             <span class="field__hint">
               Off by default, because this is the one setting that has the
-              server ask the quote source about your symbols by name. Each logo
-              is fetched once and cached here, so your browser never talks to
-              anyone else and the watchlist still works offline. Symbols with
-              no logo — funds, crypto, ratios, portfolios — keep the mark drawn
-              from their name. Turning it off again empties the cache.
+              server ask about your symbols by name. Each logo is fetched once
+              and cached here, so your browser never talks to anyone else and
+              the watchlist still works offline. Symbols with no logo — funds,
+              crypto, ratios, portfolios — keep the mark drawn from their name.
+              Turning it off again empties the cache.
+            </span>
+            ${logoReport(data)}
+          </div>
+          <div class="field">
+            <label class="field__label" for="logoUrlTemplate">Logo URL</label>
+            <input class="input input--mono" id="logoUrlTemplate" name="logoUrlTemplate"
+                   value="${esc(s.logoUrlTemplate)}" placeholder="the quote source's own" />
+            <span class="field__hint">
+              Where a logo comes from, with <code>{symbol}</code> standing in for
+              the ticker (<code>{symbol_lower}</code> for the lower-case form).
+              Leave it blank to use whatever the quote source itself offers —
+              which for Yahoo is a logo on some search results and nothing at
+              all for most symbols. Changing this clears the cache, so the next
+              few refreshes ask the new source.
             </span>
           </div>
         </div>
@@ -1837,6 +1875,9 @@ $('#view').addEventListener('submit', (event) => {
       historyHours: Number(values.historyHours),
       publishOnRefresh: form.elements.publishOnRefresh.checked,
       logos: form.elements.logos.checked,
+      // A cleared box means "go back to the quote source's own", so it has to
+      // reach the server as an empty string rather than being dropped.
+      logoUrlTemplate: values.logoUrlTemplate ?? '',
       // An emptied field means "pin nothing", so it has to reach the server as
       // an empty list rather than being dropped from the payload.
       pinnedSymbols: symbolList(values.pinnedSymbols),

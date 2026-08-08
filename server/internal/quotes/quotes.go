@@ -9,6 +9,8 @@ package quotes
 import (
 	"context"
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -39,6 +41,15 @@ type Settings struct {
 	Timeout time.Duration `json:"-"`
 	// UserAgent is sent on every request. Empty means the provider's own.
 	UserAgent string `json:"userAgent"`
+	// LogoURL is a URL template for a symbol's logo, with `{symbol}` (or
+	// `{symbol_lower}`) standing in for the ticker. Empty means "use whatever
+	// the provider can work out on its own".
+	//
+	// It is a setting rather than a constant because there is no standard
+	// place to get a logo by ticker: what works is a moving target of free
+	// services, and an install that can reach one this binary has never heard
+	// of should not have to wait for a release to use it.
+	LogoURL string `json:"logoUrl"`
 }
 
 // Merge overlays the non-zero fields of override onto s.
@@ -51,6 +62,9 @@ func (s Settings) Merge(override Settings) Settings {
 	}
 	if override.UserAgent != "" {
 		s.UserAgent = override.UserAgent
+	}
+	if override.LogoURL != "" {
+		s.LogoURL = override.LogoURL
 	}
 	return s
 }
@@ -197,3 +211,21 @@ var ErrNoHistory = errors.New("this quote provider does not supply price history
 
 // ErrNotFound means the provider has no such symbol.
 var ErrNotFound = errors.New("no quote for that symbol")
+
+// LogoPlaceholders are what a logo URL template may contain. One of them has to
+// be there, or every symbol would be given the same picture.
+const (
+	LogoSymbolToken      = "{symbol}"
+	LogoSymbolLowerToken = "{symbol_lower}"
+)
+
+// ExpandLogoURL fills a logo template in for one symbol.
+//
+// The symbol is path-escaped: a template can put it in a path segment or a
+// query, and `BRK-B` is fine in both but a symbol with a slash in it would
+// otherwise silently address a different path.
+func ExpandLogoURL(template, symbol string) string {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	out := strings.ReplaceAll(template, LogoSymbolToken, url.PathEscape(symbol))
+	return strings.ReplaceAll(out, LogoSymbolLowerToken, url.PathEscape(strings.ToLower(symbol)))
+}

@@ -447,6 +447,16 @@ func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
 		return Logo{}, errors.New("a symbol is required")
 	}
 	settings, _ := y.current()
+
+	// A configured template wins outright. Yahoo's own `logoUrl` is absent far
+	// more often than it is present — on plenty of accounts it is absent
+	// always — and an operator who has found a source that works should not
+	// have their choice second-guessed by a fallback that mostly returns
+	// nothing.
+	if settings.LogoURL != "" {
+		return y.image(ctx, ExpandLogoURL(settings.LogoURL, symbol))
+	}
+
 	endpoint := fmt.Sprintf("%s/v1/finance/search?q=%s&quotesCount=6&newsCount=0&listsCount=0",
 		settings.BaseURL, url.QueryEscape(symbol))
 
@@ -475,7 +485,11 @@ func (y *Yahoo) Logo(ctx context.Context, symbol string) (Logo, error) {
 		}
 	}
 	if src == "" {
-		return Logo{}, ErrNoLogo
+		// Wrapped rather than bare, so the caller can record *why* it gave up
+		// on a symbol. "No logo" and "no logo, because this source never
+		// mentions one" look identical in a cache and are very different
+		// things to have to debug.
+		return Logo{}, fmt.Errorf("%w: the quote source's search result carries no logo", ErrNoLogo)
 	}
 	return y.image(ctx, src)
 }
@@ -508,7 +522,7 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return Logo{}, ErrNoLogo
+		return Logo{}, fmt.Errorf("%w: nothing at %s", ErrNoLogo, src)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return Logo{}, fmt.Errorf("logo fetch returned HTTP %d", resp.StatusCode)
@@ -521,10 +535,13 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 		return Logo{}, err
 	}
 	if len(body) > maxLogoBytes {
-		return Logo{}, fmt.Errorf("logo at %s is larger than %d bytes", src, maxLogoBytes)
+		// Durable, so it is wrapped: a URL that answers with something this
+		// big will do so again next cycle, and re-asking forever hides the
+		// misconfiguration instead of reporting it.
+		return Logo{}, fmt.Errorf("%w: %s answered with more than %d bytes", ErrNoLogo, src, maxLogoBytes)
 	}
 	if len(body) == 0 {
-		return Logo{}, ErrNoLogo
+		return Logo{}, fmt.Errorf("%w: %s answered with an empty body", ErrNoLogo, src)
 	}
 
 	// Sniffed rather than trusted: the content type is what the browser will
@@ -532,7 +549,10 @@ func (y *Yahoo) image(ctx context.Context, src string) (Logo, error) {
 	// the cache into a way to serve markup from this app's own origin.
 	kind := http.DetectContentType(body)
 	if !strings.HasPrefix(kind, "image/") {
-		return Logo{}, fmt.Errorf("logo at %s is %s, not an image", src, kind)
+		// Also durable, and the single most useful thing this can report: a
+		// mistyped logo URL usually answers 200 with somebody's HTML, and
+		// "answered with text/html, not an image" is the whole diagnosis.
+		return Logo{}, fmt.Errorf("%w: %s answered with %s, not an image", ErrNoLogo, src, kind)
 	}
 	return Logo{ContentType: kind, Bytes: body, Source: src}, nil
 }

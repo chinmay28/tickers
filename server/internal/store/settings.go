@@ -23,6 +23,7 @@ const (
 	SettingQuoteUserAgent   = "quote_user_agent"
 	SettingPinnedSymbols    = "pinned_symbols"
 	SettingLogos            = "logos_enabled"
+	SettingLogoURL          = "logo_url_template"
 	SettingSeeded           = "seeded"
 )
 
@@ -41,6 +42,9 @@ const (
 	// the cap is what stops a paste from turning the setting into a second
 	// watchlist.
 	MaxPinnedSymbols = 50
+	// MaxLogoURLLen bounds the logo template. Long enough for a service URL
+	// with a token in it, short enough that the field is not a paste target.
+	MaxLogoURLLen = 512
 )
 
 // Config is the tunable behaviour of the refresh loop and the quote source, as
@@ -84,6 +88,18 @@ type Config struct {
 	// Every symbol without one — every ETF, every crypto pair, every composite
 	// and portfolio — keeps the mark drawn from its name either way.
 	Logos bool `json:"logos"`
+
+	// LogoURLTemplate is where a logo comes from, with `{symbol}` standing in
+	// for the ticker. Empty means "let the quote source work it out", which
+	// for Yahoo means the `logoUrl` its search results sometimes carry.
+	//
+	// It is configurable for the same reason the user agent is: there is no
+	// standard way to get a picture from a ticker, what works is a moving
+	// target of free services, and an install that can reach one should not
+	// have to wait for a release to use it. Changing it clears the cache, so
+	// the next cycles ask the new source rather than serving the old one's
+	// answers.
+	LogoURLTemplate string `json:"logoUrlTemplate"`
 }
 
 // DefaultConfig is what a fresh install runs with: a five-minute poll (the
@@ -166,6 +182,11 @@ func (s *Store) Config() (Config, error) {
 	} else if v != "" {
 		cfg.Logos = v == "true"
 	}
+	if v, err := s.Setting(SettingLogoURL); err != nil {
+		return cfg, err
+	} else {
+		cfg.LogoURLTemplate = v
+	}
 	return cfg, nil
 }
 
@@ -210,6 +231,7 @@ type ConfigPatch struct {
 	QuoteUserAgent      *string   `json:"quoteUserAgent"`
 	PinnedSymbols       *[]string `json:"pinnedSymbols"`
 	Logos               *bool     `json:"logos"`
+	LogoURLTemplate     *string   `json:"logoUrlTemplate"`
 }
 
 // UpdateConfig validates and persists a patch, returning the config as it now
@@ -273,6 +295,21 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		}
 		cfg.PinnedSymbols = pinned
 	}
+	if patch.LogoURLTemplate != nil {
+		v := strings.TrimSpace(*patch.LogoURLTemplate)
+		if err := validateLogoURLTemplate(v); err != nil {
+			return cfg, err
+		}
+		// A new source means the old source's answers — including everything
+		// it said had no logo — are worthless. Keeping them would make a
+		// working template look broken for as long as the cache lived.
+		if v != cfg.LogoURLTemplate {
+			if _, err := s.ForgetLogos(); err != nil {
+				return cfg, err
+			}
+		}
+		cfg.LogoURLTemplate = v
+	}
 	if patch.Logos != nil {
 		// Turning it off empties the cache. A drawer of third-party images
 		// nobody wants any more should not outlive the setting that filled it,
@@ -295,10 +332,56 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		SettingQuoteUserAgent:   cfg.QuoteUserAgent,
 		SettingPinnedSymbols:    strings.Join(cfg.PinnedSymbols, ","),
 		SettingLogos:            strconv.FormatBool(cfg.Logos),
+		SettingLogoURL:          cfg.LogoURLTemplate,
 	}); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// The placeholders a logo template may carry. They mirror the constants in
+// `quotes`, which is what expands them — repeated rather than imported because
+// `store` sits below `quotes` in the dependency order and reaching up would
+// invert it. The client mirrors them a third time, for the same reason it
+// mirrors expr.Looks.
+const (
+	logoSymbolToken      = "{symbol}"
+	logoSymbolLowerToken = "{symbol_lower}"
+)
+
+// validateLogoURLTemplate accepts an empty value (meaning "let the provider
+// decide") or an http/https URL carrying a symbol placeholder.
+//
+// The placeholder is required rather than optional: a template without one
+// resolves to the same picture for every symbol, which is not a logo feature,
+// it is a wallpaper. The scheme check matters for the same reason it does on
+// the quote base URL — the server fetches whatever is configured here.
+func validateLogoURLTemplate(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > MaxLogoURLLen {
+		return fmt.Errorf("the logo URL cannot be longer than %d characters", MaxLogoURLLen)
+	}
+	if strings.ContainsAny(raw, "\r\n") {
+		return errors.New("the logo URL cannot contain line breaks")
+	}
+	if !strings.Contains(raw, logoSymbolToken) && !strings.Contains(raw, logoSymbolLowerToken) {
+		return fmt.Errorf("the logo URL has to contain %s (or %s), or every symbol gets the same picture",
+			logoSymbolToken, logoSymbolLowerToken)
+	}
+	// Checked as it will actually be used. A template is only a URL once the
+	// placeholder is gone — `{symbol}` in a host would parse as nothing useful.
+	filled := strings.ReplaceAll(raw, logoSymbolToken, "TEST")
+	filled = strings.ReplaceAll(filled, logoSymbolLowerToken, "test")
+	parsed, err := url.Parse(filled)
+	if err != nil {
+		return errors.New("that logo URL is not a URL")
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("the logo URL has to be http:// or https:// with a host")
+	}
+	return nil
 }
 
 // validateQuoteBaseURL accepts an empty value (meaning "use the default") or
