@@ -10,6 +10,7 @@ import (
 
 	"github.com/chinmay28/tickers/server/internal/expr"
 	"github.com/chinmay28/tickers/server/internal/quotes"
+	"github.com/chinmay28/tickers/server/internal/store"
 )
 
 // Performance is a ticker's own past, assembled on demand for the watchlist's
@@ -134,9 +135,15 @@ func (e *Engine) Performance(ctx context.Context, tickerID string) (Performance,
 	perf := Performance{Symbol: t.Symbol, Label: t.Label, Composite: t.IsComposite()}
 
 	var full []Point
-	if t.IsComposite() {
+	switch {
+	case t.IsPortfolio():
+		var p store.Portfolio
+		if p, err = e.store.Portfolio(t.PortfolioID); err == nil {
+			full, err = e.portfolioSeries(ctx, historian, p, historyStart())
+		}
+	case t.IsComposite():
 		full, err = e.compositeSeries(ctx, historian, t.Expression, historyStart())
-	} else {
+	default:
 		full, err = e.symbolSeries(ctx, historian, t.Symbol, historyStart())
 	}
 	if err != nil {
@@ -219,6 +226,61 @@ func (e *Engine) compositeSeries(ctx context.Context, h quotes.Historian, formul
 			continue
 		}
 		points = append(points, Point{Date: date, Value: value})
+	}
+	sortPoints(points)
+	return points, nil
+}
+
+// portfolioSeries values a saved allocation's units against past closes, one
+// day at a time.
+//
+// It is the same shape as compositeSeries and intersects its legs for the same
+// reason — a day one holding was shut and another moved would produce a total
+// nobody's account ever showed. The difference is what it means: this is the
+// *holding* the watchlist row stands for, carried backwards, so it shows what
+// today's units would have been worth rather than what the strategy returned.
+// The rebalanced answer is the backtest's, on the Portfolios page.
+func (e *Engine) portfolioSeries(ctx context.Context, h quotes.Historian, p store.Portfolio, since time.Time) ([]Point, error) {
+	if len(p.Holdings) == 0 {
+		return nil, fmt.Errorf("%s has no holdings", p.Name)
+	}
+
+	legs := make(map[string]map[string]float64, len(p.Holdings))
+	var dates []string
+	for i, holding := range p.Holdings {
+		if holding.Units == 0 {
+			return nil, fmt.Errorf("%s has not been priced yet", p.Name)
+		}
+		bars, err := e.symbolHistory(ctx, h, holding.Symbol, since)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", holding.Symbol, err)
+		}
+		byDate := make(map[string]float64, len(bars))
+		for _, b := range bars {
+			byDate[b.Date] = b.Close
+		}
+		legs[holding.Symbol] = byDate
+		if i == 0 {
+			for _, b := range bars {
+				dates = append(dates, b.Date)
+			}
+		}
+	}
+
+	points := make([]Point, 0, len(dates))
+	for _, date := range dates {
+		value, complete := 0.0, true
+		for _, holding := range p.Holdings {
+			close, ok := legs[holding.Symbol][date]
+			if !ok {
+				complete = false
+				break
+			}
+			value += holding.Units * close
+		}
+		if complete {
+			points = append(points, Point{Date: date, Value: value})
+		}
 	}
 	sortPoints(points)
 	return points, nil

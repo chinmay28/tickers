@@ -12,7 +12,7 @@ import (
 
 // tickerColumns is the one list of columns every ticker query selects, kept in
 // one place so adding a field can't leave a scan and a select disagreeing.
-const tickerColumns = `id, symbol, expression, label, position, enabled, origin, created_at, updated_at`
+const tickerColumns = `id, symbol, expression, portfolio_id, label, position, enabled, origin, created_at, updated_at`
 
 // Tickers lists the whole watchlist in display order — pinned symbols first.
 func (s *Store) Tickers() ([]Ticker, error) {
@@ -162,6 +162,14 @@ func (s *Store) UpdateTicker(id string, patch TickerPatch) (Ticker, error) {
 	existing, err := s.Ticker(id)
 	if err != nil {
 		return Ticker{}, err
+	}
+
+	// A portfolio's row is not the user's to re-aim: its symbol is the
+	// portfolio's name and its value comes from the allocation, so retyping
+	// either here would leave a row that says one thing and prices another.
+	// The label is still theirs.
+	if existing.IsPortfolio() && (patch.Symbol != nil || patch.Expression != nil) {
+		return Ticker{}, errors.New("a portfolio's row cannot be re-pointed; edit the portfolio instead")
 	}
 
 	// Symbol and formula are resolved as a pair, because either one can decide
@@ -335,7 +343,8 @@ func scanTicker(row scannable) (Ticker, error) {
 		enabled              int
 		createdAt, updatedAt string
 	)
-	if err := row.Scan(&t.ID, &t.Symbol, &t.Expression, &t.Label, &t.Position, &enabled, &t.Origin, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Symbol, &t.Expression, &t.PortfolioID, &t.Label, &t.Position,
+		&enabled, &t.Origin, &createdAt, &updatedAt); err != nil {
 		return Ticker{}, err
 	}
 	t.Enabled = enabled != 0

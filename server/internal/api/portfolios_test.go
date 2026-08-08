@@ -195,3 +195,94 @@ func TestPortfolioRejectsFieldsItDoesNotHave(t *testing.T) {
 			"instead is how a setting appears not to work", rec.Code)
 	}
 }
+
+func TestSavingAPortfolioPutsItOnTheWatchlist(t *testing.T) {
+	h := backtestHarness(t)
+
+	rec, body := h.do(t, http.MethodPost, "/api/portfolios", twoFund())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: status %d: %v", rec.Code, body)
+	}
+	created, _ := body["portfolio"].(map[string]any)
+	id, _ := created["id"].(string)
+
+	_, state := h.do(t, http.MethodGet, "/api/state", nil)
+	tickers, _ := state["tickers"].([]any)
+	var row map[string]any
+	for _, entry := range tickers {
+		candidate, _ := entry.(map[string]any)
+		if candidate["portfolioId"] == id {
+			row = candidate
+		}
+	}
+	if row == nil {
+		t.Fatalf("no watchlist row for the saved portfolio")
+	}
+	// The key a downstream dashboard reads the value under.
+	if row["symbol"] != "TWO-FUND" {
+		t.Errorf("row symbol = %v, want TWO-FUND", row["symbol"])
+	}
+	if row["expression"] != "" {
+		t.Errorf("the row carries a formula %q; a portfolio is not a composite", row["expression"])
+	}
+
+	// And it publishes with everything else — which is most of the point of
+	// putting it on the watchlist at all.
+	_, preview := h.do(t, http.MethodGet, "/api/preview", nil)
+	payload, _ := preview["payload"].(map[string]any)
+	if _, ok := payload["TWO-FUND"]; !ok {
+		t.Errorf("the portfolio is missing from the published payload: %v", payload)
+	}
+
+	// Renaming moves the key rather than adding a second row.
+	if rec, body := h.do(t, http.MethodPatch, "/api/portfolios/"+id,
+		map[string]any{"name": "Renamed fund"}); rec.Code != http.StatusOK {
+		t.Fatalf("rename: status %d: %v", rec.Code, body)
+	}
+	_, state = h.do(t, http.MethodGet, "/api/state", nil)
+	tickers, _ = state["tickers"].([]any)
+	rows := 0
+	for _, entry := range tickers {
+		candidate, _ := entry.(map[string]any)
+		if candidate["portfolioId"] == id {
+			rows++
+			if candidate["symbol"] != "RENAMED-FUND" {
+				t.Errorf("row symbol = %v after rename, want RENAMED-FUND", candidate["symbol"])
+			}
+		}
+	}
+	if rows != 1 {
+		t.Errorf("found %d rows for one portfolio, want 1", rows)
+	}
+
+	// Deleting the portfolio takes the row with it.
+	if rec, _ := h.do(t, http.MethodDelete, "/api/portfolios/"+id, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete failed")
+	}
+	_, state = h.do(t, http.MethodGet, "/api/state", nil)
+	tickers, _ = state["tickers"].([]any)
+	for _, entry := range tickers {
+		candidate, _ := entry.(map[string]any)
+		if candidate["portfolioId"] == id {
+			t.Error("the watchlist row outlived its portfolio")
+		}
+	}
+}
+
+func TestAPortfolioNameThatCollidesWithASymbolIsRejected(t *testing.T) {
+	h := backtestHarness(t)
+
+	// VTI is on the seeded watchlist. Two rows cannot share a published key,
+	// and the portfolio must not be left saved but invisible.
+	clashing := twoFund()
+	clashing["name"] = "VTI"
+
+	rec, body := h.do(t, http.MethodPost, "/api/portfolios", clashing)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400: %v", rec.Code, body)
+	}
+	_, listed := h.do(t, http.MethodGet, "/api/portfolios", nil)
+	if portfolios, _ := listed["portfolios"].([]any); len(portfolios) != 0 {
+		t.Errorf("a portfolio whose row could not be created was left saved: %v", portfolios)
+	}
+}
