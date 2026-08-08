@@ -550,6 +550,139 @@ func TestBacktestLumpSumIsUnchangedByTheContributionMachinery(t *testing.T) {
 	}
 }
 
+func TestRiskFreeRatesCarryTheLastKnownRateForward(t *testing.T) {
+	// A rate is a level that stays in force until it changes, which is exactly
+	// what a price series may never do across a gap.
+	months := []string{"2020-01", "2020-02", "2020-03", "2020-04"}
+	bill := map[string]float64{"2019-11": 1.8, "2020-03": 0.12}
+
+	rates := riskFreeRates(months, bill)
+	if rates == nil {
+		t.Fatal("no rates from a bill that predates the run")
+	}
+	// November's 1.8% annual is 0.15% a month, and it is still in force in
+	// January and February because nothing replaced it.
+	if math.Abs(rates[0]-0.0015) > 1e-12 || math.Abs(rates[1]-0.0015) > 1e-12 {
+		t.Errorf("rates = %v; November's rate has to hold until March replaces it", rates[:2])
+	}
+	if math.Abs(rates[2]-0.12/100/12) > 1e-12 || math.Abs(rates[3]-0.12/100/12) > 1e-12 {
+		t.Errorf("rates = %v; March's cut has to apply from March on", rates[2:])
+	}
+}
+
+func TestRiskFreeRatesRefuseToRunBackwards(t *testing.T) {
+	// The bill starts after the portfolio does. Carrying a rate backwards would
+	// be inventing monetary policy, so there is no Sharpe rather than a wrong one.
+	months := []string{"2020-01", "2020-02"}
+	if rates := riskFreeRates(months, map[string]float64{"2021-06": 0.5}); rates != nil {
+		t.Errorf("rates = %v, want none", rates)
+	}
+	if rates := riskFreeRates(months, nil); rates != nil {
+		t.Errorf("rates = %v for an empty bill, want none", rates)
+	}
+}
+
+func TestSharpeAndSortinoSeparateUpsideFromDownsideSwings(t *testing.T) {
+	// A series that only ever rises, in uneven steps. It has real volatility
+	// and no downside at all — the case the two ratios exist to tell apart.
+	index := []float64{1}
+	for _, step := range []float64{0.01, 0.05, 0.01, 0.06, 0.02, 0.04} {
+		index = append(index, index[len(index)-1]*(1+step))
+	}
+	rates := make([]float64, len(index)) // 0% risk-free, so excess is the return
+
+	sharpe, sortino := riskAdjusted(index, rates)
+	if sharpe == nil {
+		t.Fatal("no Sharpe for a series with plenty of variance")
+	}
+	if sortino != nil {
+		t.Errorf("Sortino = %v; a series that never fell has no downside deviation to divide by, "+
+			"and inventing one would flatter it", *sortino)
+	}
+	if *sharpe <= 0 {
+		t.Errorf("Sharpe = %v for a series that only rose", *sharpe)
+	}
+}
+
+func TestSharpeFallsWhenTheRiskFreeRateRises(t *testing.T) {
+	index := []float64{1, 1.02, 1.01, 1.04, 1.03, 1.06}
+	flat := make([]float64, len(index))
+	generous := make([]float64, len(index))
+	for i := range generous {
+		generous[i] = 0.01 // 1% a month risk-free, which most of these months miss
+	}
+
+	cheap, _ := riskAdjusted(index, flat)
+	dear, _ := riskAdjusted(index, generous)
+	if cheap == nil || dear == nil {
+		t.Fatal("a Sharpe went missing")
+	}
+	if *dear >= *cheap {
+		t.Errorf("Sharpe was %v against 0%% and %v against 1%% a month; beating a higher bar by "+
+			"less has to score worse", *cheap, *dear)
+	}
+}
+
+func TestRiskAdjustedNeedsARateForEveryMonth(t *testing.T) {
+	index := []float64{1, 1.02, 1.01, 1.04}
+	// A short or missing rate series leaves both unset. Silently treating the
+	// gap as 0% would publish a different statistic under the same name.
+	if sharpe, sortino := riskAdjusted(index, nil); sharpe != nil || sortino != nil {
+		t.Errorf("got %v/%v with no risk-free series, want neither", sharpe, sortino)
+	}
+	if sharpe, _ := riskAdjusted(index, []float64{0, 0}); sharpe != nil {
+		t.Errorf("got %v from a rate series shorter than the run", *sharpe)
+	}
+}
+
+func TestBacktestReportsWhichRateItMeasuredAgainst(t *testing.T) {
+	long := make([]float64, 40)
+	for i := range long {
+		long[i] = 100 * math.Pow(1.005, float64(i))
+	}
+	bill := make([]float64, 40)
+	for i := range bill {
+		bill[i] = 2.0 // 2% annualised, quoted as a percentage rather than a price
+	}
+
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"ONE":          monthlyBars("2019-01", long...),
+		riskFreeSymbol: monthlyBars("2019-01", bill...),
+	})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "ONE", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if result.RiskFree != riskFreeSymbol {
+		t.Errorf("riskFree = %q, want %q — a ratio whose benchmark rate is unnamed is unreadable",
+			result.RiskFree, riskFreeSymbol)
+	}
+	if result.Portfolio.Sharpe == nil {
+		t.Error("no Sharpe despite a full risk-free series")
+	}
+}
+
+func TestBacktestSurvivesAQuoteSourceWithNoTreasuryBill(t *testing.T) {
+	// The bill is not a leg: a source that has never heard of it must cost the
+	// two ratios and nothing else.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("a missing risk-free series failed the whole backtest: %v", err)
+	}
+	if result.RiskFree != "" {
+		t.Errorf("riskFree = %q, want empty", result.RiskFree)
+	}
+	if result.Portfolio.Sharpe != nil || result.Portfolio.Sortino != nil {
+		t.Error("ratios were computed with no risk-free rate to compute them against")
+	}
+	if math.Abs(result.Portfolio.End-1010) > 1e-9 {
+		t.Errorf("final balance = %.4f, want the usual 1010", result.Portfolio.End)
+	}
+}
+
 func TestMaxDrawdownIsThePeakToTroughFallAndWhenItWasRecovered(t *testing.T) {
 	months := []string{"2020-01", "2020-02", "2020-03", "2020-04", "2020-05", "2020-06"}
 	balances := []float64{100, 120, 60, 90, 130, 110}
@@ -584,7 +717,7 @@ func TestMeasureWithholdsAnAnnualRateFromARunTooShortToHaveOne(t *testing.T) {
 	balances := []float64{1000, 1100, 1200}
 
 	run := lump(balances)
-	m := measure("Portfolio", months, run, annualReturns(months, run.index))
+	m := measure("Portfolio", months, run, annualReturns(months, run.index), nil)
 
 	if m.CAGR != nil {
 		t.Errorf("CAGR = %v for a two-month run; annualising that is a forecast wearing a "+
@@ -605,7 +738,7 @@ func TestMeasureCompoundsTheAnnualRateOverTheRunsRealLength(t *testing.T) {
 	}
 
 	run := lump(balances)
-	m := measure("Portfolio", months, run, annualReturns(months, run.index))
+	m := measure("Portfolio", months, run, annualReturns(months, run.index), nil)
 
 	if m.CAGR == nil {
 		t.Fatal("no CAGR for a two-year run")

@@ -860,6 +860,12 @@ function renderBacktest(data) {
              percentage here and shown as its own row instead.`
           : ''
       }
+      ${
+        b.riskFree
+          ? `Sharpe and Sortino are measured against <code>${esc(b.riskFree)}</code>,
+             the 13-week Treasury bill.`
+          : ''
+      }
       Nothing here models fees, taxes or spreads, so it is what the allocation
       did, not what an account holding it would have.
     </p>
@@ -986,11 +992,35 @@ function metricsTable(b) {
             ? '—'
             : `${esc(m.stdevPercent.toFixed(2))}%`,
         )}</tr>
+        ${
+          // Only with a risk-free series behind them. A Sharpe quietly computed
+          // against 0% is a different statistic under the same name, so the
+          // rows are absent rather than wrong.
+          b.riskFree
+            ? `<tr><th title="Return above the risk-free rate per unit of volatility">Sharpe</th>${cells(
+                (m) => ratioCell(m.sharpe),
+              )}</tr>
+               <tr><th title="The same, counting only downside volatility">Sortino</th>${cells(
+                 (m) => ratioCell(m.sortino),
+               )}</tr>`
+            : ''
+        }
         <tr><th>Best year</th>${cells((m) => year(m.bestYear))}</tr>
         <tr><th>Worst year</th>${cells((m) => year(m.worstYear))}</tr>
         <tr><th>Deepest fall</th>${cells((m) => drawdownCell(m))}</tr>
       </tbody>
     </table></div>`;
+}
+
+/** Sharpe and Sortino. Two decimals, unsigned — they are ratios, not moves, and
+ *  a "+1.24" would read as a gain of something. A missing one is a series with
+ *  nothing to divide by (a run that never fell has no downside deviation), not
+ *  a zero. */
+function ratioCell(value) {
+  if (value === null || value === undefined) {
+    return '<span class="field__hint">n/a</span>';
+  }
+  return `<span class="perf-change perf-change--${direction(value)}">${esc(value.toFixed(2))}</span>`;
 }
 
 /** The drawdown cell says how far down, from when to when, and — the part that

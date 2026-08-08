@@ -70,6 +70,10 @@ type Backtest struct {
 	// Holdings echoes the allocation with the weight actually used and the
 	// first month each symbol has data for — the numbers behind Notes.
 	Holdings []HoldingResult `json:"holdings"`
+	// RiskFree names the series Sharpe and Sortino were measured against, or is
+	// empty when it couldn't be fetched and both are therefore unset. The UI
+	// says which rate the ratios used rather than leaving a reader to assume.
+	RiskFree string `json:"riskFree"`
 	// Notes are the things a reader would otherwise have to infer from a date
 	// that isn't the one they typed.
 	Notes []string `json:"notes"`
@@ -121,6 +125,16 @@ type Metrics struct {
 	// conventional volatility number, monthly deviation times the root of
 	// twelve. Nil when there are fewer than two returns to deviate.
 	Stdev *float64 `json:"stdevPercent"`
+	// Sharpe is return above the risk-free rate per unit of volatility, and
+	// Sortino is the same over *downside* volatility only.
+	//
+	// The pair is worth having together: a strategy whose swings are mostly
+	// upward is punished by Sharpe and left alone by Sortino, and the gap
+	// between the two numbers is itself the finding. Both are nil when the
+	// risk-free series could not be fetched — a Sharpe silently computed
+	// against 0% is a different statistic wearing the same name.
+	Sharpe  *float64 `json:"sharpe"`
+	Sortino *float64 `json:"sortino"`
 	// Best and Worst are full calendar years only, so a run that started in
 	// October can't report its first three months as its worst year.
 	Best  *AnnualReturn `json:"bestYear"`
@@ -138,6 +152,107 @@ type Metrics struct {
 // reported. A year exactly is allowed — over that period the rate *is* the
 // total return, and printing it keeps the column honest rather than empty.
 const cagrMinYears = 1.0
+
+// riskFreeSymbol is what Sharpe and Sortino measure against: Yahoo's 13-week
+// Treasury bill, which is the short government rate every textbook means by
+// "risk-free" and the closest public series to the 1-month bill the commercial
+// tools use.
+//
+// It is a constant rather than a setting because it is not a preference — it is
+// the definition of the statistic, and a Sharpe ratio computed against
+// something else is a different number with the same name. It is fetched
+// best-effort: a source that has never heard of it leaves both ratios unset
+// rather than failing the backtest.
+const riskFreeSymbol = "^IRX"
+
+// riskFreeRates turns the bill's quoted yields into the monthly returns a
+// portfolio's own returns are measured against.
+//
+// Two conversions, both worth naming. The series is quoted as an *annualised
+// percentage* rather than as a price, so a month's share of it is the rate over
+// twelve — nothing here is compounding a price series. And the last known rate
+// is carried forward across gaps, which price series are never allowed to do:
+// a rate is a level that stays in force until it changes, where a missing close
+// is a day that did not trade.
+//
+// Returns nil when the bill has nothing at or before the run's first month,
+// because carrying a rate *backwards* would be inventing monetary policy.
+func riskFreeRates(months []string, bill map[string]float64) []float64 {
+	if len(bill) == 0 {
+		return nil
+	}
+	// The rate in force at the run's start was very likely set before it.
+	opening := ""
+	for month := range bill {
+		if month <= months[0] && month > opening {
+			opening = month
+		}
+	}
+	if opening == "" {
+		return nil
+	}
+	inForce := bill[opening]
+
+	rates := make([]float64, len(months))
+	for k, month := range months {
+		if rate, ok := bill[month]; ok {
+			inForce = rate
+		}
+		rates[k] = inForce / 100 / 12
+	}
+	return rates
+}
+
+// riskAdjusted computes Sharpe and Sortino from a growth index and the monthly
+// risk-free returns beside it.
+//
+// Sortino's denominator divides by *every* period rather than by the losing
+// ones — the conventional target semideviation. Dividing by the count of
+// downside months instead would flatter a strategy that rarely falls by
+// measuring its rare falls against themselves.
+func riskAdjusted(index, rates []float64) (sharpe, sortino *float64) {
+	if len(rates) != len(index) || len(index) < 3 {
+		return nil, nil
+	}
+
+	excess := make([]float64, 0, len(index)-1)
+	for k := 1; k < len(index); k++ {
+		if index[k-1] <= 0 {
+			continue
+		}
+		excess = append(excess, index[k]/index[k-1]-1-rates[k])
+	}
+	if len(excess) < 2 {
+		return nil, nil
+	}
+
+	mean := 0.0
+	for _, r := range excess {
+		mean += r
+	}
+	mean /= float64(len(excess))
+
+	variance, downside := 0.0, 0.0
+	for _, r := range excess {
+		variance += (r - mean) * (r - mean)
+		if r < 0 {
+			downside += r * r
+		}
+	}
+	variance /= float64(len(excess) - 1)
+	downside /= float64(len(excess))
+
+	root12 := math.Sqrt(12)
+	if sd := math.Sqrt(variance); sd > 0 {
+		value := mean / sd * root12
+		sharpe = &value
+	}
+	if dd := math.Sqrt(downside); dd > 0 {
+		value := mean / dd * root12
+		sortino = &value
+	}
+	return sharpe, sortino
+}
 
 // Backtest simulates one allocation against the provider's daily history.
 //
@@ -200,6 +315,13 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		cash.frequency = store.RebalanceNone
 	}
 
+	// Best-effort, and deliberately after the months are settled: the bill is
+	// not a leg, so it must never narrow the run or fail it. A source that has
+	// never heard of it simply leaves both ratios unset.
+	var rates []float64
+	if bill, err := e.riskFree(ctx, historian); err == nil {
+		rates = riskFreeRates(months, bill)
+	}
 	run := simulate(holdings, series, months, cash)
 	annual := annualReturns(months, run.index)
 
@@ -213,8 +335,11 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		Points:      make([]Balance, len(months)),
 		Annual:      annual,
 		Holdings:    make([]HoldingResult, len(holdings)),
-		Portfolio:   measure("Portfolio", months, run, annual),
+		Portfolio:   measure("Portfolio", months, run, annual, rates),
 		Notes:       startNotes(months[0], holdings, benchmark, firstMonth),
+	}
+	if rates != nil {
+		out.RiskFree = riskFreeSymbol
 	}
 
 	// The benchmark is one holding at 100%, run over the same months with the
@@ -230,7 +355,7 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		bench = &benchRun
 
 		benchAnnual := annualReturns(months, benchRun.index)
-		benchMetrics := measure(benchmark, months, benchRun, benchAnnual)
+		benchMetrics := measure(benchmark, months, benchRun, benchAnnual, rates)
 		out.Benchmark = &benchMetrics
 
 		byYear := make(map[int]float64, len(benchAnnual))
@@ -257,6 +382,18 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		out.Holdings[i] = h
 	}
 	return out, nil
+}
+
+// riskFree reads the Treasury bill's month-end yields, through the same cache
+// every other series uses — so a page of portfolios costs one fetch of it
+// between them all rather than one each.
+func (e *Engine) riskFree(ctx context.Context, h quotes.Historian) (map[string]float64, error) {
+	bars, err := e.symbolHistory(ctx, h, riskFreeSymbol, historyStart())
+	if err != nil {
+		return nil, err
+	}
+	rates, _ := monthEnds(bars)
+	return rates, nil
 }
 
 // loadMonthly fetches one symbol's daily bars and reduces them to month-end
@@ -591,7 +728,7 @@ func annualReturns(months []string, balances []float64) []AnnualReturn {
 // Money comes off the balances and returns come off the index — see result.
 // Without contributions the two agree; with them, "final balance" and "total
 // return" answer different questions and both are wanted.
-func measure(label string, months []string, run result, annual []AnnualReturn) Metrics {
+func measure(label string, months []string, run result, annual []AnnualReturn, rates []float64) Metrics {
 	balances, index := run.balances, run.index
 	m := Metrics{
 		Label: label,
@@ -610,6 +747,7 @@ func measure(label string, months []string, run result, annual []AnnualReturn) M
 	if stdev, ok := annualisedStdev(index); ok {
 		m.Stdev = &stdev
 	}
+	m.Sharpe, m.Sortino = riskAdjusted(index, rates)
 
 	for i := range annual {
 		if annual[i].Partial {
