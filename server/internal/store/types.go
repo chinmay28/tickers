@@ -133,6 +133,22 @@ const (
 	RebalanceMonthly   = "monthly"
 )
 
+// Cadences is every rebalancing and contribution frequency, in the order a
+// picker should offer them. The two share a vocabulary because they share a
+// meaning — "at the end of each of these periods" — and the simulation applies
+// both on the same calendar boundaries.
+var Cadences = []string{RebalanceAnnually, RebalanceQuarterly, RebalanceMonthly, RebalanceNone}
+
+// ValidCadence reports whether s is one of them.
+func ValidCadence(s string) bool {
+	for _, c := range Cadences {
+		if c == s {
+			return true
+		}
+	}
+	return false
+}
+
 // MaxHoldings bounds one portfolio. Each holding is an upstream request the
 // first time it is priced, and a Raspberry Pi asking for forty full-history
 // series at once is how you collect timeouts rather than a backtest.
@@ -166,6 +182,11 @@ type Portfolio struct {
 	StartYear     int       `json:"startYear"`
 	EndYear       int       `json:"endYear"`
 	Rebalance     string    `json:"rebalance"`
+	// Contribution is paid in at every ContributionFrequency boundary, split by
+	// the target weights. Zero — with a frequency of "none" — is a lump sum
+	// left alone, which is what every portfolio was before this existed.
+	Contribution          float64 `json:"contribution"`
+	ContributionFrequency string  `json:"contributionFrequency"`
 	// Benchmark is a single symbol to run alongside at 100%, or empty for none.
 	Benchmark string    `json:"benchmark"`
 	Position  int       `json:"position"`

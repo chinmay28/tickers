@@ -300,11 +300,24 @@ Four decisions inside it, each with a failure it prevents:
   restatement of wherever that bound fell.
 - **Adjusted closes where they exist.** An unadjusted five-year chart of a stock
   that split 4:1 shows a crash nobody experienced. Raw closes are the fallback
-  for instruments with no adjustments to make — currencies, crypto.
+  for instruments with no adjustments to make — currencies, crypto. A bar
+  carries *both* series, because the one thing that needs the unadjusted price
+  is a yield: a payout is per share in the money of its own day, and dividing a
+  1998 dividend by a 1998 close since marked down by thirty years of
+  distributions gives a yield several times the real one.
 - **A bar is dated by the exchange's calendar, not by UTC.** `meta.gmtoffset`
   shifts each timestamp before the date is taken. A close in Auckland stamped
   in UTC lands on the previous day, and that date is the key a composite aligns
   its legs on.
+
+`Distributor` is a third such interface, for dividends, and it is separate from
+`Historian` rather than a method on it for the same reason `Historian` is
+separate from `Provider`: a source can have prices and no payout feed — a
+currency pair and a crypto ticker have nothing to distribute — and folding the
+two together would leave such a source unable to offer history at all. Yahoo
+implements it off the same chart endpoint with `events=div`, at a monthly
+interval, because the events block does not depend on the bar interval and
+daily would drag decades of prices along for a call that reads neither.
 
 Composite history is the refresh cycle's composite pricing, run once per day
 instead of once per cycle: fetch each leg, evaluate the formula against a map of
@@ -407,6 +420,62 @@ asked for — an unknown symbol, histories that don't overlap, a window too shor
 for one monthly return — so the API can answer 400 for all of them. Telling
 somebody their portfolio is a server error sends them to the logs for a problem
 they can fix in the form.
+
+#### Money and returns are two different series
+
+A portfolio can be paid into on a cadence, and that breaks every return figure
+unless they are computed somewhere else. Money paid in raises the balance
+without anything having been earned; a CAGR taken off a balance topped up
+monthly for thirty years is a spectacular number describing nothing.
+
+So `simulate` keeps two series. **`balances`** is the money in the account.
+**`index`** is the growth of a single unit with the cash flows removed — each
+month's return measured *before* that month's contribution, against a balance
+that already includes the last one, which is the time-weighted return. Every
+percentage comes off the index; every amount comes off the balances. With no
+contributions the two are proportional and the distinction costs nothing, which
+is what keeps the lump-sum case exactly as it was.
+
+Drawdown is on the index for the sharper version of the same problem: a
+portfolio paid into every month can be halving while its balance still climbs,
+and a drawdown row papered over by deposits is worse than no row at all. The
+summary shows what went in as its own line, because a balance four times the
+initial amount beside a total return of 40% is otherwise a puzzle with no
+visible answer.
+
+Contributions land on the same calendar boundaries rebalancing uses, and the
+two share a vocabulary because they share a meaning. One asymmetry: a
+contribution in the final month is kept where a rebalance is dropped. Moving
+money between holdings at the closing bell changes nothing and would still count
+as a trade; paying money in changes the balance, and it genuinely went in.
+
+#### Risk-adjusted, and income
+
+Sharpe and Sortino are measured against `^IRX`, the 13-week Treasury bill. It is
+a constant rather than a setting because it is not a preference — a Sharpe
+computed against something else is a different number wearing the same name.
+Two conversions inside it are worth knowing: the bill is quoted as an
+*annualised percentage* rather than as a price, so a month's share is the rate
+over twelve; and the last known rate is carried **forward** across gaps, which a
+price series may never do — a rate is a level that stays in force until it
+changes, where a missing close is a day that did not trade. Carrying one
+*backwards* is refused outright, so a bill starting after the run leaves the
+ratios unset rather than inventing monetary policy.
+
+Yield divides what was actually distributed by what the portfolio was worth when
+the year opened. The shares held come from each holding's *money* and the
+*unadjusted* price of the baseline month — weights have drifted by then, and
+that is the point: income depends on what a portfolio actually held, not on what
+it was aiming at. Payouts before the baseline month are excluded, which is what
+keeps a part first year from claiming a full year of income, and the summary
+averages full years only for the same reason best and worst do.
+
+Both are best-effort and neither is a leg. The bill and the payout feed are
+fetched after the months are settled, so a source that lacks them costs the
+rows that depend on them and nothing else. The distinction the yield has to
+keep is between **nil and zero**: nil is "this source cannot say", zero is "this
+paid nothing", and collapsing them would report every income fund on earth as
+yielding nothing.
 
 ## Configuration precedence
 

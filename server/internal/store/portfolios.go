@@ -11,7 +11,7 @@ import (
 
 // portfolioColumns is the one list every portfolio query selects, kept in one
 // place so adding a field can't leave a scan and a select disagreeing.
-const portfolioColumns = `id, name, allocations, initial_amount, start_year, end_year, rebalance, benchmark, position, created_at, updated_at`
+const portfolioColumns = `id, name, allocations, initial_amount, start_year, end_year, rebalance, contribution, contribution_frequency, benchmark, position, created_at, updated_at`
 
 // Portfolios lists every saved allocation in display order.
 func (s *Store) Portfolios() ([]Portfolio, error) {
@@ -48,13 +48,15 @@ func (s *Store) Portfolio(id string) (Portfolio, error) {
 
 // NewPortfolio is the input for saving an allocation.
 type NewPortfolio struct {
-	Name          string
-	Holdings      []Holding
-	InitialAmount float64
-	StartYear     int
-	EndYear       int
-	Rebalance     string
-	Benchmark     string
+	Name                  string
+	Holdings              []Holding
+	InitialAmount         float64
+	StartYear             int
+	EndYear               int
+	Rebalance             string
+	Contribution          float64
+	ContributionFrequency string
+	Benchmark             string
 }
 
 // CreatePortfolio validates and stores an allocation.
@@ -68,6 +70,9 @@ func (s *Store) CreatePortfolio(in NewPortfolio) (Portfolio, error) {
 		EndYear:       in.EndYear,
 		Rebalance:     strings.TrimSpace(in.Rebalance),
 		Benchmark:     NormalizeSymbol(in.Benchmark),
+
+		Contribution:          in.Contribution,
+		ContributionFrequency: strings.TrimSpace(in.ContributionFrequency),
 	}
 	normalizePortfolio(&p)
 	if err := ValidatePortfolio(p); err != nil {
@@ -83,10 +88,11 @@ func (s *Store) CreatePortfolio(in NewPortfolio) (Portfolio, error) {
 	// portfolio never renumbers the ones already there.
 	if _, err := s.db.Exec(`
 		INSERT INTO portfolios (id, name, allocations, initial_amount, start_year, end_year,
-		                        rebalance, benchmark, position, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM portfolios), ?, ?)`,
+		                        rebalance, contribution, contribution_frequency, benchmark,
+		                        position, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM portfolios), ?, ?)`,
 		p.ID, p.Name, string(allocations), p.InitialAmount, p.StartYear, p.EndYear,
-		p.Rebalance, p.Benchmark, now, now); err != nil {
+		p.Rebalance, p.Contribution, p.ContributionFrequency, p.Benchmark, now, now); err != nil {
 		return Portfolio{}, err
 	}
 	return s.Portfolio(p.ID)
@@ -94,13 +100,15 @@ func (s *Store) CreatePortfolio(in NewPortfolio) (Portfolio, error) {
 
 // PortfolioPatch is a partial update; a nil field is left alone.
 type PortfolioPatch struct {
-	Name          *string
-	Holdings      *[]Holding
-	InitialAmount *float64
-	StartYear     *int
-	EndYear       *int
-	Rebalance     *string
-	Benchmark     *string
+	Name                  *string
+	Holdings              *[]Holding
+	InitialAmount         *float64
+	StartYear             *int
+	EndYear               *int
+	Rebalance             *string
+	Contribution          *float64
+	ContributionFrequency *string
+	Benchmark             *string
 }
 
 // UpdatePortfolio applies a patch, validating the result as a whole — weights
@@ -129,6 +137,12 @@ func (s *Store) UpdatePortfolio(id string, patch PortfolioPatch) (Portfolio, err
 	if patch.Rebalance != nil {
 		p.Rebalance = strings.TrimSpace(*patch.Rebalance)
 	}
+	if patch.Contribution != nil {
+		p.Contribution = *patch.Contribution
+	}
+	if patch.ContributionFrequency != nil {
+		p.ContributionFrequency = strings.TrimSpace(*patch.ContributionFrequency)
+	}
 	if patch.Benchmark != nil {
 		p.Benchmark = NormalizeSymbol(*patch.Benchmark)
 	}
@@ -143,10 +157,11 @@ func (s *Store) UpdatePortfolio(id string, patch PortfolioPatch) (Portfolio, err
 	}
 	if _, err := s.db.Exec(`
 		UPDATE portfolios SET name = ?, allocations = ?, initial_amount = ?, start_year = ?,
-		                      end_year = ?, rebalance = ?, benchmark = ?, updated_at = ?
+		                      end_year = ?, rebalance = ?, contribution = ?,
+		                      contribution_frequency = ?, benchmark = ?, updated_at = ?
 		WHERE id = ?`,
 		p.Name, string(allocations), p.InitialAmount, p.StartYear, p.EndYear,
-		p.Rebalance, p.Benchmark, nowRFC3339(), id); err != nil {
+		p.Rebalance, p.Contribution, p.ContributionFrequency, p.Benchmark, nowRFC3339(), id); err != nil {
 		return Portfolio{}, err
 	}
 	return s.Portfolio(id)
@@ -186,6 +201,13 @@ func normalizePortfolio(p *Portfolio) {
 	}
 	if p.InitialAmount == 0 {
 		p.InitialAmount = 10000
+	}
+	// The two contribution fields only mean anything together, so half of a
+	// pair reads as neither: an amount with no cadence has no moment to be paid
+	// at, and a cadence with no amount pays nothing at it.
+	if p.ContributionFrequency == "" || p.ContributionFrequency == RebalanceNone || p.Contribution <= 0 {
+		p.Contribution = 0
+		p.ContributionFrequency = RebalanceNone
 	}
 	if p.Name == "" && len(p.Holdings) > 0 {
 		// A portfolio with no name is named after what it holds, which is
@@ -237,10 +259,14 @@ func ValidatePortfolio(p Portfolio) error {
 	if p.InitialAmount <= 0 {
 		return invalidPortfolio("the initial amount has to be above 0")
 	}
-	switch p.Rebalance {
-	case RebalanceNone, RebalanceAnnually, RebalanceQuarterly, RebalanceMonthly:
-	default:
+	if !ValidCadence(p.Rebalance) {
 		return invalidPortfolio(`rebalance has to be "none", "annually", "quarterly" or "monthly"`)
+	}
+	if !ValidCadence(p.ContributionFrequency) {
+		return invalidPortfolio(`contributionFrequency has to be "none", "annually", "quarterly" or "monthly"`)
+	}
+	if p.Contribution < 0 {
+		return invalidPortfolio("a contribution cannot be negative")
 	}
 	// Years are sanity-checked, not range-checked against reality: a start
 	// before any market data exists is handled by the backtest reporting the
@@ -284,7 +310,8 @@ func scanPortfolio(row scannable) (Portfolio, error) {
 		createdAt, updatedAt string
 	)
 	if err := row.Scan(&p.ID, &p.Name, &allocations, &p.InitialAmount, &p.StartYear, &p.EndYear,
-		&p.Rebalance, &p.Benchmark, &p.Position, &createdAt, &updatedAt); err != nil {
+		&p.Rebalance, &p.Contribution, &p.ContributionFrequency, &p.Benchmark,
+		&p.Position, &createdAt, &updatedAt); err != nil {
 		return Portfolio{}, err
 	}
 	// A row whose JSON won't parse is a database somebody edited by hand. It

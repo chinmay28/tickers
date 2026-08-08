@@ -150,6 +150,49 @@ func TestPortfolioAcceptsThirdsThatDoNotQuiteMakeAHundred(t *testing.T) {
 	}
 }
 
+func TestContributionAndItsCadenceOnlyMeanAnythingTogether(t *testing.T) {
+	st := newTestStore(t)
+
+	// An amount with no cadence has no moment to be paid at, and a cadence with
+	// no amount pays nothing at it. Half a pair reads as neither, rather than as
+	// a portfolio that quietly contributes on some schedule nobody picked.
+	amountOnly, err := st.CreatePortfolio(NewPortfolio{
+		Name: "Amount only", Holdings: sixtyForty(), Contribution: 500,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if amountOnly.Contribution != 0 || amountOnly.ContributionFrequency != RebalanceNone {
+		t.Errorf("stored %v %q, want it neutralised", amountOnly.Contribution, amountOnly.ContributionFrequency)
+	}
+
+	cadenceOnly, err := st.CreatePortfolio(NewPortfolio{
+		Name: "Cadence only", Holdings: sixtyForty(), ContributionFrequency: RebalanceMonthly,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if cadenceOnly.Contribution != 0 || cadenceOnly.ContributionFrequency != RebalanceNone {
+		t.Errorf("stored %v %q, want it neutralised", cadenceOnly.Contribution, cadenceOnly.ContributionFrequency)
+	}
+
+	both, err := st.CreatePortfolio(NewPortfolio{
+		Name: "Both", Holdings: sixtyForty(), Contribution: 500, ContributionFrequency: RebalanceMonthly,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if both.Contribution != 500 || both.ContributionFrequency != RebalanceMonthly {
+		t.Errorf("stored %v %q, want them kept", both.Contribution, both.ContributionFrequency)
+	}
+
+	if _, err := st.CreatePortfolio(NewPortfolio{
+		Name: "Odd", Holdings: sixtyForty(), Contribution: 500, ContributionFrequency: "fortnightly",
+	}); err == nil {
+		t.Error("a cadence nothing implements was accepted")
+	}
+}
+
 func TestUpdatePortfolioValidatesTheWholeAllocationNotThePatch(t *testing.T) {
 	st := newTestStore(t)
 	p, err := st.CreatePortfolio(NewPortfolio{Name: "Two fund", Holdings: sixtyForty()})

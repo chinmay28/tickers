@@ -30,6 +30,31 @@ func monthlyBars(first string, closes ...float64) []quotes.Bar {
 	return bars
 }
 
+// payingHistorian is a fakeHistorian that also distributes, so the yield has
+// something to divide.
+type payingHistorian struct {
+	*fakeHistorian
+	payouts map[string][]quotes.Distribution
+}
+
+func (p payingHistorian) Dividends(_ context.Context, symbol string, _ time.Time) ([]quotes.Distribution, error) {
+	return p.payouts[symbol], nil
+}
+
+// dividendEngine wires an engine to a source with both prices and payouts.
+// Bars carry Raw explicitly: a yield divides a payout by the price of its own
+// day, and the adjusted close is not that price.
+func dividendEngine(t *testing.T, bars map[string][]quotes.Bar,
+	payouts map[string][]quotes.Distribution) *Engine {
+	t.Helper()
+	historian := newFakeHistorian(map[string]float64{})
+	for symbol, series := range bars {
+		historian.bars[symbol] = series
+	}
+	eng, _ := newTestEngine(t, payingHistorian{fakeHistorian: historian, payouts: payouts})
+	return eng
+}
+
 // backtestEngine wires an engine to a historian holding the given series.
 func backtestEngine(t *testing.T, bars map[string][]quotes.Bar) (*Engine, *fakeHistorian) {
 	t.Helper()
@@ -55,6 +80,16 @@ func spec(holdings ...store.Holding) BacktestSpec {
 
 func half() []store.Holding {
 	return []store.Holding{{Symbol: "UP", Weight: 50}, {Symbol: "DOWN", Weight: 50}}
+}
+
+// lump is a run with no money paid in, where the index is just the balances
+// rebased to 1 — which is what the simulation produces for a lump sum.
+func lump(balances []float64) result {
+	index := make([]float64, len(balances))
+	for i, v := range balances {
+		index[i] = v / balances[0]
+	}
+	return result{balances: balances, index: index}
 }
 
 func TestBacktestCompoundsEachHoldingByItsOwnReturn(t *testing.T) {
@@ -438,6 +473,402 @@ func TestBacktestPricesABenchmarkThatIsAlsoAHoldingOnce(t *testing.T) {
 	}
 }
 
+func TestBacktestPaysInOnTheContributionCadence(t *testing.T) {
+	// A flat holding, so every penny of the final balance is a deposit and the
+	// arithmetic has nowhere to hide.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"FLAT": monthlyBars("2020-01", 100, 100, 100, 100),
+	})
+
+	paid := spec(store.Holding{Symbol: "FLAT", Weight: 100})
+	paid.Contribution = 100
+	paid.ContributionFrequency = store.RebalanceMonthly
+
+	result, err := eng.Backtest(context.Background(), paid)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	// Three monthly returns, so three contributions — including the one in the
+	// final month, which earns nothing but is money that genuinely went in.
+	if math.Abs(result.Contributed-300) > 1e-9 {
+		t.Errorf("contributed %.2f, want 300", result.Contributed)
+	}
+	if math.Abs(result.Portfolio.End-1300) > 1e-9 {
+		t.Errorf("final balance = %.2f, want 1300 (1000 in, 300 paid in, nothing earned)",
+			result.Portfolio.End)
+	}
+}
+
+func TestBacktestDoesNotCountContributionsAsReturn(t *testing.T) {
+	// The bug this whole index/balance split exists to prevent: a flat holding
+	// paid into every month triples the balance while returning nothing.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"FLAT": monthlyBars("2020-01", 100, 100, 100, 100),
+	})
+
+	paid := spec(store.Holding{Symbol: "FLAT", Weight: 100})
+	paid.Contribution = 1000
+	paid.ContributionFrequency = store.RebalanceMonthly
+
+	result, err := eng.Backtest(context.Background(), paid)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if math.Abs(result.Portfolio.TotalPercent) > 1e-9 {
+		t.Errorf("total return = %.4f%%, want 0 — nothing was earned; the balance grew because "+
+			"money was paid in", result.Portfolio.TotalPercent)
+	}
+	for _, year := range result.Annual {
+		if math.Abs(year.Percent) > 1e-9 {
+			t.Errorf("%d returned %.4f%%, want 0 for the same reason", year.Year, year.Percent)
+		}
+	}
+	// And the balance still shows the money, because that is the other question.
+	if math.Abs(result.Portfolio.End-4000) > 1e-9 {
+		t.Errorf("final balance = %.2f, want 4000", result.Portfolio.End)
+	}
+}
+
+func TestBacktestDrawdownIgnoresMoneyPaidInDuringTheFall(t *testing.T) {
+	// Halving, with contributions large enough to keep the balance climbing
+	// throughout. A drawdown measured on the balance would report none at all.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"SINKING": monthlyBars("2020-01", 100, 50, 25),
+	})
+
+	paid := spec(store.Holding{Symbol: "SINKING", Weight: 100})
+	paid.Contribution = 5000
+	paid.ContributionFrequency = store.RebalanceMonthly
+
+	result, err := eng.Backtest(context.Background(), paid)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	if result.Portfolio.MaxDrawdown < 70 {
+		t.Errorf("deepest fall = %.2f%%, want about 75 — the holding lost three quarters, and a "+
+			"drawdown row papered over by deposits is worse than none",
+			result.Portfolio.MaxDrawdown)
+	}
+	if result.Portfolio.End <= result.Initial {
+		t.Errorf("balance = %.2f; the deposits did raise it, and that has to stay true",
+			result.Portfolio.End)
+	}
+}
+
+func TestBacktestLumpSumIsUnchangedByTheContributionMachinery(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if result.Contributed != 0 {
+		t.Errorf("contributed %v with no contribution configured", result.Contributed)
+	}
+	// With no cash flows the index and the balances are proportional, so the
+	// return is still the one the balance shows.
+	if math.Abs(result.Portfolio.TotalPercent-1) > 1e-9 {
+		t.Errorf("total return = %.4f%%, want 1 (1000 → 1010)", result.Portfolio.TotalPercent)
+	}
+}
+
+func TestRiskFreeRatesCarryTheLastKnownRateForward(t *testing.T) {
+	// A rate is a level that stays in force until it changes, which is exactly
+	// what a price series may never do across a gap.
+	months := []string{"2020-01", "2020-02", "2020-03", "2020-04"}
+	bill := map[string]float64{"2019-11": 1.8, "2020-03": 0.12}
+
+	rates := riskFreeRates(months, bill)
+	if rates == nil {
+		t.Fatal("no rates from a bill that predates the run")
+	}
+	// November's 1.8% annual is 0.15% a month, and it is still in force in
+	// January and February because nothing replaced it.
+	if math.Abs(rates[0]-0.0015) > 1e-12 || math.Abs(rates[1]-0.0015) > 1e-12 {
+		t.Errorf("rates = %v; November's rate has to hold until March replaces it", rates[:2])
+	}
+	if math.Abs(rates[2]-0.12/100/12) > 1e-12 || math.Abs(rates[3]-0.12/100/12) > 1e-12 {
+		t.Errorf("rates = %v; March's cut has to apply from March on", rates[2:])
+	}
+}
+
+func TestRiskFreeRatesRefuseToRunBackwards(t *testing.T) {
+	// The bill starts after the portfolio does. Carrying a rate backwards would
+	// be inventing monetary policy, so there is no Sharpe rather than a wrong one.
+	months := []string{"2020-01", "2020-02"}
+	if rates := riskFreeRates(months, map[string]float64{"2021-06": 0.5}); rates != nil {
+		t.Errorf("rates = %v, want none", rates)
+	}
+	if rates := riskFreeRates(months, nil); rates != nil {
+		t.Errorf("rates = %v for an empty bill, want none", rates)
+	}
+}
+
+func TestSharpeAndSortinoSeparateUpsideFromDownsideSwings(t *testing.T) {
+	// A series that only ever rises, in uneven steps. It has real volatility
+	// and no downside at all — the case the two ratios exist to tell apart.
+	index := []float64{1}
+	for _, step := range []float64{0.01, 0.05, 0.01, 0.06, 0.02, 0.04} {
+		index = append(index, index[len(index)-1]*(1+step))
+	}
+	rates := make([]float64, len(index)) // 0% risk-free, so excess is the return
+
+	sharpe, sortino := riskAdjusted(index, rates)
+	if sharpe == nil {
+		t.Fatal("no Sharpe for a series with plenty of variance")
+	}
+	if sortino != nil {
+		t.Errorf("Sortino = %v; a series that never fell has no downside deviation to divide by, "+
+			"and inventing one would flatter it", *sortino)
+	}
+	if *sharpe <= 0 {
+		t.Errorf("Sharpe = %v for a series that only rose", *sharpe)
+	}
+}
+
+func TestSharpeFallsWhenTheRiskFreeRateRises(t *testing.T) {
+	index := []float64{1, 1.02, 1.01, 1.04, 1.03, 1.06}
+	flat := make([]float64, len(index))
+	generous := make([]float64, len(index))
+	for i := range generous {
+		generous[i] = 0.01 // 1% a month risk-free, which most of these months miss
+	}
+
+	cheap, _ := riskAdjusted(index, flat)
+	dear, _ := riskAdjusted(index, generous)
+	if cheap == nil || dear == nil {
+		t.Fatal("a Sharpe went missing")
+	}
+	if *dear >= *cheap {
+		t.Errorf("Sharpe was %v against 0%% and %v against 1%% a month; beating a higher bar by "+
+			"less has to score worse", *cheap, *dear)
+	}
+}
+
+func TestRiskAdjustedNeedsARateForEveryMonth(t *testing.T) {
+	index := []float64{1, 1.02, 1.01, 1.04}
+	// A short or missing rate series leaves both unset. Silently treating the
+	// gap as 0% would publish a different statistic under the same name.
+	if sharpe, sortino := riskAdjusted(index, nil); sharpe != nil || sortino != nil {
+		t.Errorf("got %v/%v with no risk-free series, want neither", sharpe, sortino)
+	}
+	if sharpe, _ := riskAdjusted(index, []float64{0, 0}); sharpe != nil {
+		t.Errorf("got %v from a rate series shorter than the run", *sharpe)
+	}
+}
+
+func TestBacktestReportsWhichRateItMeasuredAgainst(t *testing.T) {
+	long := make([]float64, 40)
+	for i := range long {
+		long[i] = 100 * math.Pow(1.005, float64(i))
+	}
+	bill := make([]float64, 40)
+	for i := range bill {
+		bill[i] = 2.0 // 2% annualised, quoted as a percentage rather than a price
+	}
+
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"ONE":          monthlyBars("2019-01", long...),
+		riskFreeSymbol: monthlyBars("2019-01", bill...),
+	})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "ONE", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if result.RiskFree != riskFreeSymbol {
+		t.Errorf("riskFree = %q, want %q — a ratio whose benchmark rate is unnamed is unreadable",
+			result.RiskFree, riskFreeSymbol)
+	}
+	if result.Portfolio.Sharpe == nil {
+		t.Error("no Sharpe despite a full risk-free series")
+	}
+}
+
+func TestBacktestSurvivesAQuoteSourceWithNoTreasuryBill(t *testing.T) {
+	// The bill is not a leg: a source that has never heard of it must cost the
+	// two ratios and nothing else.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("a missing risk-free series failed the whole backtest: %v", err)
+	}
+	if result.RiskFree != "" {
+		t.Errorf("riskFree = %q, want empty", result.RiskFree)
+	}
+	if result.Portfolio.Sharpe != nil || result.Portfolio.Sortino != nil {
+		t.Error("ratios were computed with no risk-free rate to compute them against")
+	}
+	if math.Abs(result.Portfolio.End-1010) > 1e-9 {
+		t.Errorf("final balance = %.4f, want the usual 1010", result.Portfolio.End)
+	}
+}
+
+// flatWithRaw is thirteen months at a steady 100, with the unadjusted price
+// held at 50 — deliberately different, so a yield computed off the wrong
+// series is off by exactly a factor of two and cannot pass by accident.
+func flatWithRaw(first string, months int, adjusted, raw float64) []quotes.Bar {
+	bars := monthlyBars(first, make([]float64, months)...)
+	for i := range bars {
+		bars[i].Close = adjusted
+		bars[i].Raw = raw
+	}
+	return bars
+}
+
+func TestYieldDividesPayoutsByThePriceOfTheirOwnDay(t *testing.T) {
+	// December 2019 through December 2020, so 2020 is a whole year. 1,000 buys
+	// 20 shares at the unadjusted 50; four payouts of 0.25 is 1 per share, so
+	// 20 of income on 1,000 — a yield of 2%.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{"INCOME": flatWithRaw("2019-12", 13, 100, 50)},
+		map[string][]quotes.Distribution{"INCOME": {
+			{Date: "2020-03-15", Amount: 0.25},
+			{Date: "2020-06-15", Amount: 0.25},
+			{Date: "2020-09-15", Amount: 0.25},
+			{Date: "2020-12-15", Amount: 0.25},
+		}})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "INCOME", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if len(result.Annual) != 1 || result.Annual[0].Yield == nil {
+		t.Fatalf("no yield for 2020: %+v", result.Annual)
+	}
+	// 4% would be the answer from the adjusted close, which is the mistake this
+	// pins: a payout is per share in the money of its own day.
+	if got := *result.Annual[0].Yield; math.Abs(got-2) > 1e-9 {
+		t.Errorf("2020 yielded %.4f%%, want 2 — 20 shares at 50 collecting 1 each on 1,000", got)
+	}
+}
+
+func TestYieldCountsOnlyWhatWasPaidWhileHeld(t *testing.T) {
+	// The run starts in June, so the March payout went to whoever held it then.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{"INCOME": flatWithRaw("2020-06", 7, 100, 50)},
+		map[string][]quotes.Distribution{"INCOME": {
+			{Date: "2020-03-15", Amount: 10},
+			{Date: "2020-09-15", Amount: 1},
+		}})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "INCOME", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if len(result.Annual) != 1 || result.Annual[0].Yield == nil {
+		t.Fatalf("no yield row: %+v", result.Annual)
+	}
+	// 20 shares collecting 1 each on 1,000 is 2%. Counting March too would be
+	// 22% — income the portfolio never received.
+	if got := *result.Annual[0].Yield; math.Abs(got-2) > 1e-9 {
+		t.Errorf("yield = %.4f%%, want 2; a payout made before the run began is not its income", got)
+	}
+	if !result.Annual[0].Partial {
+		t.Error("a run starting in June has a part 2020, and the yield row has to say so")
+	}
+	// A part year is not the portfolio's yield, for the same reason it is not
+	// its best year: it collected a fraction of the distributions.
+	if result.Portfolio.Yield != nil {
+		t.Errorf("summary yield = %v from part years only, want none", *result.Portfolio.Yield)
+	}
+}
+
+func TestYieldIsUnknownRatherThanZeroWithoutADividendFeed(t *testing.T) {
+	// A source with prices and no payouts. Reporting 0% would say every income
+	// fund on earth yields nothing.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	for _, year := range result.Annual {
+		if year.Yield != nil {
+			t.Errorf("%d reported a yield of %v from a source that has no dividend data",
+				year.Year, *year.Yield)
+		}
+	}
+	if result.Portfolio.Yield != nil {
+		t.Errorf("summary yield = %v, want none", *result.Portfolio.Yield)
+	}
+}
+
+func TestYieldOfSomethingThatPaysNothingIsZeroNotUnknown(t *testing.T) {
+	// The other half of the distinction: the feed works, this fund just doesn't
+	// distribute. That is a 0 worth printing.
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{"GROWTH": flatWithRaw("2019-12", 13, 100, 100)},
+		map[string][]quotes.Distribution{"GROWTH": nil})
+
+	result, err := eng.Backtest(context.Background(), spec(store.Holding{Symbol: "GROWTH", Weight: 100}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+	if len(result.Annual) != 1 || result.Annual[0].Yield == nil {
+		t.Fatalf("yield went missing for a working feed: %+v", result.Annual)
+	}
+	if *result.Annual[0].Yield != 0 {
+		t.Errorf("yield = %v, want 0", *result.Annual[0].Yield)
+	}
+}
+
+func TestYieldWeighsHoldingsByWhatIsActuallyHeld(t *testing.T) {
+	// Two halves, one of which triples over the first year while the other is
+	// flat. By 2021 the payer is three quarters of the portfolio, and its
+	// income counts for what it grew into rather than for its target weight.
+	payer := monthlyBars("2019-12", 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100,
+		100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100)
+	for i := range payer {
+		payer[i].Raw = payer[i].Close
+	}
+	// Triple it across 2020 so the weights have genuinely drifted by 2021.
+	for i := 1; i <= 12; i++ {
+		payer[i].Close = 100 + float64(i)*200/12
+		payer[i].Raw = payer[i].Close
+	}
+	for i := 13; i < len(payer); i++ {
+		payer[i].Close, payer[i].Raw = 300, 300
+	}
+
+	eng := dividendEngine(t,
+		map[string][]quotes.Bar{
+			"PAYER": payer,
+			"FLAT":  flatWithRaw("2019-12", 25, 100, 100),
+		},
+		map[string][]quotes.Distribution{"PAYER": {{Date: "2021-06-15", Amount: 30}}})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings:      []store.Holding{{Symbol: "PAYER", Weight: 50}, {Symbol: "FLAT", Weight: 50}},
+		InitialAmount: 1000,
+		Rebalance:     store.RebalanceNone,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	var yield2021 *float64
+	for _, year := range result.Annual {
+		if year.Year == 2021 {
+			yield2021 = year.Yield
+		}
+	}
+	if yield2021 == nil {
+		t.Fatalf("no 2021 yield: %+v", result.Annual)
+	}
+	// Entering 2021 the payer is worth 1,500 of a 2,000 portfolio: 5 shares at
+	// 300, collecting 30 each is 150, which is 7.5% of 2,000. Using the 50%
+	// target weight instead would give 5%.
+	if math.Abs(*yield2021-7.5) > 1e-6 {
+		t.Errorf("2021 yielded %.4f%%, want 7.5 — income follows what was held, not what was aimed at",
+			*yield2021)
+	}
+}
+
 func TestMaxDrawdownIsThePeakToTroughFallAndWhenItWasRecovered(t *testing.T) {
 	months := []string{"2020-01", "2020-02", "2020-03", "2020-04", "2020-05", "2020-06"}
 	balances := []float64{100, 120, 60, 90, 130, 110}
@@ -471,7 +902,8 @@ func TestMeasureWithholdsAnAnnualRateFromARunTooShortToHaveOne(t *testing.T) {
 	months := []string{"2020-01", "2020-02", "2020-03"}
 	balances := []float64{1000, 1100, 1200}
 
-	m := measure("Portfolio", months, balances, annualReturns(months, balances))
+	run := lump(balances)
+	m := measure("Portfolio", months, run, annualReturns(months, run.index), nil)
 
 	if m.CAGR != nil {
 		t.Errorf("CAGR = %v for a two-month run; annualising that is a forecast wearing a "+
@@ -491,7 +923,8 @@ func TestMeasureCompoundsTheAnnualRateOverTheRunsRealLength(t *testing.T) {
 		balances[i] = 1000 * math.Pow(2, float64(i)/24)
 	}
 
-	m := measure("Portfolio", months, balances, annualReturns(months, balances))
+	run := lump(balances)
+	m := measure("Portfolio", months, run, annualReturns(months, run.index), nil)
 
 	if m.CAGR == nil {
 		t.Fatal("no CAGR for a two-year run")

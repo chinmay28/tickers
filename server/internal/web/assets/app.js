@@ -769,7 +769,11 @@ function portfolioRow(p) {
             .join('')}
         </div>
         <p class="field__hint" style="margin:0.55rem 0 0">
-          ${esc(amount(p.initialAmount))} · ${esc(period)} ·
+          ${esc(amount(p.initialAmount))}${
+            p.contribution > 0
+              ? ` + ${esc(amount(p.contribution))} ${esc(p.contributionFrequency)}`
+              : ''
+          } · ${esc(period)} ·
           ${esc(REBALANCE_LABELS[p.rebalance] ?? p.rebalance)}
         </p>
       </div>
@@ -805,14 +809,15 @@ function renderBacktest(data) {
   }
 
   const b = run.data;
-  const gain = b.portfolio.end - b.initial;
 
   return `
     <div class="page-head page-head--sub">
       <div>
         <h2>${esc(name)}</h2>
         <p>
-          ${esc(amount(b.initial))} from ${esc(monthName(b.start))} to
+          ${esc(amount(b.initial))}${
+            b.contributed ? ` plus ${esc(amount(b.contributed))} paid in` : ''
+          } from ${esc(monthName(b.start))} to
           ${esc(monthName(b.end))} — ${b.months} ${b.months === 1 ? 'month' : 'months'}${
             b.rebalances ? `, rebalanced ${b.rebalances} ${b.rebalances === 1 ? 'time' : 'times'}` : ''
           }.
@@ -820,7 +825,9 @@ function renderBacktest(data) {
       </div>
       <div class="perf-head__delta">
         <div class="perf-head__value">${esc(amount(b.portfolio.end))}</div>
-        <div class="perf-change perf-change--${direction(gain)}">${esc(percent(b.portfolio.totalPercent))}</div>
+        <div class="perf-change perf-change--${direction(b.portfolio.totalPercent)}">${esc(
+          percent(b.portfolio.totalPercent),
+        )}</div>
       </div>
     </div>
 
@@ -846,8 +853,29 @@ function renderBacktest(data) {
     <p class="field__hint perf-note">
       Monthly closes, adjusted for splits and dividends where the source reports
       them — which is what makes this a total return rather than a price chart.
-      Nothing here models fees, taxes, spreads or contributions, so it is what
-      the allocation did, not what an account holding it would have.
+      ${
+        b.contributed
+          ? `Returns are <strong>time-weighted</strong>: money paid in raises the
+             balance without having earned anything, so it is excluded from every
+             percentage here and shown as its own row instead.`
+          : ''
+      }
+      ${
+        b.riskFree
+          ? `Sharpe and Sortino are measured against <code>${esc(b.riskFree)}</code>,
+             the 13-week Treasury bill.`
+          : ''
+      }
+      ${
+        b.portfolio.yieldPercent === null || b.portfolio.yieldPercent === undefined
+          ? ''
+          : `Yields are the cash actually distributed, divided by what the
+             portfolio was worth when the year opened — income the growth
+             figures already contain, shown separately because it is a
+             different question.`
+      }
+      Nothing here models fees, taxes or spreads, so it is what the allocation
+      did, not what an account holding it would have.
     </p>
   `;
 }
@@ -944,6 +972,16 @@ function metricsTable(b) {
       <thead><tr><th></th>${columns.map((m) => `<th>${esc(m.label)}</th>`).join('')}</tr></thead>
       <tbody>
         <tr><th>Final balance</th>${cells((m) => esc(amount(m.end)))}</tr>
+        ${
+          // Only when there were any. Without this row a reader looking at a
+          // balance four times the initial amount and a total return of 40%
+          // has no way to see where the rest came from.
+          b.contributed
+            ? `<tr><th>Of which paid in</th>${cells(
+                () => `${esc(amount(b.initial))} + ${esc(amount(b.contributed))}`,
+              )}</tr>`
+            : ''
+        }
         <tr><th>Total return</th>${cells(
           (m) =>
             `<span class="perf-change perf-change--${direction(m.totalPercent)}">${esc(
@@ -962,11 +1000,42 @@ function metricsTable(b) {
             ? '—'
             : `${esc(m.stdevPercent.toFixed(2))}%`,
         )}</tr>
+        ${
+          // Only with a risk-free series behind them. A Sharpe quietly computed
+          // against 0% is a different statistic under the same name, so the
+          // rows are absent rather than wrong.
+          b.riskFree
+            ? `<tr><th title="Return above the risk-free rate per unit of volatility">Sharpe</th>${cells(
+                (m) => ratioCell(m.sharpe),
+              )}</tr>
+               <tr><th title="The same, counting only downside volatility">Sortino</th>${cells(
+                 (m) => ratioCell(m.sortino),
+               )}</tr>`
+            : ''
+        }
+        ${
+          columns.some((m) => m.yieldPercent !== null && m.yieldPercent !== undefined)
+            ? `<tr><th title="Mean income yield across the full calendar years">Income yield</th>${cells(
+                (m) => esc(yieldCell(m.yieldPercent)),
+              )}</tr>`
+            : ''
+        }
         <tr><th>Best year</th>${cells((m) => year(m.bestYear))}</tr>
         <tr><th>Worst year</th>${cells((m) => year(m.worstYear))}</tr>
         <tr><th>Deepest fall</th>${cells((m) => drawdownCell(m))}</tr>
       </tbody>
     </table></div>`;
+}
+
+/** Sharpe and Sortino. Two decimals, unsigned — they are ratios, not moves, and
+ *  a "+1.24" would read as a gain of something. A missing one is a series with
+ *  nothing to divide by (a run that never fell has no downside deviation), not
+ *  a zero. */
+function ratioCell(value) {
+  if (value === null || value === undefined) {
+    return '<span class="field__hint">n/a</span>';
+  }
+  return `<span class="perf-change perf-change--${direction(value)}">${esc(value.toFixed(2))}</span>`;
 }
 
 /** The drawdown cell says how far down, from when to when, and — the part that
@@ -985,10 +1054,14 @@ function annualTable(b) {
   const rows = b.annual ?? [];
   if (!rows.length) return '<div class="empty">The run is too short to cover a calendar year.</div>';
   const hasBenchmark = Boolean(b.benchmark);
+  // The column appears only when the quote source can actually answer. A
+  // yield of "—" on every row would read as "this paid nothing".
+  const hasYield = rows.some((r) => r.yieldPercent !== null && r.yieldPercent !== undefined);
 
   return `<div class="table-scroll"><table class="table">
       <thead><tr>
         <th>Year</th><th>Portfolio</th>${hasBenchmark ? `<th>${esc(b.benchmark.label)}</th>` : ''}
+        ${hasYield ? '<th title="Income as a percentage of the value the year opened at">Yield</th>' : ''}
       </tr></thead>
       <tbody>${rows
         .map(
@@ -1009,10 +1082,18 @@ function annualTable(b) {
                   )}">${esc(percent(r.benchmark))}</span></td>`
                 : ''
             }
+            ${hasYield ? `<td class="field__hint">${esc(yieldCell(r.yieldPercent))}</td>` : ''}
           </tr>`,
         )
         .join('')}</tbody>
     </table></div>`;
+}
+
+/** A yield is never signed — income is not a move — and a missing one is a year
+ *  the source couldn't price, not a year that paid nothing. */
+function yieldCell(value) {
+  if (value === null || value === undefined) return '—';
+  return `${value.toFixed(2)}%`;
 }
 
 /* --------------------------- Publishing ----------------------------
@@ -1871,6 +1952,8 @@ function openPortfolio(portfolio) {
   form.elements.name.value = portfolio?.name ?? '';
   form.elements.initialAmount.value = portfolio?.initialAmount ?? 10000;
   form.elements.rebalance.value = portfolio?.rebalance ?? 'annually';
+  form.elements.contribution.value = portfolio?.contribution || '';
+  form.elements.contributionFrequency.value = portfolio?.contributionFrequency ?? 'none';
   form.elements.startYear.value = portfolio?.startYear || '';
   form.elements.endYear.value = portfolio?.endYear || '';
   form.elements.benchmark.value = portfolio?.benchmark ?? '';
@@ -1945,6 +2028,8 @@ function portfolioPayload() {
     startYear: Number(values.startYear) || 0,
     endYear: Number(values.endYear) || 0,
     rebalance: values.rebalance || 'annually',
+    contribution: Number(values.contribution) || 0,
+    contributionFrequency: values.contributionFrequency || 'none',
     benchmark: (values.benchmark || '').trim().toUpperCase(),
   };
 }
