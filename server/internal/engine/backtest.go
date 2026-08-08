@@ -700,22 +700,56 @@ func startNotes(start string, holdings []HoldingResult, benchmark, benchmarkFirs
 			h.Symbol, h.ReplacedUntil, h.Replacement))
 	}
 
-	late := []string{}
+	// Which holding reaches back the least, *after* any substitution — a
+	// stand-in changes the answer, and the answer people want is about the
+	// series that was actually used. It is named whether or not it is currently
+	// binding: when it is, it explains the start date; when something else
+	// moved the run later, it still says how far back this portfolio could go,
+	// which is the number you need to decide what to replace next.
+	shortest := ""
 	for _, h := range holdings {
-		// A holding with a stand-in has already been explained, and its start
-		// is the stand-in's rather than its own.
-		if h.FirstMonth == start && h.ReplacedUntil == "" {
-			late = append(late, h.Symbol)
+		if h.FirstMonth > shortest {
+			shortest = h.FirstMonth
 		}
 	}
-	if benchmark != "" && benchmarkFirst == start {
-		late = append(late, benchmark)
+	if shortest != "" {
+		limiting := []string{}
+		for _, h := range holdings {
+			if h.FirstMonth == shortest {
+				limiting = append(limiting, describeHolding(h))
+			}
+		}
+		who := strings.Join(limiting, " and ")
+		if shortest == start {
+			notes = append(notes, fmt.Sprintf(
+				"%s has no history before %s, which is where the run begins.", who, shortest))
+		} else {
+			// Deliberately no "because": a later start can come from the start
+			// year, the end year or the benchmark, and guessing which would be
+			// wrong about a third of the time.
+			notes = append(notes, fmt.Sprintf(
+				"%s reaches back the least of the holdings, to %s.", who, shortest))
+		}
 	}
-	if len(late) > 0 {
-		notes = append(notes, fmt.Sprintf("%s has no history before %s, which is where the run begins.",
-			strings.Join(late, " and "), start))
+
+	// The benchmark is not a holding, so it gets its own sentence — and only
+	// when it is the thing setting the start, which the line above would
+	// otherwise be blamed for.
+	if benchmark != "" && benchmarkFirst == start && shortest != start {
+		notes = append(notes, fmt.Sprintf(
+			"The benchmark %s has no history before %s, which is where the run begins.", benchmark, start))
 	}
 	return notes
+}
+
+// describeHolding names the series a holding was actually priced from, which is
+// its stand-in for the stretch a stand-in covers. "QQQ (standing in for HOOD)"
+// rather than "HOOD", because HOOD is not what has no history before 1999.
+func describeHolding(h HoldingResult) string {
+	if h.ReplacedUntil == "" {
+		return h.Symbol
+	}
+	return fmt.Sprintf("%s (standing in for %s)", h.Replacement, h.Symbol)
 }
 
 // weights renormalises the allocation to sum to exactly 1 and rejects what

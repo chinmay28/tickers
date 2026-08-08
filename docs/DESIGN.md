@@ -467,6 +467,16 @@ Three rules around it, each preventing a specific dishonesty:
   stand-in and the month the real data takes over. Most of a run can be a proxy.
   The holding rows also carry the configured replacement whether or not it was
   used, so "it wasn't needed" is distinguishable from "none was set".
+- **The shortest history is reported after the substitution, not before.** A
+  stand-in changes which series is actually holding the run back, and the answer
+  people want is about the one that was used: "QQQ (standing in for HOOD) has no
+  history before 1999-03" rather than a note about HOOD, which is not what has
+  no history before 1999. It is named even when something else set the start —
+  a start year, or the benchmark — because it is how far back the portfolio
+  could go, and that is what decides whether another replacement is worth
+  adding. The sentence carries no "because" in that case: a later start can come
+  from the start year, the end year or the benchmark, and guessing which would
+  be wrong about a third of the time.
 - **The benchmark is never substituted.** It answers "what would the plain index
   have done"; a proxy stitched into it is not a benchmark. That is why the
   effective series live in their own map rather than replacing the raw ones.
