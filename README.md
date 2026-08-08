@@ -260,7 +260,10 @@ reinvested — this is a total return, not a price chart.
   Each period is measured back from the run's *last* month — on a run told to
   end in 2019, "year to date" means 2019's, from the December before — and one
   the run doesn't cover end to end is offered but not measured, for the reason
-  the performance sheet withholds a window.
+  the performance sheet withholds a window. **The benchmark is one of the
+  rows**, marked and weightless: sorted by return it lands in the ranking, so
+  "which of these beat the index" is a line across the table rather than
+  arithmetic over every row.
 - The run starts at the latest month all of its holdings have data for, whatever
   start year you ask for, and **names the holding that reaches back the least**
   — after any replacement, since a stand-in changes the answer. A four-fund

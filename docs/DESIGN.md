@@ -467,6 +467,15 @@ The decisions worth naming:
   weight is carried alongside so a rout in something held at 2% reads as one.
   The portfolio's own return over the same period is carried too, because
   without it "underperformer" only means "lowest of these".
+- **The benchmark is a row in that table, not just a line above it.** It is the
+  one ticker the reader chose, and the question they chose it to ask is "did
+  these beat it" — which sorted by return is answered by where the line falls
+  rather than by subtracting one number from eight. Its weight is null rather
+  than zero, because zero would rank it below every holding as though it were a
+  position somebody had closed; a weight sort therefore pins it under the
+  holdings in both directions instead of letting it leap to the top when the
+  sort reverses. Nothing new is fetched or computed for it — the number is the
+  same one the caption used, measured over the same months by the same code.
 - **Every holding is sent, and the table sorts rather than choosing.** A leading
   and trailing three is an answer to a question only the reader can ask — a 2%
   position that halved is a footnote where a 40% one that halved is the story —

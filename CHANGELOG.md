@@ -30,7 +30,10 @@ initial amount, a rebalancing cadence, and an optional benchmark.
   what the whole portfolio did — "underperformer" otherwise only means "lowest
   of these". Toggle between year to date, one, three, five and ten years, and
   the whole run; periods the run doesn't cover are offered but not measured,
-  rather than measured from the wrong place.
+  rather than measured from the wrong place. The **benchmark sits in the table
+  as a row** — marked, and weightless because nothing is held in it — so sorting
+  by return drops it into the ranking and the holdings that beat it are the ones
+  above it.
 - The run starts where its **latest holding** does, whatever start year is
   asked for, and names the holding responsible. Rebalancing lands on calendar
   boundaries, and *never* lets the weights drift on purpose.
