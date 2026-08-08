@@ -752,6 +752,29 @@ The alternative — diffing, or keeping every form out of the re-rendered subtre
 — is more machinery than a page of drafts, and it would have to be got right in
 every view rather than once in `render`.
 
+### Symbol marks
+
+Wherever a symbol is listed — a watchlist row, a holding's chip, a search
+result — it is preceded by a small rounded square. The obvious implementation
+is a logo, and it is the wrong one here: it means a request per row to a third
+party from a box on someone's home network, telling that party what is being
+tracked, and one static binary has nowhere to cache the answers. So the mark is
+derived from the symbol instead — two initials over a hue hashed out of it —
+which is free, offline, and identical on every device.
+
+The hue is drawn from a curated list rather than the whole wheel. Four hues are
+already spoken for within a row's width: `--up` and `--down` on the same card,
+`--composite` and `--portfolio` on its outline. A green mark beside a red
+change, or a violet one on a row that isn't computed, is a colour contradicting
+the one next to it. The hash is FNV-1a, not `hash * 31 + c`, whose low bits
+barely move across four-letter symbols and would hand most of a watchlist the
+same two hues.
+
+Composites and portfolios get a glyph in their own hue instead of initials. A
+composite's symbol is its formula and a portfolio's is its name; neither was
+issued by anyone, and initials would say otherwise. The obelus and the pie
+repeat what the row's outline already claims rather than making a new claim.
+
 ### The add dialog
 
 The one form that *is* kept out of the re-rendered subtree is the add form,

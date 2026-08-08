@@ -35,6 +35,15 @@
      formula, and it is the one row whose value is money. Its own hue keeps
      "this is a basket" from reading as "this is a ratio". */
   --portfolio: #38bdf8;
+  /* A symbol's mark is one hue at three lightnesses — the key it is mixed
+     from, the ink of its initials, and how much of the key tints the fill.
+     They are tokens because the light theme needs every one of them moved,
+     and because a mark is drawn from a hue the stylesheet never sees: app.js
+     hashes it out of the symbol and sets --mark-h on the element. */
+  --mark-sat: 60%;
+  --mark-key-l: 58%;
+  --mark-ink-l: 76%;
+  --mark-fill: 18%;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 24px 60px rgb(0 0 0 / 0.45);
   --radius: 14px;
@@ -72,6 +81,10 @@
     --warn: #b26b00;
     --composite: #6d43c8;
     --portfolio: #0369a1;
+    --mark-sat: 55%;
+    --mark-key-l: 46%;
+    --mark-ink-l: 32%;
+    --mark-fill: 13%;
     --shadow: 0 1px 2px rgb(15 30 40 / 0.08);
     --shadow-lg: 0 24px 60px rgb(15 30 40 / 0.16);
   }
@@ -371,6 +384,61 @@ svg {
 }
 
 /* ------------------------------------------------------------------ *
+ * Symbol marks — the square in front of a symbol, wherever one is listed
+ * ------------------------------------------------------------------ */
+/* Tinted rather than filled. A dozen saturated squares down the left of the
+   watchlist would out-shout the prices, which are what anyone is here to read;
+   at this weight the mark is something you find a row by rather than something
+   you look at. The shape is the card's radius scaled down, so it reads as part
+   of the same set of surfaces. */
+.mark {
+  --mark-h: 214;
+  --mark-key: hsl(var(--mark-h) var(--mark-sat) var(--mark-key-l));
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The heads it sits in align on the baseline, and a box has no baseline
+     worth aligning to — left to itself it hangs below the symbol. */
+  align-self: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 0.52rem;
+  border: 1px solid color-mix(in srgb, var(--mark-key) 34%, transparent);
+  background: color-mix(in srgb, var(--mark-key) var(--mark-fill), var(--surface));
+  color: hsl(var(--mark-h) var(--mark-sat) var(--mark-ink-l));
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+.mark svg {
+  width: 66%;
+  height: 66%;
+}
+/* The computed kinds borrow the hue their row is already outlined in, so the
+   mark repeats the outline's claim rather than making a second one. */
+.mark--composite {
+  --mark-key: var(--composite);
+  color: var(--composite);
+}
+.mark--portfolio {
+  --mark-key: var(--portfolio);
+  color: var(--portfolio);
+}
+/* Inside a chip the mark is a hue with a hint of letters in it — a holding's
+   symbol is already spelled out an inch to the right. */
+.chip .mark {
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 0.38rem;
+  margin-left: -0.15rem;
+  font-size: 0.5rem;
+  letter-spacing: 0;
+}
+
+/* ------------------------------------------------------------------ *
  * Cards & page furniture
  * ------------------------------------------------------------------ */
 .page-head {
@@ -625,6 +693,10 @@ svg {
   justify-content: space-between;
   gap: 0.6rem;
   width: 100%;
+  /* A button will not go narrower than its own content unless told to, and
+     the name beside the symbol is a nowrap string of arbitrary length: without
+     this the row grows past the dialog instead of ellipsising the name. */
+  min-width: 0;
   padding: 0.45rem 0.6rem;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -636,12 +708,19 @@ svg {
   border-color: var(--primary);
 }
 .match__symbol {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   font-family: var(--mono);
   font-weight: 650;
 }
 .match__meta {
   color: var(--muted);
   font-size: 0.78rem;
+  /* A flex item won't shrink below its text's width without this, so the
+     ellipsis below never gets the chance to fire — the name pushes the row
+     wider than the dialog instead. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

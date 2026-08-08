@@ -105,6 +105,70 @@ function symbolList(raw) {
     .filter(Boolean);
 }
 
+/* ------------------------------------------------------------------ *
+ * Symbol marks
+ * ------------------------------------------------------------------ */
+
+/** The hues a fetched symbol's mark can take.
+ *
+ *  A curated list rather than the whole wheel, because four hues here already
+ *  mean something: --up and --down are on the same card as the mark, and
+ *  --composite and --portfolio say what kind of row this is. A green AAPL
+ *  beside a red change, or a violet GLD that isn't a composite, would each be
+ *  a colour arguing with the one next to it. What's left is warm, blue and
+ *  magenta, far enough apart to tell two rows apart at a glance. */
+const MARK_HUES = [26, 48, 96, 214, 300, 330];
+
+/** Pick a symbol's hue. The hash is only here so the mark comes out the same
+ *  on every device and after every reload without a byte being stored or
+ *  fetched — but it is FNV-1a rather than the obvious `hash * 31 + c`, whose
+ *  low bits barely move across four-letter symbols and hand most of a
+ *  watchlist the same two hues. */
+function markHue(symbol) {
+  let hash = 2166136261;
+  for (const ch of String(symbol)) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return MARK_HUES[(hash >>> 0) % MARK_HUES.length];
+}
+
+/** The two letters a mark carries. Punctuation is dropped so `BTC-USD` reads
+ *  as BT rather than B-. */
+function markInitials(symbol) {
+  const text = String(symbol ?? '');
+  return (text.replace(/[^A-Za-z0-9]/g, '').slice(0, 2) || text.slice(0, 2)).toUpperCase();
+}
+
+/** The square that sits in front of a symbol wherever one is listed.
+ *
+ *  There is no logo to show: fetching one would mean a request per row to a
+ *  third party from a box on someone's home network, and the one static binary
+ *  has nowhere to cache the results. So the mark is derived from the symbol
+ *  itself — initials over a hashed hue — which costs nothing and is stable.
+ *
+ *  The two computed kinds take a glyph in their own hue instead. Neither is a
+ *  symbol anyone issued, and initials over `VTI/GLD` would claim otherwise;
+ *  the obelus and the pie say "priced from a formula" and "priced from a
+ *  basket", which is the same thing the row's outline says. */
+function symbolMark(symbol, kind = '') {
+  if (kind === 'composite') {
+    return `<span class="mark mark--composite" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+        <path d="M5 12h14"/><circle cx="12" cy="7" r="1.1" fill="currentColor"/><circle cx="12" cy="17" r="1.1" fill="currentColor"/>
+      </svg></span>`;
+  }
+  if (kind === 'portfolio') {
+    return `<span class="mark mark--portfolio" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M14 3.2A9 9 0 0 1 20.8 10H14z"/>
+      </svg></span>`;
+  }
+  return `<span class="mark" style="--mark-h:${markHue(symbol)}" aria-hidden="true">${esc(
+    markInitials(symbol),
+  )}</span>`;
+}
+
 function clock(iso) {
   if (!iso) return '—';
   const date = new Date(iso);
@@ -517,7 +581,7 @@ function renderMatches() {
   return m.items
     .map(
       (m2) => `<button class="match" type="button" data-symbol="${esc(m2.symbol)}">
-          <span class="match__symbol">${esc(m2.symbol)}</span>
+          <span class="match__symbol">${symbolMark(m2.symbol)}${esc(m2.symbol)}</span>
           <span class="match__meta">${esc(m2.name)} · ${esc(m2.exchange)} · ${esc(m2.type)}</span>
         </button>`,
     )
@@ -568,6 +632,7 @@ function renderQuote(t) {
       </button>
 
       <div class="quote__head">
+        ${symbolMark(t.symbol, portfolio ? 'portfolio' : composite ? 'composite' : '')}
         <span class="quote__symbol">${esc(t.symbol)}</span>
         ${
           portfolio
@@ -787,7 +852,7 @@ function portfolioRow(p) {
           ${(p.holdings ?? [])
             .map(
               (h) =>
-                `<span class="chip chip--weight"><strong>${esc(h.symbol)}</strong> ${esc(
+                `<span class="chip chip--weight">${symbolMark(h.symbol)}<strong>${esc(h.symbol)}</strong> ${esc(
                   Number(h.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
                 )}%${
                   h.replacement

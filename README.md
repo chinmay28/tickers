@@ -136,7 +136,10 @@ Override defaults with env vars (`PORT`, `HOST`, `TICKERS_INSTALL`,
 bottom-right corner is how you add one; it opens a sheet that takes a symbol or
 a formula, with **Search by name** for when you don't know the ticker. Each row
 shows the last price, the move from the previous close, a sparkline from stored
-history, and when it was last read. Pinned symbols carry a `pinned` chip and
+history, and when it was last read. Each carries a small **mark** — the symbol's
+initials over a colour derived from the symbol itself, drawn locally rather than
+fetched from anywhere, so rows are told apart at a glance without a logo service
+knowing what you track. Pinned symbols carry a `pinned` chip and
 always sort above the rest;
 **Pin**/**Unpin** on a row edits the same list the Settings page shows as text.
 Drag to reorder on a desktop, or use ↑↓ on a phone; **the watchlist order is

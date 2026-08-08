@@ -121,6 +121,26 @@ The page's description is now just "Backtest an allocation", and the paragraph
 of caveats under every result has gone — the notes that matter are attached to
 the runs they apply to.
 
+### A mark for every symbol
+
+Every symbol now carries a small rounded square in front of it — on the
+watchlist, in a portfolio's holdings and in the search results — so a row is
+found by shape and colour before the text is read.
+
+- **Drawn, not fetched.** The mark is the symbol's own initials over a hue
+  hashed out of it: stable across devices and reloads, and no request to a logo
+  service from a box on someone's home network.
+- The hue comes from a **short curated list**, not the whole wheel. Green, red,
+  violet and sky already mean something a row's width away — up, down,
+  composite, portfolio — and a mark is not allowed to be mistaken for any of
+  them.
+- **The two computed kinds take a glyph instead**, in the hue their row is
+  already outlined in: an obelus for a composite, a pie for a portfolio.
+  Initials over `VTI/GLD` would claim it is a symbol somebody issued.
+
+A search result whose name was long enough could already push its row past the
+edge of the add dialog; it now ellipsises as it was meant to.
+
 ### Contributions, risk-adjusted returns and yield
 
 - **Pay into a portfolio** on a cadence. Money paid in is not growth, so every
