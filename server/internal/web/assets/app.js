@@ -1049,7 +1049,7 @@ function renderBacktest(data) {
       <div class="card__body">${annualTable(b)}</div>
     </div>
 
-    ${leadersCard(b)}
+    ${holdingsCard(b)}
   `;
 }
 
@@ -1296,131 +1296,177 @@ function annualTable(b) {
     </table></div>`;
 }
 
-/* ----------------------- Leaders and laggards -----------------------
+/* ----------------------- Holding performance ------------------------
  *
  * Under the calendar years because it answers the question they raise. "2022:
- * −14%" is the portfolio; what a reader wants next is which holding did that to
- * it, and which one kept it from being worse. */
+ * −14%" is the portfolio; what a reader wants next is which holdings did that
+ * to it, and which ones kept it from being worse.
+ *
+ * Every holding is listed rather than a leading and trailing few. Which rows
+ * matter is the reader's question and not one this can answer for them — a 2%
+ * position that halved is a footnote where a 40% one that halved is the whole
+ * story — so the table sorts instead of choosing. */
 
 /** Short forms for the period chips. The server's own labels are sentences —
  *  right for the caption underneath, too wide for six chips on a phone. */
-const LEADER_CHIPS = { ytd: 'YTD', '1y': '1Y', '3y': '3Y', '5y': '5Y', '10y': '10Y', run: 'All' };
+const PERIOD_CHIPS = { ytd: 'YTD', '1y': '1Y', '3y': '3Y', '5y': '5Y', '10y': '10Y', run: 'All' };
 
-/** Below this many holdings the two columns stop being two columns: a top three
- *  and a bottom three of five holdings share one, and printing the same row on
- *  both sides of the card is worse than not splitting it. Six is where the split
- *  is exactly the whole allocation, which is the case it was designed for. */
-const LEADER_SPLIT = 6;
+/** The sortable columns: how each one compares, and which way round it starts.
+ *
+ *  Returns and weights open at their largest, because "what did best" and
+ *  "what am I most exposed to" are the questions being asked of them; a symbol
+ *  opens at A, where nobody is looking for a ranking at all.
+ *
+ *  The gap to the portfolio rides along inside the return rather than as a
+ *  fourth column: it is the return minus a constant within a period, so a
+ *  column of it would sort into the order the return already gives and, at
+ *  390px, would sit behind a horizontal scroll — which is where the number a
+ *  reader came for must never be. */
+const HOLDING_SORTS = {
+  symbol: { dir: 'asc', compare: (a, b) => a.symbol.localeCompare(b.symbol) },
+  weight: { dir: 'desc', compare: (a, b) => a.weight - b.weight },
+  percent: { dir: 'desc', compare: (a, b) => a.percent - b.percent },
+};
+
+const HOLDING_SORT_DEFAULT = { key: 'percent', dir: 'desc' };
 
 /** Which period is showing. The stored choice wins where the run can answer it —
  *  someone comparing two portfolios over three years should not have to pick 3Y
  *  twice — falling back to the year to date, and then to the whole run for a
  *  portfolio too young to have one. */
-function leaderKey(boards) {
-  const chosen = boards.find((l) => l.key === state.backtest?.leaders);
+function periodKey(periods) {
+  const chosen = periods.find((p) => p.key === state.backtest?.period);
   if (chosen?.available) return chosen.key;
-  const ytd = boards.find((l) => l.key === 'ytd' && l.available);
-  return (ytd ?? boards.findLast((l) => l.available))?.key ?? '';
+  const ytd = periods.find((p) => p.key === 'ytd' && p.available);
+  return (ytd ?? periods.findLast((p) => p.available))?.key ?? '';
 }
 
-function leadersCard(b) {
-  const boards = b.leaders ?? [];
-  // One holding has no leaders: the ranking would be the portfolio's own return
-  // written out a second time.
-  if ((b.holdings ?? []).length < 2 || !boards.some((l) => l.available)) return '';
+function holdingsCard(b) {
+  const periods = b.performance ?? [];
+  if (!periods.some((p) => p.available)) return '';
 
-  const board = boards.find((l) => l.key === leaderKey(boards));
+  const period = periods.find((p) => p.key === periodKey(periods));
   return `
     <div class="card">
       <div class="card__head">
         <div class="card__heading">
-          <h3 class="card__title">Leaders and laggards</h3>
+          <h3 class="card__title">Holding performance</h3>
           <span class="card__meta">what each holding did on its own</span>
         </div>
       </div>
       <div class="card__body">
         <div class="presets">
-          ${boards
+          ${periods
             .map(
-              (l) => `<button class="btn btn--sm ${
-                l.key === board.key ? 'btn--outline btn--active' : 'btn--ghost'
-              }" type="button" data-action="leaders" data-key="${esc(l.key)}"${
-                l.available ? '' : ` disabled title="${esc(l.label)} — the run doesn’t reach back that far"`
-              }>${esc(LEADER_CHIPS[l.key] ?? l.label)}</button>`,
+              (p) => `<button class="btn btn--sm ${
+                p.key === period.key ? 'btn--outline btn--active' : 'btn--ghost'
+              }" type="button" data-action="period" data-key="${esc(p.key)}"${
+                p.available ? '' : ` disabled title="${esc(p.label)} — the run doesn’t reach back that far"`
+              }>${esc(PERIOD_CHIPS[p.key] ?? p.label)}</button>`,
             )
             .join('')}
         </div>
-        ${leaderBoard(b, board)}
+        ${holdingsTable(b, period)}
       </div>
     </div>`;
 }
 
-function leaderBoard(b, board) {
-  const returns = board.returns ?? [];
-  if (!returns.length) return '<div class="empty">Nothing to rank over this period.</div>';
-
-  const split = returns.length >= LEADER_SPLIT;
-  const best = split ? returns.slice(0, 3) : returns;
-  const worst = split ? returns.slice(-3) : [];
-  const hidden = split ? returns.length - best.length - worst.length : 0;
+function holdingsTable(b, period) {
+  const rows = sortedHoldings(period.returns ?? []);
+  if (!rows.length) return '<div class="empty">Nothing to measure over this period.</div>';
 
   return `
-    <p class="field__hint leaders__against">
-      ${esc(monthName(board.from))} → ${esc(monthName(board.to))} · portfolio
-      <span class="perf-change perf-change--${direction(board.portfolio)}">${esc(
-        percent(board.portfolio),
+    <p class="field__hint holdings__when">
+      ${esc(monthName(period.from))} → ${esc(monthName(period.to))} · portfolio
+      <span class="perf-change perf-change--${direction(period.portfolio)}">${esc(
+        percent(period.portfolio),
       )}</span>${
-        board.benchmark === null || board.benchmark === undefined
+        period.benchmark === null || period.benchmark === undefined
           ? ''
           : ` · ${esc(b.benchmark?.label ?? 'benchmark')}
-              <span class="perf-change perf-change--${direction(board.benchmark)}">${esc(
-                percent(board.benchmark),
+              <span class="perf-change perf-change--${direction(period.benchmark)}">${esc(
+                percent(period.benchmark),
               )}</span>`
       }
     </p>
-    <div class="leaders">
-      ${leaderColumn(b, split ? 'Top performers' : 'Best to worst', best)}
-      ${split ? leaderColumn(b, 'Underperformers', worst) : ''}
-    </div>
-    ${
-      hidden
-        ? `<p class="field__hint leaders__hidden">${hidden} ${
-            hidden === 1 ? 'holding' : 'holdings'
-          } in the middle not shown.</p>`
-        : ''
-    }`;
+    <div class="table-scroll"><table class="table">
+      <thead><tr>
+        ${sortHeader('symbol', 'Holding')}
+        ${sortHeader('weight', 'Weight')}
+        ${sortHeader('percent', 'Return')}
+      </tr></thead>
+      <tbody>${rows.map((r) => holdingRow(b, r, period)).join('')}</tbody>
+    </table></div>`;
 }
 
-function leaderColumn(b, title, rows) {
+/** The rows in the order the reader asked for, leaving the server's own — best
+ *  first — as the default. Sorting a copy: the payload is rendered again on
+ *  every redraw, and a sort in place would make the arrow the only thing that
+ *  could still say which order it is in. */
+function sortedHoldings(returns) {
+  const { key, dir } = holdingSort();
+  const compare = HOLDING_SORTS[key].compare;
+  return [...returns].sort((a, b) => (dir === 'asc' ? compare(a, b) : compare(b, a)));
+}
+
+function holdingSort() {
+  const sort = state.backtest?.sort;
+  return sort && HOLDING_SORTS[sort.key] ? sort : HOLDING_SORT_DEFAULT;
+}
+
+/** A sortable column head. The button is what makes the column reachable from a
+ *  keyboard; aria-sort on the cell is what says, out loud, which way the table
+ *  is currently ordered. The arrow is drawn only on the column doing the
+ *  sorting — one on every head is three claims and one truth. */
+function sortHeader(key, label) {
+  const sort = holdingSort();
+  const active = sort.key === key;
   return `
-    <div class="leaders__col">
-      <h4 class="leaders__title">${esc(title)}</h4>
-      ${rows.map((r) => leaderRow(b, r)).join('')}
-    </div>`;
+    <th${active ? ` aria-sort="${sort.dir === 'asc' ? 'ascending' : 'descending'}"` : ''}>
+      <button class="th-sort${active ? ' th-sort--active' : ''}" type="button"
+              data-action="holdings-sort" data-key="${esc(key)}">${esc(label)}<span
+              class="th-sort__arrow" aria-hidden="true">${active ? (sort.dir === 'asc' ? '▲' : '▼') : ''}</span></button>
+    </th>`;
 }
 
-function leaderRow(b, r) {
-  // Named from the allocation rather than carried on the row: the payload says
-  // *that* the move is partly a stand-in's, and the holding already says whose.
+function holdingRow(b, r, period) {
+  // The stand-in is named from the allocation rather than carried on the row:
+  // the payload says *that* part of the move is a proxy's, and the holding
+  // already says whose.
   const stand = (b.holdings ?? []).find((h) => h.symbol === r.symbol)?.replacement;
+  // The gap to the portfolio, which is what turns a return into a verdict. It
+  // rides under the return rather than in a column of its own: within a period
+  // it is the return minus a constant, so a column would sort into the order
+  // the return already gives and, at 390px, would sit behind a horizontal
+  // scroll. The unit is points, not percent — it is a difference of two
+  // percentages — and what it is a gap *to* is the caption directly above.
+  const gap = r.percent - period.portfolio;
+  const against = `${Math.abs(gap).toFixed(2)} percentage points ${
+    gap < 0 ? 'behind' : 'ahead of'
+  } the portfolio over this period`;
   return `
-    <div class="leader">
-      ${symbolMark(r.symbol)}
-      <div class="leader__name">
-        <strong>${esc(r.symbol)}</strong>
-        ${
-          r.proxied && stand
-            ? `<span class="chip__stand" title="Part of this move is ${esc(
-                stand,
-              )}’s — it stood in before ${esc(r.symbol)}’s own history begins">← ${esc(stand)}</span>`
-            : ''
-        }
-        <span class="field__hint">${esc(
-          Number(r.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
-        )}%</span>
-      </div>
-      <span class="perf-change perf-change--${direction(r.percent)}">${esc(percent(r.percent))}</span>
-    </div>`;
+    <tr>
+      <th>
+        <span class="holding__name">
+          ${symbolMark(r.symbol)}
+          <span>${esc(r.symbol)}</span>
+          ${
+            r.proxied && stand
+              ? `<span class="chip__stand" title="Part of this move is ${esc(
+                  stand,
+                )}’s — it stood in before ${esc(r.symbol)}’s own history begins">← ${esc(stand)}</span>`
+              : ''
+          }
+        </span>
+      </th>
+      <td class="field__hint">${esc(
+        Number(r.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      )}%</td>
+      <td class="holding__return">
+        <span class="perf-change perf-change--${direction(r.percent)}">${esc(percent(r.percent))}</span>
+        <span class="perf-when" title="${esc(against)}">${esc(signed(gap))} pts</span>
+      </td>
+    </tr>`;
 }
 
 /** A yield is never signed — income is not a move — and a missing one is a year
@@ -1950,12 +1996,27 @@ $('#view').addEventListener('click', (event) => {
       clearDraft(`ticker:${id}`);
       render({ force: true });
       break;
-    // The leaderboard's period. Purely a redraw: every period came back with
-    // the run, so switching costs nothing and cannot fail.
-    case 'leaders':
-      state.backtest = { ...state.backtest, leaders: button.dataset.key };
+    // The holding table's period and its sort. Both are purely a redraw: every
+    // period came back with the run, so neither costs a request or can fail.
+    case 'period':
+      state.backtest = { ...state.backtest, period: button.dataset.key };
       render({ force: true });
       break;
+    case 'holdings-sort': {
+      const key = button.dataset.key;
+      const sort = holdingSort();
+      // The same column again reverses it; a new one opens the way that column
+      // is worth reading — biggest return, biggest weight, but symbols from A.
+      state.backtest = {
+        ...state.backtest,
+        sort:
+          sort.key === key
+            ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
+            : { key, dir: HOLDING_SORTS[key].dir },
+      };
+      render({ force: true });
+      break;
+    }
     case 'toggle': {
       const t = state.data.tickers.find((x) => x.id === id);
       act(() => patch(`/tickers/${id}`, { enabled: !t.enabled }));
@@ -2566,11 +2627,11 @@ $('#portfolio-cancel').addEventListener('click', () => portfolioDialog.close());
  *  allocation rather than trusting a copy of it. */
 async function runBacktest(id, spec) {
   if (route() !== 'portfolios') location.hash = '#/portfolios';
-  // The leaderboard's period survives a run, for the same reason the
-  // performance sheet's range survives an opening: comparing two portfolios
-  // over three years should not mean picking 3Y twice.
-  const leaders = state.backtest?.leaders;
-  state.backtest = { id, leaders, status: 'loading' };
+  // The period and the sort survive a run, for the same reason the performance
+  // sheet's range survives an opening: comparing two portfolios over three
+  // years should not mean picking 3Y twice.
+  const { period, sort } = state.backtest ?? {};
+  state.backtest = { id, period, sort, status: 'loading' };
   render({ force: true });
 
   try {

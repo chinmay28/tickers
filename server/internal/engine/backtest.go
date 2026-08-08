@@ -68,10 +68,10 @@ type Backtest struct {
 	Benchmark *Metrics `json:"benchmark"`
 	// Annual is one row per calendar year the run touched, oldest first.
 	Annual []AnnualReturn `json:"annual"`
-	// Leaders ranks the holdings by what each of them returned, once per
-	// period. The calendar years say what the portfolio did; this says which
-	// parts of it did it.
-	Leaders []Leaderboard `json:"leaders"`
+	// Performance is what each holding did on its own, once per period. The
+	// calendar years say what the portfolio did; this says which parts of it
+	// did it.
+	Performance []PeriodPerformance `json:"performance"`
 	// Holdings echoes the allocation with the weight actually used and the
 	// first month each symbol has data for — the numbers behind Notes.
 	Holdings []HoldingResult `json:"holdings"`
@@ -126,14 +126,14 @@ type HoldingResult struct {
 	ReplacedUntil string `json:"replacedUntil"`
 }
 
-// Leaderboard is every holding's move over one period, best first.
+// PeriodPerformance is every holding's move over one period, best first.
 //
-// The whole ranking is sent rather than the three at each end, because the
-// interesting split depends on how many holdings there are and that is a
-// presentation question: with five holdings a "top three" and a "bottom three"
-// are the same five rows printed twice, and the client is where that is worth
-// knowing.
-type Leaderboard struct {
+// Every holding is sent, not the leaders and laggards at the ends of the
+// ranking. Which rows matter is the reader's question — a 2% position that
+// halved is a footnote and a 40% one that did is the whole story — so the table
+// is sortable and nothing is dropped on their behalf. Best first is only the
+// order it arrives in.
+type PeriodPerformance struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
 	// Available is false when the run does not cover the whole period — see
@@ -154,7 +154,7 @@ type Leaderboard struct {
 	Returns   []HoldingReturn `json:"returns"`
 }
 
-// HoldingReturn is one holding's move over a leaderboard's period.
+// HoldingReturn is one holding's move over a period.
 type HoldingReturn struct {
 	Symbol string `json:"symbol"`
 	// Weight is the target weight, carried so a reader can tell a rout in
@@ -496,9 +496,9 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		}
 	}
 
-	// After the benchmark, because a leaderboard reports its move over the same
-	// period it ranks the holdings across.
-	out.Leaders = leaderboards(months, holdings, effective, run, bench)
+	// After the benchmark, because each period reports its move alongside the
+	// holdings it is the yardstick for.
+	out.Performance = holdingPerformance(months, holdings, effective, run, bench)
 
 	for i, m := range months {
 		out.Points[i] = Balance{Month: m, Value: run.balances[i]}
@@ -1103,14 +1103,14 @@ func annualReturns(months []string, index []float64) []AnnualReturn {
 	return out
 }
 
-// leaderWindows are the periods the holdings are ranked over, in the order the
-// card shows them.
+// holdingWindows are the periods each holding is measured over, in the order
+// the card shows them.
 //
 // Every one is measured back from the run's *last* month rather than from
 // today, because a run told to end in 2019 has no opinion about the year we are
 // actually in — on it, "year to date" means 2019's, which is the only year its
 // numbers are about.
-var leaderWindows = []struct {
+var holdingWindows = []struct {
 	key, label string
 	// start is the month the period is measured from. Nil means the run's own
 	// first month, which is the one period every run can always answer.
@@ -1163,7 +1163,7 @@ func baselineIndex(months []string, start string) (int, bool) {
 	return i - 1, true
 }
 
-// leaderboards ranks the holdings by their own returns over each period.
+// holdingPerformance measures every holding over every period.
 //
 // The moves come off the same spliced monthly series the simulation was run
 // from, so a holding's number here is the one that produced the curve — not a
@@ -1171,14 +1171,14 @@ func baselineIndex(months []string, start string) (int, bool) {
 // deliberately not applied: this answers "what did each of these do", and a
 // contribution-to-the-portfolio figure would rank a flat 40% holding above a
 // 30% gain held at 2%, which is a different and much less useful question.
-func leaderboards(months []string, holdings []HoldingResult,
-	series map[string]map[string]float64, run result, bench *result) []Leaderboard {
+func holdingPerformance(months []string, holdings []HoldingResult,
+	series map[string]map[string]float64, run result, bench *result) []PeriodPerformance {
 	last := len(months) - 1
 	end := months[last]
 
-	out := make([]Leaderboard, 0, len(leaderWindows))
-	for _, w := range leaderWindows {
-		board := Leaderboard{Key: w.key, Label: w.label, To: end}
+	out := make([]PeriodPerformance, 0, len(holdingWindows))
+	for _, w := range holdingWindows {
+		period := PeriodPerformance{Key: w.key, Label: w.label, To: end}
 		start := months[0]
 		if w.start != nil {
 			start = w.start(end)
@@ -1189,36 +1189,36 @@ func leaderboards(months []string, holdings []HoldingResult,
 		// which is not the same as one nobody can measure — both are simply
 		// nothing to report.
 		if !ok || from == last || run.index[from] <= 0 {
-			out = append(out, board)
+			out = append(out, period)
 			continue
 		}
 
-		board.Available = true
-		board.From = months[from]
-		board.Portfolio = (run.index[last]/run.index[from] - 1) * 100
+		period.Available = true
+		period.From = months[from]
+		period.Portfolio = (run.index[last]/run.index[from] - 1) * 100
 		if bench != nil && bench.index[from] > 0 {
 			pct := (bench.index[last]/bench.index[from] - 1) * 100
-			board.Benchmark = &pct
+			period.Benchmark = &pct
 		}
 
 		for _, h := range holdings {
-			base := series[h.Symbol][board.From]
+			base := series[h.Symbol][period.From]
 			if base <= 0 {
 				continue
 			}
-			board.Returns = append(board.Returns, HoldingReturn{
+			period.Returns = append(period.Returns, HoldingReturn{
 				Symbol:  h.Symbol,
 				Weight:  h.Weight,
 				Percent: (series[h.Symbol][end]/base - 1) * 100,
-				Proxied: h.ReplacedUntil != "" && board.From < h.ReplacedUntil,
+				Proxied: h.ReplacedUntil != "" && period.From < h.ReplacedUntil,
 			})
 		}
 		// Stable, so holdings that returned the same thing stay in the order
 		// they were written in rather than swapping places between periods.
-		sort.SliceStable(board.Returns, func(i, j int) bool {
-			return board.Returns[i].Percent > board.Returns[j].Percent
+		sort.SliceStable(period.Returns, func(i, j int) bool {
+			return period.Returns[i].Percent > period.Returns[j].Percent
 		})
-		out = append(out, board)
+		out = append(out, period)
 	}
 	return out
 }

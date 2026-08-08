@@ -252,15 +252,15 @@ reinvested — this is a total return, not a price chart.
   payout feed; without one the column is absent rather than zero.
 - **Every calendar year**, with the first and last labelled *part year* where
   the run doesn't cover them end to end.
-- **Leaders and laggards** under those years: what each holding returned on its
-  own, best first, over the year to date, one, three, five or ten years, or the
-  whole run. Each period is measured back from the run's *last* month — on a run
-  told to end in 2019, "year to date" means 2019's — and against the
-  portfolio's own return over the same period, and the benchmark's. A period the
-  run doesn't cover end to end is shown but not measured, for the reason the
-  performance sheet withholds one. Six holdings or more are split into a top and
-  a bottom three; fewer are listed straight through, since a top three and a
-  bottom three of five is the same rows printed twice.
+- **Holding performance** under those years: every holding, what it returned on
+  its own, and how far that was ahead of or behind the portfolio — over the year
+  to date, one, three, five or ten years, or the whole run. Sortable by symbol,
+  weight or return, because which rows matter is your question: a 2% position
+  that halved is a footnote where a 40% one that halved is the whole story.
+  Each period is measured back from the run's *last* month — on a run told to
+  end in 2019, "year to date" means 2019's, from the December before — and one
+  the run doesn't cover end to end is offered but not measured, for the reason
+  the performance sheet withholds a window.
 - The run starts at the latest month all of its holdings have data for, whatever
   start year you ask for, and **names the holding that reaches back the least**
   — after any replacement, since a stand-in changes the answer. A four-fund
