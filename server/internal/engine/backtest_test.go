@@ -1104,3 +1104,161 @@ func TestMeasureCompoundsTheAnnualRateOverTheRunsRealLength(t *testing.T) {
 		t.Errorf("CAGR = %.6f%%, want %.6f%% — doubling over two years", *m.CAGR, want)
 	}
 }
+
+// board is one period's leaderboard by key, so a test can name the period it
+// means instead of counting entries.
+func board(result Backtest, key string) Leaderboard {
+	for _, l := range result.Leaders {
+		if l.Key == key {
+			return l
+		}
+	}
+	return Leaderboard{}
+}
+
+func TestLeaderboardRanksHoldingsByTheirOwnReturn(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	run := board(result, "run")
+	if !run.Available || len(run.Returns) != 2 {
+		t.Fatalf("whole-run leaderboard = %+v, want both holdings ranked", run)
+	}
+	if run.Returns[0].Symbol != "UP" || run.Returns[1].Symbol != "DOWN" {
+		t.Errorf("ranked %s then %s, want the best first", run.Returns[0].Symbol, run.Returns[1].Symbol)
+	}
+	// Each holding's own move over the run: 100 → 121 and 100 → 81.
+	if math.Abs(run.Returns[0].Percent-21) > 1e-9 || math.Abs(run.Returns[1].Percent+19) > 1e-9 {
+		t.Errorf("returns = %+v, want +21%% and −19%% — each holding's own series, not its share of the portfolio",
+			run.Returns)
+	}
+	// 50/50 between them, so the portfolio made 1%. Without it "underperformer"
+	// only means "lowest of these", which a reader can already see.
+	if math.Abs(run.Portfolio-1) > 1e-9 {
+		t.Errorf("portfolio return = %.4f%%, want 1 — the bar the holdings are read against", run.Portfolio)
+	}
+	if run.From != "2020-01" || run.To != "2020-03" {
+		t.Errorf("measured %s → %s, want the whole run 2020-01 → 2020-03", run.From, run.To)
+	}
+}
+
+func TestLeaderboardMeasuresTheYearFromTheDecemberBefore(t *testing.T) {
+	// December 2019 through March 2020. The year to date is the move since
+	// December's close, not since January's — the same baseline the calendar
+	// years use, or the two cards would report different years.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"ONE": monthlyBars("2019-12", 100, 110, 120, 130),
+		"TWO": monthlyBars("2019-12", 100, 100, 100, 90),
+	})
+
+	result, err := eng.Backtest(context.Background(),
+		spec(store.Holding{Symbol: "ONE", Weight: 50}, store.Holding{Symbol: "TWO", Weight: 50}))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	ytd := board(result, "ytd")
+	if !ytd.Available || ytd.From != "2019-12" {
+		t.Fatalf("year to date = %+v, want it measured from 2019-12", ytd)
+	}
+	if math.Abs(ytd.Returns[0].Percent-30) > 1e-9 || math.Abs(ytd.Returns[1].Percent+10) > 1e-9 {
+		t.Errorf("year to date = %+v, want +30%% and −10%%", ytd.Returns)
+	}
+}
+
+func TestLeaderboardWithholdsAPeriodTheRunDoesNotCover(t *testing.T) {
+	// Three months of history. Every close it has falls inside the last year,
+	// and that is not the same as having a year to report.
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	result, err := eng.Backtest(context.Background(), spec(half()...))
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	for _, key := range []string{"1y", "3y", "5y", "10y"} {
+		if l := board(result, key); l.Available || len(l.Returns) > 0 {
+			t.Errorf("%s came back available for a three-month run: %+v", key, l)
+		}
+	}
+	// Withheld, not dropped: the card has to be able to say the period exists
+	// and the run is too young for it.
+	if len(result.Leaders) != len(leaderWindows) {
+		t.Errorf("got %d leaderboards, want one per period — an unavailable period is still information",
+			len(result.Leaders))
+	}
+	// A run that started in January has no full year to date either, which is
+	// exactly why the whole run is always one of the periods.
+	if !board(result, "run").Available {
+		t.Error("the whole run is unavailable; no period is left for a young portfolio to be read over")
+	}
+}
+
+func TestLeaderboardSaysWhenAMoveIsPartlyItsStandIns(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{
+		"OLD": monthlyBars("2020-01", 100, 110, 121, 133),
+		"NEW": {
+			{Date: "2020-03-28", Close: 50},
+			{Date: "2020-04-28", Close: 55},
+		},
+		"SELF": monthlyBars("2020-01", 100, 100, 100, 100),
+	})
+
+	result, err := eng.Backtest(context.Background(), BacktestSpec{
+		Holdings: []store.Holding{
+			{Symbol: "NEW", Weight: 50, Replacement: "OLD"},
+			{Symbol: "SELF", Weight: 50},
+		},
+		InitialAmount: 1000,
+	})
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	run := board(result, "run")
+	for _, r := range run.Returns {
+		if r.Symbol == "NEW" && !r.Proxied {
+			t.Errorf("NEW = %+v, want it marked proxied — the run starts two months before NEW listed", r)
+		}
+		if r.Symbol == "SELF" && r.Proxied {
+			t.Errorf("SELF = %+v is marked proxied; nothing stood in for it", r)
+		}
+	}
+}
+
+func TestLeaderboardCarriesTheBenchmarksMoveOverTheSamePeriod(t *testing.T) {
+	eng, _ := backtestEngine(t, map[string][]quotes.Bar{"UP": rising, "DOWN": falling})
+
+	withBenchmark := spec(half()...)
+	withBenchmark.Benchmark = "UP"
+	result, err := eng.Backtest(context.Background(), withBenchmark)
+	if err != nil {
+		t.Fatalf("backtest: %v", err)
+	}
+
+	run := board(result, "run")
+	if run.Benchmark == nil {
+		t.Fatal("no benchmark move on a leaderboard for a run that has a benchmark")
+	}
+	if math.Abs(*run.Benchmark-21) > 1e-9 {
+		t.Errorf("benchmark returned %.4f%% over the run, want 21", *run.Benchmark)
+	}
+}
+
+func TestBaselineIndexTakesTheLastMonthOnOrBeforeThePeriodsStart(t *testing.T) {
+	months := []string{"2020-01", "2020-03", "2020-04"}
+
+	if i, ok := baselineIndex(months, "2020-02"); !ok || i != 0 {
+		t.Errorf("baseline for 2020-02 = %d/%v, want January — the last month at or before it", i, ok)
+	}
+	if i, ok := baselineIndex(months, "2020-03"); !ok || i != 1 {
+		t.Errorf("baseline for 2020-03 = %d/%v, want the month itself", i, ok)
+	}
+	if _, ok := baselineIndex(months, "2019-12"); ok {
+		t.Error("a period opening before the run did came back available; the run cannot cover it")
+	}
+}

@@ -452,6 +452,25 @@ The decisions worth naming:
   cannot report its first three months as its worst year.
 - **The drawdown row says whether it was recovered.** A depth and two dates
   without that leaves out the thing a reader actually wants.
+- **The leaderboards are measured back from the run's last month, not from
+  today.** A run told to end in 2019 has no opinion about the year we are
+  actually in, and on it "year to date" means 2019's — measured, like a calendar
+  year, from the December before. A period that opened before the run did is
+  reported unavailable rather than measured from the run's own first month: the
+  test is coverage, not overlap, exactly as `windowStart` applies it to the
+  history sheet. Every period is sent whether or not it can be answered, so a
+  young portfolio shows the same set of choices as an old one and says why they
+  are empty.
+- **A holding's place in the ranking is its own return, not its contribution.**
+  Weighting the moves would rank a flat 40% holding above a 30% gain held at 2%,
+  which is a different and much less useful question than "what did each of
+  these do". The weight is carried alongside so a rout in something held at 2%
+  reads as one. The portfolio's own return over the same period is carried too,
+  because without it "underperformer" only means "lowest of these".
+- **The whole ranking goes over the wire, not the three at each end.** Where to
+  cut it depends on how many holdings there are — with five, a top three and a
+  bottom three are the same five rows printed twice — and that is a presentation
+  question the client is the right place to answer.
 
 `ErrBadSpec` covers every way a portfolio is un-runnable because of what was
 asked for — an unknown symbol, histories that don't overlap, a window too short
