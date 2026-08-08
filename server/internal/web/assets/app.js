@@ -1293,6 +1293,40 @@ $('#view').addEventListener('click', async (event) => {
 
 const addDialog = $('#add-dialog');
 
+/* The on-screen keyboard.
+ *
+ * A modal dialog is positioned against the *layout* viewport, and the keyboard
+ * does not shrink that — so a sheet pinned to the bottom of the screen puts its
+ * Add button behind the keyboard the instant you tap the field above it. The
+ * *visual* viewport does shrink, so the difference between the two is how much
+ * the keyboard is covering. Publishing it as a length lets the stylesheet sit
+ * the sheet on top of the keyboard and take the same height out of its ceiling.
+ *
+ * Everything reading it degrades to 0: desktop, keyboard down, or a browser
+ * without visualViewport. */
+function trackKeyboard() {
+  const viewport = window.visualViewport;
+  if (!viewport) return;
+
+  const sync = () => {
+    const covered = Math.max(
+      0,
+      document.documentElement.clientHeight - viewport.height - viewport.offsetTop,
+    );
+    document.documentElement.style.setProperty('--keyboard-inset', `${Math.round(covered)}px`);
+    // A collapsing URL bar moves the visual viewport by ~60–100px, which is not
+    // a keyboard; the threshold keeps the tab bar from flickering away as you
+    // scroll the watchlist.
+    $('.app').classList.toggle('app--keyboard-open', covered > 150);
+  };
+
+  viewport.addEventListener('resize', sync);
+  viewport.addEventListener('scroll', sync);
+  sync();
+}
+
+trackKeyboard();
+
 function openAdd() {
   if (addDialog.open) return;
   addDialog.showModal();

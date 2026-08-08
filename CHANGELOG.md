@@ -51,6 +51,21 @@ form; a rejected add (a duplicate, a formula that won't parse) deliberately
 keeps it open on what you typed so the fix is an edit rather than a retype.
 Toasts now stack above the button rather than landing on it.
 
+**It works with a soft keyboard up**, which took more than it looks like it
+should. A modal dialog is positioned against the layout viewport, and the
+keyboard does not shrink that — so a bottom sheet puts its Add button behind
+the keyboard the moment you tap the field above it. The sheet now sits on top
+of the keyboard instead, measured from the visual viewport, and the Add and
+Search buttons are pinned to the bottom of the sheet rather than scrolling with
+the fields. The tab bar and the floating button get out of the way while the
+keyboard is up, and come back when it closes.
+
+Also on phones: every input is 16px or larger, because below that iOS Safari
+zooms the page in the moment you tap a field and leaves you zoomed and scrolled
+sideways. Inputs, the sheet's buttons and its close control are all past the
+44px touch target. The formula help folds into a **More about formulas**
+disclosure rather than spending a quarter of the screen on prose you read once.
+
 ### The script becomes an application
 
 Tickers is `update_minion_quotes.py` — a cron script that fetched seven

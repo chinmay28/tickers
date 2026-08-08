@@ -44,6 +44,12 @@
      has to lift both clear of the tab bar. */
   --fab-size: 3.5rem;
   --fab-inset: calc(env(safe-area-inset-bottom) + 1.25rem);
+
+  /* How much of the layout viewport the on-screen keyboard is covering.
+     app.js keeps it current from the visual viewport; it is 0 on a desktop,
+     0 on a phone with the keyboard down, and 0 in a browser too old to
+     report it — so everything that reads it degrades to today's layout. */
+  --keyboard-inset: 0px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -805,7 +811,10 @@ svg {
 }
 .sheet__close {
   display: flex;
-  padding: 0.35rem;
+  /* 44px square around the 20px glyph. It is the only way out of a modal for
+     anyone who doesn't know the backdrop is tappable, so it has to be hittable
+     with a thumb. */
+  padding: 0.75rem;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
@@ -817,8 +826,36 @@ svg {
   background: var(--surface-2);
 }
 .sheet__body {
+  /* min-height:0 is what lets a flex child actually scroll rather than growing
+     the sheet past its max-height. */
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 1rem;
   overflow-y: auto;
+}
+.sheet__foot {
+  flex: none;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.8rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.hint-more {
+  margin-top: 0.35rem;
+}
+.hint-more > summary {
+  /* 44px of tappable row, and a pointer rather than a text caret so it reads
+     as the control it is. */
+  min-height: 2.75rem;
+  padding: 0.7rem 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--primary);
+  cursor: pointer;
+}
+.hint-more[open] > summary {
+  color: var(--muted);
 }
 
 /* ------------------------------------------------------------------ *
@@ -960,15 +997,51 @@ svg {
   :root {
     --fab-inset: calc(4.5rem + env(safe-area-inset-bottom) + 0.9rem);
   }
+  /* 16px or larger, or iOS Safari zooms the page in the moment a field is
+     tapped — which leaves you zoomed and scrolled sideways with no obvious way
+     back. The min-height takes the same fields past the 44px touch target.
+     Every form on a phone has this problem, not just the sheet's. */
+  .input,
+  .select {
+    font-size: 16px;
+    min-height: 2.75rem;
+  }
+
   /* The dialog becomes a bottom sheet: full width, anchored to the bottom
-     edge, so it opens under the thumb rather than in the middle of the screen. */
+     edge, so it opens under the thumb rather than in the middle of the screen.
+
+     `bottom: var(--keyboard-inset)` is the part that matters. A modal dialog
+     is positioned against the layout viewport, and the on-screen keyboard does
+     not shrink that — so a sheet pinned to the bottom puts its Add button
+     *behind* the keyboard the instant you tap the field above it. Sitting the
+     sheet on top of the keyboard instead, and taking the same height out of
+     its ceiling, keeps the whole form in the space actually left over. */
   .sheet {
+    inset: auto 0 var(--keyboard-inset) 0;
+    margin: 0;
     width: 100%;
-    margin: auto 0 0;
-    max-height: 88dvh;
+    max-height: calc(88dvh - var(--keyboard-inset));
     border-radius: var(--radius) var(--radius) 0 0;
     border-bottom: 0;
     padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Comfortable targets inside the sheet. The watchlist rows keep their
+     tighter sizing below — five actions have to fit one line there. */
+  .sheet .btn {
+    min-height: 2.75rem;
+    padding: 0.65rem 1rem;
+  }
+  /* Two evenly split buttons rather than a 60px "Add" floating beside a wide
+     "Search by name". */
+  .sheet__foot .btn {
+    flex: 1 1 8rem;
+  }
+
+  /* Bottom chrome gets out of the keyboard's way instead of floating over it.
+     Both come back the moment the keyboard closes. */
+  .app--keyboard-open .fab,
+  .app--keyboard-open .tab-bar {
+    display: none;
   }
   .quote {
     grid-template-columns: 1fr auto;
