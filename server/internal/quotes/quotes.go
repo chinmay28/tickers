@@ -174,6 +174,53 @@ type Distributor interface {
 	Dividends(ctx context.Context, symbol string, since time.Time) ([]Distribution, error)
 }
 
+// Constituent is one position inside a fund, as the source reports it today.
+//
+// Weight is a percentage of the fund rather than a fraction, matching every
+// other percentage that crosses this package's boundary. Sources quote it both
+// ways; converting at the edge is what keeps the rest of the app from having to
+// know which one it is talking to.
+type Constituent struct {
+	Symbol string
+	Name   string
+	Weight float64
+}
+
+// Composition is what a source can say about what a fund holds.
+//
+// Holdings is the *top* of the fund, not the whole of it — every source that
+// answers this question for free answers with the largest handful — so the sum
+// of the weights is meaningfully less than 100 and callers have to say so
+// rather than presenting it as the fund.
+type Composition struct {
+	// Name is the fund's own long name, for a page that is about the fund
+	// rather than about a row in a list.
+	Name     string
+	Holdings []Constituent
+}
+
+// Compositor is a provider that can also say what a fund holds.
+//
+// Optional in the way Historian and Distributor are, and asserted at the call
+// site for the same reason — but the degradation is more visible than theirs,
+// so it is worth naming. A provider without this leaves the fund page with its
+// chart, its summary and its calendar years, and no look-through table. That is
+// a page missing a card, not a broken one.
+type Compositor interface {
+	// Constituents returns what the fund holds now, largest first. A symbol
+	// that exists and is not a fund is ErrNotFund, which is a durable answer
+	// and not a failure — no amount of retrying makes AAPL a basket.
+	Constituents(ctx context.Context, symbol string) (Composition, error)
+}
+
+// ErrNoConstituents is what a caller gets when the quote source cannot say what
+// any fund holds — the look-through is unavailable rather than broken.
+var ErrNoConstituents = errors.New("this quote provider cannot say what a fund holds")
+
+// ErrNotFund means the source knows this symbol and it has no holdings to
+// report. Durable, like ErrNoLogo: a caller is meant to say so and stop asking.
+var ErrNotFund = errors.New("that symbol is not a fund")
+
 // LogoValidators is what a previous fetch left behind so the next one can be
 // conditional: an ETag, a Last-Modified date, or neither.
 //

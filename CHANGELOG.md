@@ -7,6 +7,40 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Look through a fund
+
+A new **Funds** page opens any ETF the quote source knows — `#/funds/QQQ` — and
+shows what it returned and what the things it holds today have done.
+
+- **The fund's own numbers.** The chart, the summary and the calendar years are
+  the fund's own adjusted series run as a one-holding portfolio, so they are its
+  real total return with distributions already in them. Nothing on that half of
+  the page is derived from its holdings.
+- **Its top holdings, measured over the same windows** — year to date, one,
+  three, five and ten years, and the whole run — in the same sortable table
+  Portfolios uses, with each holding's weight and its gap to the fund. The
+  benchmark rides in it as a row, as it does there.
+- **The look-through says what it is.** The holdings are what the fund holds
+  *now*, stamped with when they were read, and the card says what share of the
+  fund they add up to. Measured over a long window they are a story about the
+  companies that are in the fund today, not about the fund — so the page says
+  so rather than leaving it to be inferred.
+- **Windows a holding is too young for name it** instead of quietly shortening
+  the table. A company that listed in 2020 has nothing to say about 1999, and a
+  table that dropped it in silence would read as a complete one.
+- A fund's run is **never shortened to its youngest holding**, which is the one
+  thing this could not borrow from the portfolio path.
+- Holdings the source can't price — cash lines, foreign listings — are **listed
+  separately** rather than dropped, because they are part of the fund and not
+  part of any number on the page.
+
+The holdings come from Yahoo's `quoteSummary`, which needs a session cookie and
+a crumb where the chart endpoint needs nothing. That is confined to this one
+feature: the handshake is made lazily, reused for half an hour, retried once
+when the crumb expires, and a source that stops answering costs the look-through
+table and nothing else. **Yahoo reports the top ten holdings**, so that is what
+the page shows; a fund's remaining weight is stated rather than implied.
+
 ### Portfolios, and what they would have done
 
 A new **Portfolios** page backtests an allocation: symbols and weights, an

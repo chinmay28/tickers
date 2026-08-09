@@ -1040,6 +1040,23 @@ svg {
 .holdings__when {
   margin: 0.7rem 0 0.5rem;
 }
+/* Which holdings a period could not measure. Under the caption and above the
+   table, because it is the reason the table is shorter than the fund — read
+   after the numbers it explains, it reads as an excuse. */
+.holdings__missing {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0 0 0.7rem;
+}
+/* A submit sitting in a form-grid cell beside the fields rather than under
+   them. The label above it is empty, so the button needs the height the label
+   would have taken to line up with the inputs it belongs to. */
+.field--actions {
+  display: flex;
+  align-items: flex-end;
+}
 .holding__name {
   display: inline-flex;
   align-items: center;

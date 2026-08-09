@@ -47,6 +47,11 @@ type Engine struct {
 	// needs. Separate because it comes from a separate upstream call, and a
 	// symbol can perfectly well have one and not the other.
 	dividendCache map[string]dividendEntry
+	// fundCache is what each fund holds. Separate again, and on a far longer
+	// TTL than either — see constituentsTTL. It is also the only one of the
+	// three fed by an endpoint that needs authenticating, which is the other
+	// reason to ask it as seldom as possible.
+	fundCache map[string]fundEntry
 
 	// kick asks the loop to run now and then resume its schedule. Buffered by
 	// one: several nudges in quick succession collapse into a single run,
@@ -70,6 +75,7 @@ func New(st *store.Store, provider quotes.Provider, publisher *publish.Publisher
 		kick:          make(chan struct{}, 1),
 		historyCache:  map[string]historyEntry{},
 		dividendCache: map[string]dividendEntry{},
+		fundCache:     map[string]fundEntry{},
 	}
 }
 

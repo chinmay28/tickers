@@ -300,6 +300,11 @@ const state = {
    *  the page shows the result under the list, and running a second replaces
    *  the first rather than growing a stack of them. */
   backtest: null,
+  /** The fund being looked through: its symbol, whether it is in flight, and
+   *  what came back. Shaped like `backtest` on purpose — the two pages show the
+   *  same card, so the period and the sort live in the same fields and one set
+   *  of handlers drives both. */
+  fund: null,
   runs: [],
   busy: false,
   /** An inline, non-`act` request is in flight (a button showing "Testing…"),
@@ -327,6 +332,14 @@ async function loadState(opts) {
 
 /** Reload everything the current view needs, then redraw. */
 async function refreshView(opts) {
+  // A fund page's subject is in the URL, so landing on one — by navigation, by
+  // reload, or by somebody's pasted link — is what asks for the lookup. Only
+  // when it changed: the poll runs through here every ten seconds, and
+  // re-fetching a fund on each one would hammer the source's crumbed endpoint
+  // for a page that has not moved.
+  if (route() === 'funds' && routeArg() && state.fund?.symbol !== routeArg().toUpperCase()) {
+    loadFund(routeArg());
+  }
   if (route() === 'publishing') {
     try {
       state.runs = (await api('/runs?limit=40'))?.runs ?? [];
@@ -477,11 +490,23 @@ function restoreFocus(snap) {
  * Router
  * ------------------------------------------------------------------ */
 
-const ROUTES = ['watchlist', 'portfolios', 'publishing', 'settings'];
+const ROUTES = ['watchlist', 'portfolios', 'funds', 'publishing', 'settings'];
 
+/** The route is the first segment, so a page can carry a subject in the second.
+ *  Funds is the only one that does — `#/funds/QQQ` — and it is a path rather
+ *  than a query because a fund page is a thing you send somebody, not a filter
+ *  you set. Every existing hash has one segment and is unaffected. */
 function route() {
-  const hash = location.hash.replace(/^#\/?/, '').split('?')[0];
-  return ROUTES.includes(hash) ? hash : 'watchlist';
+  return ROUTES.includes(routePath()[0]) ? routePath()[0] : 'watchlist';
+}
+
+/** What the route is about: `QQQ` in `#/funds/QQQ`, empty where there is none. */
+function routeArg() {
+  return decodeURIComponent(routePath()[1] ?? '');
+}
+
+function routePath() {
+  return location.hash.replace(/^#\/?/, '').split('?')[0].split('/');
 }
 
 function syncNav() {
@@ -544,6 +569,9 @@ function render({ force = false } = {}) {
   switch (route()) {
     case 'portfolios':
       view.innerHTML = renderPortfolios(data);
+      break;
+    case 'funds':
+      view.innerHTML = renderFunds(data);
       break;
     case 'publishing':
       view.innerHTML = renderPublishing(data);
@@ -1153,11 +1181,13 @@ function growthChart(b) {
     </svg>`;
 }
 
-function growthLegend(b) {
+function growthLegend(b, label = 'Portfolio') {
   if (!b.benchmark) return '';
   return `
     <div class="chart-legend">
-      <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--line"></span>Portfolio</span>
+      <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--line"></span>${esc(
+        label,
+      )}</span>
       <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--dash"></span>${esc(
         b.benchmark.label,
       )}</span>
@@ -1257,7 +1287,7 @@ function drawdownCell(m) {
           <span class="perf-when">${esc(span)} · ${esc(recovery)}</span>`;
 }
 
-function annualTable(b) {
+function annualTable(b, label = 'Portfolio') {
   const rows = b.annual ?? [];
   if (!rows.length) return '<div class="empty">The run is too short to cover a calendar year.</div>';
   const hasBenchmark = Boolean(b.benchmark);
@@ -1267,7 +1297,7 @@ function annualTable(b) {
 
   return `<div class="table-scroll"><table class="table">
       <thead><tr>
-        <th>Year</th><th>Portfolio</th>${hasBenchmark ? `<th>${esc(b.benchmark.label)}</th>` : ''}
+        <th>Year</th><th>${esc(label)}</th>${hasBenchmark ? `<th>${esc(b.benchmark.label)}</th>` : ''}
         ${hasYield ? '<th title="Income as a percentage of the value the year opened at">Yield</th>' : ''}
       </tr></thead>
       <tbody>${rows
@@ -1334,14 +1364,45 @@ const HOLDING_SORT_DEFAULT = { key: 'percent', dir: 'desc' };
  *  someone comparing two portfolios over three years should not have to pick 3Y
  *  twice — falling back to the year to date, and then to the whole run for a
  *  portfolio too young to have one. */
+/** Which run the holding card on screen belongs to.
+ *
+ *  Portfolios and Funds show the same card over the same payload shape, and
+ *  only one of them is ever rendered — so the period and the sort are read and
+ *  written through here rather than being duplicated per page. Two copies of
+ *  this logic would drift the moment one of them gained a column. */
+function runSlot() {
+  return route() === 'funds' ? 'fund' : 'backtest';
+}
+
+function currentRun() {
+  return state[runSlot()];
+}
+
+function setRun(patch) {
+  const slot = runSlot();
+  state[slot] = { ...state[slot], ...patch };
+}
+
 function periodKey(periods) {
-  const chosen = periods.find((p) => p.key === state.backtest?.period);
+  const chosen = periods.find((p) => p.key === currentRun()?.period);
   if (chosen?.available) return chosen.key;
   const ytd = periods.find((p) => p.key === 'ytd' && p.available);
   return (ytd ?? periods.findLast((p) => p.available))?.key ?? '';
 }
 
-function holdingsCard(b) {
+/** How the card describes itself and what it is measuring against.
+ *
+ *  A portfolio's holdings are the allocation somebody chose; a fund's are what
+ *  it happens to hold today, and the difference is the whole reason the second
+ *  page exists. The numbers and the sorting are identical, so only the words
+ *  are parameterised. */
+const HOLDINGS_CAPTION = {
+  title: 'Holding performance',
+  meta: 'what each holding did on its own',
+  subject: 'portfolio',
+};
+
+function holdingsCard(b, caption = HOLDINGS_CAPTION) {
   const periods = b.performance ?? [];
   if (!periods.some((p) => p.available)) return '';
 
@@ -1350,8 +1411,8 @@ function holdingsCard(b) {
     <div class="card">
       <div class="card__head">
         <div class="card__heading">
-          <h3 class="card__title">Holding performance</h3>
-          <span class="card__meta">what each holding did on its own</span>
+          <h3 class="card__title">${esc(caption.title)}</h3>
+          <span class="card__meta">${esc(caption.meta)}</span>
         </div>
       </div>
       <div class="card__body">
@@ -1366,30 +1427,49 @@ function holdingsCard(b) {
             )
             .join('')}
         </div>
-        ${holdingsTable(b, period)}
+        ${holdingsTable(b, period, caption)}
       </div>
     </div>`;
 }
 
-function holdingsTable(b, period) {
+function holdingsTable(b, period, caption) {
   const rows = sortedHoldings(holdingRows(b, period));
   if (!rows.length) return '<div class="empty">Nothing to measure over this period.</div>';
 
   return `
     <p class="field__hint holdings__when">
-      ${esc(monthName(period.from))} → ${esc(monthName(period.to))} · portfolio
+      ${esc(monthName(period.from))} → ${esc(monthName(period.to))} · ${esc(caption.subject)}
       <span class="perf-change perf-change--${direction(period.portfolio)}">${esc(
         percent(period.portfolio),
       )}</span>
     </p>
+    ${missingNote(period)}
     <div class="table-scroll"><table class="table">
       <thead><tr>
         ${sortHeader('symbol', 'Holding')}
         ${sortHeader('weight', 'Weight')}
         ${sortHeader('percent', 'Return')}
       </tr></thead>
-      <tbody>${rows.map((r) => holdingRow(b, r, period)).join('')}</tbody>
+      <tbody>${rows.map((r) => holdingRow(b, r, period, caption)).join('')}</tbody>
     </table></div>`;
+}
+
+/** Which holdings this period could not measure, and why.
+ *
+ *  Always empty for a portfolio, whose legs are intersected before anything is
+ *  measured. On a fund it is the difference between a table a reader can see is
+ *  short and one they assume is complete — a ten-year window over a company
+ *  that listed two years ago has nothing to say, and saying nothing about that
+ *  is how a look-through quietly becomes a survivorship story. */
+function missingNote(period) {
+  const missing = period.missing ?? [];
+  if (!missing.length) return '';
+  return `
+    <p class="field__hint holdings__missing">
+      ${missing.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}
+      ${missing.length === 1 ? 'has' : 'have'} no price in ${esc(monthName(period.from))},
+      so ${missing.length === 1 ? 'it is' : 'they are'} not in this period.
+    </p>`;
 }
 
 /** The rows: every holding, and the benchmark as one of them where there is one.
@@ -1435,7 +1515,7 @@ function sortedHoldings(rows) {
 }
 
 function holdingSort() {
-  const sort = state.backtest?.sort;
+  const sort = currentRun()?.sort;
   return sort && HOLDING_SORTS[sort.key] ? sort : HOLDING_SORT_DEFAULT;
 }
 
@@ -1454,7 +1534,7 @@ function sortHeader(key, label) {
     </th>`;
 }
 
-function holdingRow(b, r, period) {
+function holdingRow(b, r, period, caption = HOLDINGS_CAPTION) {
   // The stand-in is named from the allocation rather than carried on the row:
   // the payload says *that* part of the move is a proxy's, and the holding
   // already says whose.
@@ -1468,7 +1548,7 @@ function holdingRow(b, r, period) {
   const gap = r.percent - period.portfolio;
   const against = `${Math.abs(gap).toFixed(2)} percentage points ${
     gap < 0 ? 'behind' : 'ahead of'
-  } the portfolio over this period`;
+  } the ${caption.subject} over this period`;
   return `
     <tr${r.isBenchmark ? ' class="holding--benchmark"' : ''}>
       <th>
@@ -1502,6 +1582,204 @@ function holdingRow(b, r, period) {
 function yieldCell(value) {
   if (value === null || value === undefined) return '—';
   return `${value.toFixed(2)}%`;
+}
+
+/* ------------------------------ Funds -------------------------------
+ *
+ * A fund page is the backtest page with one holding in it, and the holding
+ * card pointed at what the fund holds rather than at an allocation. Everything
+ * here is layout and words; the components are the ones Portfolios uses.
+ *
+ * Nothing on this page is saved. A fund is opened, and the symbol lives in the
+ * URL — so a page is something you can send somebody, and the back button does
+ * what it looks like it does. */
+
+/** What a fund's holding card calls itself. The count and the coverage are in
+ *  the meta line because they are the two facts that stop the table reading as
+ *  the fund: twenty names and 65% is a very different claim from ten and 24%. */
+/** What a fund is compared against until somebody says otherwise.
+ *
+ *  A default rather than a placeholder, and it is written into the field: a
+ *  fund on its own is a number without a verdict, and a comparison that applied
+ *  invisibly would be worse than none. Clearing the box means none, which is
+ *  why an empty benchmark and an unset one are different things below. A fund
+ *  benchmarked against itself is dropped by the server. */
+const DEFAULT_BENCHMARK = 'SPY';
+
+function fundCaption(f) {
+  return {
+    title: `Top ${f.constituents?.length ?? 0} holdings`,
+    meta: `${(f.covered ?? 0).toFixed(1)}% of the fund · what each of them did on its own`,
+    subject: 'fund',
+  };
+}
+
+function renderFunds() {
+  const run = state.fund;
+
+  return `
+    <div class="page-head">
+      <div>
+        <h1>Funds</h1>
+        <p>
+          Look through an ETF: what it returned, year by year, and what the
+          things it holds today have done. Any symbol the quote source can price
+          opens here.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card__body">
+        <form class="form-grid" data-fund-form data-form-key="fund-open" autocomplete="off">
+          <div class="field">
+            <label class="field__label" for="fund-symbol">Fund</label>
+            <input class="input" id="fund-symbol" name="symbol" type="text" placeholder="QQQ"
+                   value="${esc(run?.symbol ?? '')}" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="fund-benchmark">Compare against</label>
+            <input class="input" id="fund-benchmark" name="benchmark" type="text"
+                   value="${esc(run?.benchmark ?? DEFAULT_BENCHMARK)}" />
+            <span class="field__hint">Clear it to see the fund on its own.</span>
+          </div>
+          <div class="field field--actions">
+            <button class="btn btn--primary" type="submit">Look through</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    ${renderFund(run)}`;
+}
+
+function renderFund(run) {
+  if (!run) return '';
+
+  if (run.status === 'loading') {
+    return `
+      <div class="card"><div class="card__body">
+        <div class="empty"><strong>Looking through ${esc(run.symbol)}</strong>Its own history since it listed, and a series for each thing it holds.</div>
+      </div></div>`;
+  }
+  if (run.status === 'error') {
+    return `
+      <div class="card"><div class="card__body">
+        <div class="empty"><strong>Couldn't open ${esc(run.symbol)}</strong>${esc(run.error)}</div>
+      </div></div>`;
+  }
+
+  const f = run.data;
+  const caption = fundCaption(f);
+
+  return `
+    <div class="page-head page-head--sub">
+      <div>
+        <h2>${esc(f.symbol)} <span class="chip">fund</span></h2>
+        <p>
+          ${f.name ? `${esc(f.name)} — ` : ''}${esc(amount(f.initial))} from
+          ${esc(monthName(f.start))} to ${esc(monthName(f.end))}, ${f.months}
+          ${f.months === 1 ? 'month' : 'months'}.
+        </p>
+      </div>
+      <div class="perf-head__delta">
+        <div class="perf-head__value">${esc(amount(f.portfolio.end))}</div>
+        <div class="perf-change perf-change--${direction(f.portfolio.totalPercent)}">${esc(
+          percent(f.portfolio.totalPercent),
+        )}</div>
+      </div>
+    </div>
+
+    ${(f.notes ?? []).map((note) => `<p class="field__hint backtest-note">${esc(note)}</p>`).join('')}
+    <p class="field__hint backtest-note">Holdings read ${esc(ago(f.asOf))}.</p>
+
+    <div class="card">
+      <div class="card__body">
+        ${growthChart(f)}
+        ${growthLegend(f, f.symbol)}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card__head"><h3 class="card__title">Summary</h3></div>
+      <div class="card__body">${metricsTable(f)}</div>
+    </div>
+
+    <div class="card">
+      <div class="card__head"><h3 class="card__title">Calendar years</h3></div>
+      <div class="card__body">${annualTable(f, f.symbol)}</div>
+    </div>
+
+    ${holdingsCard(f, caption)}
+    ${unpricedCard(f)}`;
+}
+
+/** The holdings the quote source cannot price at all.
+ *
+ *  Their own card rather than a row with a dash in it: they are part of the
+ *  fund and they are not part of any of the numbers above, which is a fact
+ *  about the page's coverage rather than a result. A fund with none of them —
+ *  most of them — shows nothing here. */
+function unpricedCard(f) {
+  const unpriced = (f.constituents ?? []).filter((c) => !c.priced);
+  if (!unpriced.length) return '';
+
+  return `
+    <div class="card">
+      <div class="card__head">
+        <div class="card__heading">
+          <h3 class="card__title">Held, and not priced</h3>
+          <span class="card__meta">in the fund; no series to measure</span>
+        </div>
+      </div>
+      <div class="card__body">
+        <div class="table-scroll"><table class="table">
+          <thead><tr><th>Holding</th><th>Weight</th></tr></thead>
+          <tbody>${unpriced
+            .map(
+              (c) => `<tr>
+                <th><span class="holding__name">${symbolMark(c.symbol)}<span>${esc(
+                  c.symbol,
+                )}</span></span>${c.name ? `<span class="field__hint">${esc(c.name)}</span>` : ''}</th>
+                <td class="field__hint">${esc(
+                  Number(c.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+                )}%</td>
+              </tr>`,
+            )
+            .join('')}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+
+/** Open a fund. The symbol in the URL is what asked for this — see refreshView
+ *  — so this only ever fetches and redraws. */
+async function loadFund(symbol) {
+  symbol = symbol.trim().toUpperCase();
+  if (!symbol) return;
+
+  // The benchmark and the card's period survive the lookup, for the reason a
+  // backtest's do: comparing two funds against the same index should not mean
+  // typing it twice.
+  // Unset means "nobody has said", which takes the default; empty means
+  // somebody cleared the box, which means none.
+  const { period, sort } = state.fund ?? {};
+  const benchmark = state.fund?.benchmark ?? DEFAULT_BENCHMARK;
+  state.fund = { symbol, benchmark, period, sort, status: 'loading' };
+  render({ force: true });
+
+  try {
+    const query = benchmark ? `?benchmark=${encodeURIComponent(benchmark)}` : '';
+    const body = await api(`/funds/${encodeURIComponent(symbol)}${query}`);
+    // The page may have moved on — another fund, or off Funds entirely — while
+    // the request was in flight.
+    if (state.fund?.symbol !== symbol) return;
+    state.fund = { ...state.fund, status: 'ready', data: body.fund };
+  } catch (err) {
+    if (state.fund?.symbol !== symbol) return;
+    state.fund = { ...state.fund, status: 'error', error: err.message || String(err) };
+  }
+  render({ force: true });
 }
 
 /* --------------------------- Publishing ----------------------------
@@ -2035,7 +2313,7 @@ $('#view').addEventListener('click', (event) => {
     // The holding table's period and its sort. Both are purely a redraw: every
     // period came back with the run, so neither costs a request or can fail.
     case 'period':
-      state.backtest = { ...state.backtest, period: button.dataset.key };
+      setRun({ period: button.dataset.key });
       render({ force: true });
       break;
     case 'holdings-sort': {
@@ -2043,13 +2321,12 @@ $('#view').addEventListener('click', (event) => {
       const sort = holdingSort();
       // The same column again reverses it; a new one opens the way that column
       // is worth reading — biggest return, biggest weight, but symbols from A.
-      state.backtest = {
-        ...state.backtest,
+      setRun({
         sort:
           sort.key === key
             ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' }
             : { key, dir: HOLDING_SORTS[key].dir },
-      };
+      });
       render({ force: true });
       break;
     }
@@ -2176,6 +2453,22 @@ $('#view').addEventListener('submit', (event) => {
   const form = event.target;
   event.preventDefault();
   const values = Object.fromEntries(new FormData(form).entries());
+
+  if ('fundForm' in form.dataset) {
+    const symbol = (values.symbol || '').trim().toUpperCase();
+    if (!symbol) return;
+    // The benchmark is stashed before the hash moves, because the hashchange is
+    // what triggers the lookup and it reads this back out.
+    state.fund = { ...state.fund, benchmark: (values.benchmark || '').trim().toUpperCase() };
+    // Asking for the fund already showing has to work — the benchmark may be
+    // what changed — and a hash that doesn't move fires no hashchange.
+    if (routeArg().toUpperCase() === symbol) {
+      loadFund(symbol);
+    } else {
+      location.hash = `#/funds/${encodeURIComponent(symbol)}`;
+    }
+    return;
+  }
 
   if (form.dataset.edit) {
     const id = form.dataset.edit;
