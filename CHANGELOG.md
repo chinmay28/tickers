@@ -133,6 +133,36 @@ The page's description is now just "Backtest an allocation", and the paragraph
 of caveats under every result has gone — the notes that matter are attached to
 the runs they apply to.
 
+### Every table on a phone
+
+The calendar years table was losing its yield column off the side of a 390px
+screen, and it was not the only one: the run log lost its detail column, the
+performance sheet lost the baseline a return was measured from, and the summary
+table — capped for phones a while ago — turned out to overflow *worse* on an
+iPad held upright, on the far side of a media query written for phones.
+
+They share one cause. A table inside a horizontally scrolling box lays out at
+max-content and never wraps, so anything that widens a cell pushes the last
+column out of sight rather than making that cell wrap. It stays scrollable,
+which is not the same as findable.
+
+Every view has been measured at 320, 360, 390, 430, 768 and 900px, and nothing
+overflows at any of them now:
+
+- Cell padding tightens, a value's caption drops under it, a row header's
+  qualifier drops under it and loses its uppercasing ("2012 / part year" rather
+  than "2012 PART YEAR"), and a long row header wraps instead of widening.
+- **The run log stops being a table on a phone.** A cycle's counters read on one
+  line with its detail — usually a failing URL — across the full width below,
+  instead of a sentence wrapping inside a 90px column.
+- **The summary table's breakpoint is now 940px**, where it actually stops
+  fitting, rather than the 640px the phone rules use.
+- The payload preview wraps rather than scrolling, being the one block on that
+  page anybody reads.
+- Below 360px the watchlist's six row actions may wrap again. Holding them to
+  one line is right at 390 and is what made the whole page scroll sideways on
+  an iPhone SE.
+
 ### A mark for every symbol
 
 Every symbol now carries a small rounded square in front of it — on the

@@ -1560,7 +1560,7 @@ function renderPublishing(data) {
         <span class="field__hint">format: minion (legacy) · exactly what a destination receives right now</span>
       </div>
       <div class="card__body">
-        <pre class="code">${esc(preview)}</pre>
+        <pre class="code code--payload">${esc(preview)}</pre>
       </div>
     </div>
 
@@ -1595,9 +1595,9 @@ function renderCycles(data) {
         ${
           runs.length === 0
             ? `<div class="empty"><strong>No runs recorded yet</strong>The first cycle runs at startup.</div>`
-            : `<div class="table-scroll"><table class="table">
+            : `<div class="table-scroll"><table class="table table--runs">
                 <thead><tr>
-                  <th>When</th><th>Trigger</th><th>Quotes</th><th>Published</th><th>Took</th><th>Detail</th>
+                  <th>When</th><th>Quotes</th><th>Published</th><th>Detail</th>
                 </tr></thead>
                 <tbody>${runs.map(runRow).join('')}</tbody>
               </table></div>`
@@ -1715,13 +1715,21 @@ function runRow(run) {
     detail = '<span class="field__hint">no destinations</span>';
   }
 
+  // What started the cycle and how long it took ride under when it ran: three
+  // facts about the run itself, against three columns of what it produced. Six
+  // columns pushed Detail — the only one that ever says anything unexpected —
+  // off the side of a phone entirely.
   return `
     <tr>
-      <td title="${esc(run.startedAt)}">${esc(ago(run.finishedAt))}</td>
-      <td>${esc(run.trigger)}</td>
-      <td>${run.okCount} ok${run.errorCount ? ` · <span style="color:var(--down)">${run.errorCount} failed</span>` : ''}</td>
-      <td>${publishes.length - failed.length}/${publishes.length}</td>
-      <td>${took} ms</td>
+      <td title="${esc(run.startedAt)}">${esc(ago(run.finishedAt))}
+        <span class="perf-when">${esc(run.trigger)} · ${took} ms</span></td>
+      <td>${run.okCount} ok${
+        run.errorCount
+          ? `<span class="perf-when" style="color:var(--down)">${run.errorCount} failed</span>`
+          : ''
+      }</td>
+      <td>${publishes.length - failed.length}/${publishes.length}<span
+        class="runs__label"> published</span></td>
       <td class="wrap">${detail}</td>
     </tr>
   `;
@@ -3077,7 +3085,7 @@ function perfReturnRow(r, format) {
   return `<tr>
     <th>${esc(r.label)}</th>
     <td><span class="perf-change perf-change--${dir}">${esc(headline)}</span>${annual}</td>
-    <td class="field__hint">${esc(r.from)} · ${esc(format(r.fromValue))}</td>
+    <td class="field__hint wrap">${esc(r.from)} · ${esc(format(r.fromValue))}</td>
   </tr>`;
 }
 

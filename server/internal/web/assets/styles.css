@@ -816,6 +816,14 @@ svg {
   overflow-wrap: anywhere;
 }
 
+/* Said by the column header on anything wider than a phone, where the run log
+   is still a table. It exists for the width at which the header is gone. Placed
+   before the phone block, which turns it back on — a later rule of the same
+   weight would otherwise win at every width. */
+.runs__label {
+  display: none;
+}
+
 .code {
   margin: 0;
   padding: 0.85rem 1rem;
@@ -1543,20 +1551,6 @@ svg {
     grid-template-columns: 1fr;
   }
 
-  /* Inside an `overflow-x: auto` container a table lays out at max-content and
-     never wraps, so the drawdown row's "Dec 2015 → Dec 2016 · back by Jul 2020"
-     alone pushed the benchmark column entirely off a 390px screen. It was
-     scrollable, which is not the same as findable — nobody scrolls sideways
-     through a table whose second column they have no reason to think exists.
-     Capping the value columns makes that one cell wrap instead. */
-  .table--summary td {
-    max-width: 8.5rem;
-    white-space: normal;
-  }
-  .table--summary th {
-    max-width: 7rem;
-  }
-
   /* Bottom chrome gets out of the keyboard's way instead of floating over it.
      Both come back the moment the keyboard closes. */
   .app--keyboard-open .fab,
@@ -1576,19 +1570,106 @@ svg {
   .quote__name {
     max-width: 20ch;
   }
-  /* The range table has four columns and a phone has 390px. Stacking each
-     high and low over its date is what keeps the last column — where the
-     value sits between them, the one that turns two numbers into a reading —
-     on screen instead of behind a horizontal scroll. */
+  /* Tables are the whole phone problem, and it is one problem: a table inside
+     a horizontally scrolling box lays out at max-content and never wraps, so
+     anything that widens a cell pushes the last column off the screen — where
+     it may as well not exist, because scrollable is not findable. Three rules
+     claw the width back, and every table on the page needs all three.
+
+     One: cell padding. 0.7rem either side of six columns is 130px of a 390px
+     screen spent on air. */
+  .table {
+    font-size: 0.8rem;
+  }
+  .table th,
+  .table td {
+    padding-left: 0.45rem;
+    padding-right: 0.45rem;
+  }
+
+  /* Two: a value's caption goes under it rather than beside it — the high and
+     its date, the return and its baseline, the cycle and what triggered it. */
   .perf-when {
     display: block;
     margin-left: 0;
+    /* A caption may wrap where the value above it may not: "schedule · 1204 ms"
+       is prose about the row, not a number that breaking would corrupt. */
+    white-space: normal;
   }
-  /* A holding's chips — "benchmark", a stand-in — drop under its symbol rather
-     than widening the first column until the return is behind a horizontal
-     scroll. Same trade as the row above, and the same reason. */
+  /* Three: the same for the qualifier on a row's own header — and it drops the
+     header's own uppercasing while it is down there, because "PART YEAR"
+     letter-spaced is half again the width of "part year" and is a note about
+     the row rather than a label for it. Between them, the year column stops
+     being twice as wide as the returns it labels. */
+  .table th .field__hint {
+    display: block;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  /* And a row header long enough to set the column's width wraps instead —
+     "Year to date" over two lines costs a row 14px of height, where the column
+     it widens costs the last column its place on the screen. */
+  .table th {
+    white-space: normal;
+  }
+  /* A holding's chips — "benchmark", a stand-in — drop under its symbol for
+     the same reason. */
   .holding__name {
     flex-wrap: wrap;
+  }
+
+  /* The run log stops being a table altogether. Four columns of small facts is
+     a table; the fifth thing a row carries is a sentence — an HTTP failure with
+     a URL in it — and a sentence in the 90px that is left over is a column of
+     syllables. The row becomes a block instead: the counters on one line, the
+     detail across the full width underneath, which is the shape the quote rows
+     take at this width and for the same reason. */
+  .table--runs thead {
+    display: none;
+  }
+  .table--runs,
+  .table--runs tbody,
+  .table--runs td {
+    display: block;
+  }
+  .table--runs tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.1rem 0.7rem;
+    padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .table--runs tr:last-child {
+    border-bottom: 0;
+  }
+  .table--runs td {
+    padding: 0;
+    border: 0;
+    white-space: normal;
+  }
+  .table--runs td:last-child {
+    flex-basis: 100%;
+  }
+  /* The trigger and the duration go back beside the time they belong to: out of
+     the table there is a whole line for them. */
+  .table--runs .perf-when {
+    display: inline;
+    margin-left: 0.35rem;
+  }
+  /* And the one count that cannot be read without its header says what it is,
+     now that its header is gone. */
+  .runs__label {
+    display: inline;
+    color: var(--muted);
+  }
+
+  /* The payload preview is the one block people actually read on this page, so
+     it wraps rather than scrolling. Code elsewhere keeps its scroll: a wrapped
+     command line is a different command line. */
+  .code--payload {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
 
@@ -1602,6 +1683,59 @@ svg {
   .quote__actions .btn {
     padding: 0.3rem 0.45rem;
     font-size: 0.75rem;
+  }
+}
+
+/* The summary table's own breakpoint, and it is not the phone one.
+   Inside an `overflow-x: auto` container a table lays out at max-content and
+   never wraps, so the drawdown row's "Dec 2015 → Dec 2016 · back by Jul 2020"
+   alone pushes the benchmark column off the side. It was scrollable, which is
+   not the same as findable — nobody scrolls sideways through a table whose
+   second column they have no reason to think exists. Capping the value columns
+   makes that one cell wrap instead.
+
+   It is 940px rather than the 640px everything else here uses because that is
+   where this particular table stops fitting: on an iPad held upright it was
+   overflowing by more than it ever did on a phone, on the far side of a
+   breakpoint written for phones. */
+@media (max-width: 940px) {
+  .table--summary td {
+    max-width: 8.5rem;
+    white-space: normal;
+  }
+  .table--summary th {
+    max-width: 7rem;
+  }
+}
+
+/* Narrower than an iPhone SE and the watchlist's six actions stop fitting one
+   line at any padding worth having, so below that they are allowed to wrap
+   again. The row grows by a line; the alternative is the whole page scrolling
+   sideways, which is the worse of the two by a distance. */
+@media (max-width: 359px) {
+  .quote__actions {
+    flex-wrap: wrap;
+  }
+  /* The summary's column caps were picked against 390px, where they are what
+     makes the drawdown cell wrap instead of shoving the benchmark column off
+     the screen. Below that they are the thing doing the shoving. */
+  .table--summary th {
+    max-width: 5.5rem;
+  }
+  .table--summary td {
+    max-width: 6.2rem;
+  }
+  .table th,
+  .table td {
+    padding-left: 0.3rem;
+    padding-right: 0.3rem;
+  }
+  /* A chip inside a table is a label on a row, and at this width its own
+     letter-spacing is what pushes the row's numbers off the screen. */
+  .table .chip {
+    padding: 0.05rem 0.3rem;
+    font-size: 0.6rem;
+    letter-spacing: 0.02em;
   }
 }
 
