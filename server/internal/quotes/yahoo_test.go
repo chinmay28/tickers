@@ -759,3 +759,215 @@ func TestLogoStillFetchesWhenItHasChanged(t *testing.T) {
 			"validator forever", logo.Validators.ETag)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fund composition
+// ---------------------------------------------------------------------------
+
+// topHoldingsJSON is a trimmed /v10/finance/quoteSummary response with the two
+// modules the fund page asks for. The weights are fractions, as Yahoo sends
+// them, and one holding carries no symbol — a fund's cash line looks exactly
+// like that and cannot be priced.
+const topHoldingsJSON = `{
+  "quoteSummary": {
+    "result": [{
+      "topHoldings": {
+        "holdings": [
+          { "symbol": "NVDA", "holdingName": "NVIDIA Corp", "holdingPercent": 0.0921 },
+          { "symbol": "AAPL", "holdingName": "Apple Inc", "holdingPercent": 0.0814 },
+          { "holdingName": "Cash and other", "holdingPercent": 0.0012 }
+        ]
+      },
+      "quoteType": { "longName": "Invesco QQQ Trust, Series 1", "shortName": "Invesco QQQ Trust", "quoteType": "ETF" }
+    }],
+    "error": null
+  }
+}`
+
+// wrappedHoldingsJSON is the same payload in the shape Yahoo uses when it
+// ignores `formatted=false` — every number an object with a raw inside it.
+const wrappedHoldingsJSON = `{
+  "quoteSummary": {
+    "result": [{
+      "topHoldings": {
+        "holdings": [
+          { "symbol": "NVDA", "holdingName": "NVIDIA Corp", "holdingPercent": { "raw": 0.0921, "fmt": "9.21%" } },
+          { "symbol": "AAPL", "holdingName": "Apple Inc", "holdingPercent": { "raw": 0.0814, "fmt": "8.14%" } }
+        ]
+      },
+      "quoteType": { "longName": "Invesco QQQ Trust, Series 1", "quoteType": "ETF" }
+    }],
+    "error": null
+  }
+}`
+
+// equityJSON is what a company comes back as: the module is there and empty.
+const equityJSON = `{
+  "quoteSummary": {
+    "result": [{ "topHoldings": {}, "quoteType": { "longName": "Apple Inc", "quoteType": "EQUITY" } }],
+    "error": null
+  }
+}`
+
+// crumbServer is a stand-in for the crumbed half of Yahoo's API: it hands out a
+// cookie, mints a crumb against it, and refuses anything presenting the wrong
+// one. `issued` is what it will accept now, so a test can expire a crumb by
+// changing it.
+type crumbServer struct {
+	mu         sync.Mutex
+	issued     string
+	body       string
+	handshakes int
+	rejected   int
+}
+
+func (c *crumbServer) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		switch {
+		case r.URL.Path == "/":
+			http.SetCookie(w, &http.Cookie{Name: "A1", Value: "session", Path: "/"})
+			// Yahoo answers the cookie host with a 404 and the header that
+			// matters. A provider that checked this status would never get past
+			// it, which is exactly what this reproduces.
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/v1/test/getcrumb":
+			if _, err := r.Cookie("A1"); err != nil {
+				t.Errorf("the crumb was requested without the session cookie, so it would authenticate nothing")
+			}
+			c.handshakes++
+			w.Write([]byte(c.issued))
+		case strings.HasPrefix(r.URL.Path, "/v10/finance/quoteSummary/"):
+			if r.URL.Query().Get("crumb") != c.issued {
+				c.rejected++
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(`{"finance":{"error":{"code":"Unauthorized","description":"Invalid Crumb"}}}`))
+				return
+			}
+			w.Write([]byte(c.body))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}
+}
+
+func TestConstituentsReadsTheHoldingsBlock(t *testing.T) {
+	server := &crumbServer{issued: "abc123", body: topHoldingsJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	fund, err := y.Constituents(context.Background(), "qqq")
+	if err != nil {
+		t.Fatalf("reading a fund's holdings: %v", err)
+	}
+
+	if fund.Name != "Invesco QQQ Trust, Series 1" {
+		t.Errorf("the fund's name came back as %q rather than its long name", fund.Name)
+	}
+	if len(fund.Holdings) != 2 {
+		t.Fatalf("got %d holdings; the third has no symbol and cannot be priced, so it belongs nowhere but out", len(fund.Holdings))
+	}
+	if fund.Holdings[0].Symbol != "NVDA" || fund.Holdings[0].Name != "NVIDIA Corp" {
+		t.Errorf("the first holding came back as %+v", fund.Holdings[0])
+	}
+	// The interface is in percent; Yahoo quotes a fraction. Getting this wrong
+	// makes every fund look like it holds a hundredth of what it holds.
+	if got := fund.Holdings[0].Weight; got < 9.20 || got > 9.22 {
+		t.Errorf("NVDA's weight came back as %.4f; 0.0921 of the fund is 9.21%%", got)
+	}
+}
+
+func TestConstituentsAcceptsWrappedNumbers(t *testing.T) {
+	// Yahoo sends the same field bare or wrapped depending on a query parameter
+	// it does not always honour. Both have to mean the same weight.
+	server := &crumbServer{issued: "abc123", body: wrappedHoldingsJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	fund, err := y.Constituents(context.Background(), "QQQ")
+	if err != nil {
+		t.Fatalf("reading a fund's holdings: %v", err)
+	}
+	if got := fund.Holdings[0].Weight; got < 9.20 || got > 9.22 {
+		t.Errorf("a wrapped {\"raw\":0.0921} came back as %.4f rather than 9.21%%", got)
+	}
+}
+
+func TestConstituentsReHandshakesWhenTheCrumbExpires(t *testing.T) {
+	// The failure this whole arrangement exists for. A crumb expires on the
+	// source's schedule, and a page that failed until somebody reloaded it would
+	// be worse than no page.
+	server := &crumbServer{issued: "first", body: topHoldingsJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	if _, err := y.Constituents(context.Background(), "QQQ"); err != nil {
+		t.Fatalf("the first lookup failed: %v", err)
+	}
+
+	server.mu.Lock()
+	server.issued = "second"
+	server.mu.Unlock()
+
+	if _, err := y.Constituents(context.Background(), "QQQ"); err != nil {
+		t.Fatalf("a lookup with a stale crumb failed instead of handshaking again: %v", err)
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.rejected != 1 {
+		t.Errorf("the source rejected %d requests; exactly one should have been refused before the retry", server.rejected)
+	}
+	if server.handshakes != 2 {
+		t.Errorf("the provider handshook %d times; one at the start and one after the rejection", server.handshakes)
+	}
+}
+
+func TestConstituentsReusesOneCrumbAcrossLookups(t *testing.T) {
+	server := &crumbServer{issued: "abc123", body: topHoldingsJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	for i := 0; i < 3; i++ {
+		if _, err := y.Constituents(context.Background(), "QQQ"); err != nil {
+			t.Fatalf("lookup %d: %v", i, err)
+		}
+	}
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.handshakes != 1 {
+		t.Errorf("three lookups cost %d handshakes; a crumb is held for %v", server.handshakes, crumbTTL)
+	}
+}
+
+func TestConstituentsSaysWhenSomethingIsNotAFund(t *testing.T) {
+	server := &crumbServer{issued: "abc123", body: equityJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	_, err := y.Constituents(context.Background(), "AAPL")
+	if !errors.Is(err, ErrNotFund) {
+		t.Fatalf("a company came back as %v; it has to be ErrNotFund, which is a durable answer rather than a failure to retry", err)
+	}
+	if !strings.Contains(err.Error(), "equity") {
+		t.Errorf("the message is %q; it should name what the source said the symbol was", err.Error())
+	}
+}
+
+func TestConstituentsRejectsAnEmptySessionToken(t *testing.T) {
+	// An empty 200 is one of the ways Yahoo refuses. Reported as itself, because
+	// "HTTP 200" beside a broken feature helps nobody.
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/test/getcrumb" {
+			w.Write([]byte("  \n"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	_, err := y.Constituents(context.Background(), "QQQ")
+	if err == nil {
+		t.Fatal("an empty session token was accepted")
+	}
+	if !strings.Contains(err.Error(), "refusing API access") {
+		t.Errorf("the message is %q, which does not say that the source refused", err.Error())
+	}
+}

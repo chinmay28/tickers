@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"sort"
 	"strings"
@@ -50,6 +51,16 @@ type Yahoo struct {
 	fallback Settings
 	active   Settings
 	client   *http.Client
+	// jar carries the session cookie the crumbed endpoints require. It outlives
+	// the client, which Apply rebuilds whenever the timeout moves — throwing the
+	// cookie away on a settings change would mean re-handshaking for no reason.
+	jar http.CookieJar
+
+	// crumbMu guards the handshake rather than the settings, so a slow
+	// getcrumb round trip cannot block a refresh cycle reading the base URL.
+	crumbMu sync.Mutex
+	crumb   string
+	crumbAt time.Time
 }
 
 // NewYahoo builds a provider. The settings given are the start-up fallback —
@@ -57,6 +68,14 @@ type Yahoo struct {
 // database wins over both.
 func NewYahoo(fallback Settings) *Yahoo {
 	y := &Yahoo{fallback: fallback}
+	// A jar is only ever needed by the crumbed endpoints, but it is built here
+	// rather than lazily so that Apply — which can land at any time — never has
+	// to decide whether to install one. cookiejar.New with a nil options is
+	// documented never to fail; a nil jar would still leave the chart endpoints
+	// working, which is why this doesn't panic.
+	if jar, err := cookiejar.New(nil); err == nil {
+		y.jar = jar
+	}
 	y.Apply(Settings{})
 	return y
 }
@@ -80,7 +99,12 @@ func (y *Yahoo) Apply(override Settings) {
 	// a fresh one per request would throw away connection pooling. Sharing the
 	// default transport keeps the pool across rebuilds.
 	if y.client == nil || y.active.Timeout != next.Timeout {
-		y.client = &http.Client{Timeout: next.Timeout, Transport: http.DefaultTransport}
+		y.client = &http.Client{Timeout: next.Timeout, Transport: http.DefaultTransport, Jar: y.jar}
+	}
+	// A base URL that moved points at a different Yahoo — or at a stub — and the
+	// crumb held for the old one authenticates nothing there.
+	if y.active.BaseURL != next.BaseURL {
+		y.forgetCrumb()
 	}
 	y.active = next
 }
@@ -426,6 +450,270 @@ func (y *Yahoo) Search(ctx context.Context, query string) ([]Match, error) {
 	return out, nil
 }
 
+// ---------------------------------------------------------------------------
+// Fund composition
+// ---------------------------------------------------------------------------
+
+// The chart endpoint is open; everything else on Yahoo's API is not. quoteSummary
+// — the only module that says what a fund holds — wants a session cookie and a
+// "crumb" minted against it, and answers 401 without them.
+//
+// That is a real cost, and it is confined to this section on purpose: nothing
+// the refresh loop does touches any of it, so a handshake that starts failing
+// costs the look-through table and leaves quotes, history and publishing
+// exactly as they were.
+const (
+	// crumbTTL is how long one handshake is reused. Yahoo does not say how long
+	// a crumb lives, so this is short enough that an expiry is a once-an-hour
+	// event and long enough that browsing several funds costs one handshake.
+	// The 401 retry below is what actually makes expiry a non-event; this only
+	// keeps it rare.
+	crumbTTL = 30 * time.Minute
+
+	// cookieHost is where the session cookie comes from. It is a different host
+	// from the API — Yahoo sets nothing usable on query1 — which is why this is
+	// a constant rather than a path under the base URL.
+	cookieHost = "https://fc.yahoo.com/"
+
+	// maxHoldings caps what will be read out of one response. Yahoo returns ten;
+	// the cap is here so a source that changed its mind and returned five
+	// hundred could not turn a fund page into five hundred history fetches.
+	maxHoldings = 50
+)
+
+// httpError carries the status code of a non-2xx response, so a caller that
+// can do something about a particular code — re-handshake on a 401 — can see
+// it without matching on a message.
+type httpError struct {
+	status int
+	body   string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("quote provider returned HTTP %d: %s", e.status, e.body)
+}
+
+// cookieURL is where to go for a session cookie.
+//
+// Against real Yahoo that is fc.yahoo.com, which is not the API host. Against
+// anything else — a stub, a proxy, a mirror — it is that host's own root,
+// because an operator who redirected the API somewhere is not also running
+// Yahoo's cookie domain. This is what keeps the whole path exercisable with
+// `--quote-base-url` pointed at a throwaway server.
+func cookieURL(base string) string {
+	if base == DefaultBaseURL {
+		return cookieHost
+	}
+	return base + "/"
+}
+
+// authorise returns a crumb, doing the handshake if the one in hand is missing
+// or stale.
+//
+// The settings are read *before* the crumb lock is taken. crumbMu is always the
+// inner lock of the two — Apply takes the settings lock and then forgets the
+// crumb — and reversing that here is the one way this could deadlock.
+func (y *Yahoo) authorise(ctx context.Context) (string, error) {
+	settings, client := y.current()
+
+	y.crumbMu.Lock()
+	defer y.crumbMu.Unlock()
+	if y.crumb != "" && time.Since(y.crumbAt) < crumbTTL {
+		return y.crumb, nil
+	}
+
+	// The cookie is collected for its side effect on the jar. Yahoo answers this
+	// with a 404 and the right Set-Cookie header, so the status is deliberately
+	// not checked: a handshake that gave up here would fail on the success case.
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, cookieURL(settings.BaseURL), nil); err == nil {
+		req.Header.Set("User-Agent", settings.UserAgent)
+		if resp, err := client.Do(req); err == nil {
+			io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+			resp.Body.Close()
+		}
+	}
+
+	body, err := y.get(ctx, settings.BaseURL+"/v1/test/getcrumb")
+	if err != nil {
+		return "", fmt.Errorf("could not get a session token from the quote source: %w", err)
+	}
+	crumb := strings.TrimSpace(string(body))
+	// An empty 200 is Yahoo's other way of refusing, and it is worth its own
+	// message: "HTTP 200" in a log next to a broken feature helps nobody.
+	if crumb == "" {
+		return "", errors.New("the quote source issued an empty session token — it is refusing API access from here")
+	}
+
+	y.crumb, y.crumbAt = crumb, time.Now()
+	return crumb, nil
+}
+
+// forgetCrumb drops the held token so the next call handshakes again.
+func (y *Yahoo) forgetCrumb() {
+	y.crumbMu.Lock()
+	defer y.crumbMu.Unlock()
+	y.crumb, y.crumbAt = "", time.Time{}
+}
+
+// yahooNumber is a number Yahoo will send either bare or wrapped.
+//
+// The same field comes back as `0.0921` with `formatted=false` and as
+// `{"raw":0.0921,"fmt":"9.21%"}` without it, and which one arrives has changed
+// before. Accepting both here costs a few lines once; discovering the
+// difference in production costs the whole feature.
+type yahooNumber struct {
+	Value float64
+	Set   bool
+}
+
+func (n *yahooNumber) UnmarshalJSON(data []byte) error {
+	text := strings.TrimSpace(string(data))
+	if text == "null" || text == "{}" {
+		return nil
+	}
+	if strings.HasPrefix(text, "{") {
+		var wrapped struct {
+			Raw *float64 `json:"raw"`
+		}
+		if err := json.Unmarshal(data, &wrapped); err != nil {
+			return err
+		}
+		if wrapped.Raw != nil {
+			n.Value, n.Set = *wrapped.Raw, true
+		}
+		return nil
+	}
+	if err := json.Unmarshal(data, &n.Value); err != nil {
+		return err
+	}
+	n.Set = true
+	return nil
+}
+
+// quoteSummaryResponse is the slice of Yahoo's /v10/finance/quoteSummary payload
+// this uses.
+type quoteSummaryResponse struct {
+	QuoteSummary struct {
+		Result []struct {
+			TopHoldings struct {
+				Holdings []struct {
+					Symbol         string      `json:"symbol"`
+					HoldingName    string      `json:"holdingName"`
+					HoldingPercent yahooNumber `json:"holdingPercent"`
+				} `json:"holdings"`
+			} `json:"topHoldings"`
+			QuoteType struct {
+				LongName  string `json:"longName"`
+				ShortName string `json:"shortName"`
+				QuoteType string `json:"quoteType"`
+			} `json:"quoteType"`
+		} `json:"result"`
+		Error *struct {
+			Code        string `json:"code"`
+			Description string `json:"description"`
+		} `json:"error"`
+	} `json:"quoteSummary"`
+}
+
+// Constituents implements Compositor.
+//
+// One request for two modules: the holdings, and the fund's own name to put at
+// the top of the page. Asking separately would double the number of crumbed
+// requests, which are the fragile ones.
+func (y *Yahoo) Constituents(ctx context.Context, symbol string) (Composition, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return Composition{}, errors.New("a symbol is required")
+	}
+
+	body, err := y.summary(ctx, symbol)
+	if err != nil {
+		return Composition{}, err
+	}
+
+	var parsed quoteSummaryResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return Composition{}, fmt.Errorf("decode holdings for %s: %w", symbol, err)
+	}
+	if parsed.QuoteSummary.Error != nil {
+		return Composition{}, fmt.Errorf("%s: %s", symbol, parsed.QuoteSummary.Error.Description)
+	}
+	if len(parsed.QuoteSummary.Result) == 0 {
+		return Composition{}, fmt.Errorf("%s: %w", symbol, ErrNotFound)
+	}
+
+	res := parsed.QuoteSummary.Result[0]
+	out := Composition{Name: firstNonEmpty(res.QuoteType.LongName, res.QuoteType.ShortName)}
+
+	for _, h := range res.TopHoldings.Holdings {
+		if len(out.Holdings) >= maxHoldings {
+			break
+		}
+		holding := strings.ToUpper(strings.TrimSpace(h.Symbol))
+		// A holding with no symbol cannot be priced, and a fund's cash line
+		// arrives exactly like that. Dropping it is right — but it is also why
+		// the weights on the page can sum to less than the source's own total.
+		if holding == "" || !h.HoldingPercent.Set {
+			continue
+		}
+		out.Holdings = append(out.Holdings, Constituent{
+			Symbol: holding,
+			Name:   strings.TrimSpace(h.HoldingName),
+			// Yahoo quotes a fraction of the fund; the interface is in percent.
+			Weight: h.HoldingPercent.Value * 100,
+		})
+	}
+
+	if len(out.Holdings) == 0 {
+		// Durable, and worth naming what the source said it was: "AAPL is not a
+		// fund" is a complete answer, where "no holdings" reads like an outage.
+		// "lists X as equity" rather than "calls X a equity": the kind comes
+		// from the source and there is no article that fits all of them.
+		kind := strings.ToLower(res.QuoteType.QuoteType)
+		if kind == "" {
+			kind = "something with no holdings"
+		}
+		return Composition{}, fmt.Errorf("%w: the quote source lists %s as %s", ErrNotFund, symbol, kind)
+	}
+	return out, nil
+}
+
+// summary makes one crumbed request, handshaking first and once more if the
+// answer says the crumb is stale.
+//
+// The retry is the point of the whole arrangement. A crumb expires on Yahoo's
+// schedule rather than ours, so treating the first 401 as an error would make
+// the feature fail intermittently for exactly as long as it took somebody to
+// reload the page.
+func (y *Yahoo) summary(ctx context.Context, symbol string) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		crumb, err := y.authorise(ctx)
+		if err != nil {
+			return nil, err
+		}
+		settings, _ := y.current()
+		endpoint := fmt.Sprintf("%s/v10/finance/quoteSummary/%s?modules=%s&formatted=false&crumb=%s",
+			settings.BaseURL, url.PathEscape(symbol),
+			url.QueryEscape("topHoldings,quoteType"), url.QueryEscape(crumb))
+
+		body, err := y.get(ctx, endpoint)
+		if err == nil {
+			return body, nil
+		}
+
+		var status *httpError
+		if attempt == 0 && errors.As(err, &status) &&
+			(status.status == http.StatusUnauthorized || status.status == http.StatusForbidden) {
+			y.forgetCrumb()
+			continue
+		}
+		return nil, err
+	}
+	// Unreachable: the loop either returns a body or returns the error that
+	// stopped it. Present so the compiler does not have to take that on trust.
+	return nil, errors.New("the quote source would not accept a session token")
+}
+
 // maxLogoBytes caps one image. Yahoo's brand images are a few kilobytes; a
 // response past this is not a logo, whatever its content type claims.
 const maxLogoBytes = 256 << 10
@@ -631,8 +919,10 @@ func (y *Yahoo) get(ctx context.Context, endpoint string) ([]byte, error) {
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("quote provider returned HTTP %d: %s",
-			resp.StatusCode, snippet(body))
+		// Typed rather than formatted, so the crumbed path can recognise a 401
+		// and re-handshake. The message is unchanged — every other caller still
+		// only ever prints it.
+		return nil, &httpError{status: resp.StatusCode, body: snippet(body)}
 	}
 	return body, nil
 }

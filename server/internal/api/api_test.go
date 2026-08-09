@@ -1170,3 +1170,104 @@ func TestUploadALogoForASymbolWithASlashInIt(t *testing.T) {
 		t.Errorf("serving it back returned %d", rec.Code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Funds
+// ---------------------------------------------------------------------------
+
+// compositorProvider is a historian that can also say what a fund holds.
+type compositorProvider struct {
+	historianProvider
+	holdings map[string][]quotes.Constituent
+}
+
+func (c compositorProvider) Constituents(_ context.Context, symbol string) (quotes.Composition, error) {
+	held, ok := c.holdings[symbol]
+	if !ok {
+		return quotes.Composition{}, fmt.Errorf("%w: the quote source lists %s as equity", quotes.ErrNotFund, symbol)
+	}
+	return quotes.Composition{Name: symbol + " Fund", Holdings: held}, nil
+}
+
+// fundBars is two years of month-end closes for a symbol, rising steadily.
+func fundBars(monthly float64) []quotes.Bar {
+	bars := make([]quotes.Bar, 0, 25)
+	value := 100.0
+	for i := 24; i >= 0; i-- {
+		bars = append(bars, quotes.Bar{
+			Date:  time.Now().UTC().AddDate(0, -i, 0).Format("2006-01") + "-15",
+			Close: value,
+		})
+		value *= monthly
+	}
+	return bars
+}
+
+func TestFundEndpointServesTheRunAndTheLookThrough(t *testing.T) {
+	provider := compositorProvider{
+		historianProvider: historianProvider{
+			stubProvider: stubProvider{prices: map[string]float64{"QQQ": 400}},
+			bars: map[string][]quotes.Bar{
+				"QQQ":  fundBars(1.02),
+				"AAA":  fundBars(1.03),
+				"CASH": nil,
+			},
+		},
+		holdings: map[string][]quotes.Constituent{
+			"QQQ": {{Symbol: "AAA", Name: "Alpha", Weight: 40}, {Symbol: "CASH", Name: "Cash", Weight: 5}},
+		},
+	}
+	h := newHarness(t, provider)
+
+	rec, body := h.do(t, http.MethodGet, "/api/funds/QQQ", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+	fund, _ := body["fund"].(map[string]any)
+	if fund["symbol"] != "QQQ" {
+		t.Fatalf("fund = %v", fund)
+	}
+	if fund["name"] != "QQQ Fund" {
+		t.Errorf("the fund's name came back as %v rather than the source's", fund["name"])
+	}
+	if fund["asOf"] == "" || fund["asOf"] == nil {
+		t.Error("the payload carries no as-of stamp, so the page cannot say when the holdings were read")
+	}
+	constituents, _ := fund["constituents"].([]any)
+	if len(constituents) != 2 {
+		t.Fatalf("got %d constituents; a holding that cannot be priced is still one", len(constituents))
+	}
+	// The summary column is the fund, not the word "Portfolio".
+	portfolio, _ := fund["portfolio"].(map[string]any)
+	if portfolio["label"] != "QQQ" {
+		t.Errorf("the summary's column is labelled %v rather than the fund's symbol", portfolio["label"])
+	}
+}
+
+func TestFundEndpointRejectsSomethingThatIsNotAFund(t *testing.T) {
+	provider := compositorProvider{
+		historianProvider: historianProvider{
+			stubProvider: stubProvider{prices: map[string]float64{"AAPL": 200}},
+			bars:         map[string][]quotes.Bar{"AAPL": fundBars(1.02)},
+		},
+		holdings: map[string][]quotes.Constituent{},
+	}
+	h := newHarness(t, provider)
+
+	rec, body := h.do(t, http.MethodGet, "/api/funds/AAPL", nil)
+	// A company is a fixable mistake in the box it was typed into, not a fault.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, body %v — a symbol that isn't a fund has to be a 400", rec.Code, body)
+	}
+}
+
+func TestFundEndpointSaysWhenTheSourceCannotAnswer(t *testing.T) {
+	// The degradation that matters: a provider with no composition capability
+	// leaves the page unavailable with a reason rather than failing.
+	h := newHarness(t, stubProvider{prices: map[string]float64{"QQQ": 400}})
+
+	rec, body := h.do(t, http.MethodGet, "/api/funds/QQQ", nil)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status %d, body %v — an absent capability is a 501, as it is for history", rec.Code, body)
+	}
+}

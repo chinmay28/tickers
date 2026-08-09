@@ -593,6 +593,59 @@ keep is between **nil and zero**: nil is "this source cannot say", zero is "this
 paid nothing", and collapsing them would report every income fund on earth as
 yielding nothing.
 
+### Looking through a fund
+
+A fund page is a backtest of one symbol with the holding-performance card
+pointed somewhere else. That is the whole design, and everything worth writing
+down here follows from one problem it does not share with a portfolio.
+
+**A source can only say what a fund holds now.** Measured over ten years,
+today's constituents are a story about the companies that survived into the
+fund, not about the fund — the survivorship bias is not a rounding error, it is
+most of the number. Three things keep the page from telling that story by
+accident:
+
+- The fund's own half — chart, summary, calendar years — comes from the fund's
+  own adjusted series, run through `simulateSpec` as one holding at 100%. No
+  number on it is derived from a holding, so it is immune to the problem
+  entirely.
+- The look-through carries the day it was read and the share of the fund it
+  covers, in the card's own heading, and a note in the same prose the run's
+  start note uses.
+- Every window a holding cannot cover **names it**. `PeriodPerformance.Missing`
+  exists for this: a table that quietly got shorter is a table a reader assumes
+  is complete, and the whole-run window on a modern ETF drops most of its rows.
+
+**The holdings are not intersected into the run.** `commonMonths` is right for a
+portfolio — its legs are all held at once, and a month one didn't trade is a
+rebalance nobody performed — and it would be catastrophic here: a twenty-five
+year fund would be truncated to the listing date of whatever it most recently
+started holding. So the fund's months come from the fund and its benchmark, and
+a holding that doesn't reach back is dropped from that window rather than
+shortening it. That is the one change the shared `holdingPerformance` needed:
+it now requires a close at *both* ends of a period, because for the first time
+a holding can have a baseline and no close to measure to, and reading the
+missing one as zero would report a delisting as −100%.
+
+**Composition is a fourth optional capability**, `Compositor`, asserted at the
+call site like `Historian` and `Distributor` and answering `501` when it is
+absent. It degrades further than they do and that is deliberate: without it the
+fund page keeps its chart, its summary and its years, and loses one card.
+
+It is also the only capability that reaches an endpoint needing
+authentication. Yahoo's `quoteSummary` wants a session cookie and a crumb minted
+against it, where the chart endpoint wants nothing — so the handshake is done
+lazily on first use, held for half an hour, and retried exactly once when a
+request comes back `401`. That retry is the point of the arrangement rather than
+a nicety: a crumb expires on the source's schedule, and a page that failed until
+somebody reloaded it would be worse than no page. Everything about it is
+confined to the fund path, so a handshake that starts failing costs this table
+and leaves quotes, history and publishing untouched.
+
+The composition cache is separate from the price and payout caches and lives far
+longer — a day against ten minutes — for two reasons that agree: funds
+reconstitute quarterly, and this is the endpoint worth asking least often.
+
 ## Configuration precedence
 
 Two kinds of configuration, split by a single question: *can this change while

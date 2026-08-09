@@ -152,6 +152,17 @@ type PeriodPerformance struct {
 	Portfolio float64         `json:"portfolio"`
 	Benchmark *float64        `json:"benchmark"`
 	Returns   []HoldingReturn `json:"returns"`
+	// Missing names the holdings this period could not measure, because the
+	// series has no close at one end of it or the other.
+	//
+	// It is always empty for a portfolio, whose legs are intersected into a
+	// common set of months before anything is measured. It exists for the fund
+	// look-through, where they deliberately are not: a fund's run must not be
+	// truncated to the listing date of the youngest thing it holds, so a ten
+	// year window over a company that listed two years ago has nothing to say
+	// and says so. Reporting the names is the difference between a short table
+	// and a table a reader can tell is short *on purpose*.
+	Missing []string `json:"missing"`
 }
 
 // HoldingReturn is one holding's move over a period.
@@ -322,9 +333,29 @@ func riskAdjusted(index, rates []float64) (sharpe, sortino *float64) {
 // after a chart of one of its holdings costs nothing for that leg — and two
 // portfolios over the same funds cost one fetch between them.
 func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, error) {
+	out, _, err := e.simulateSpec(ctx, spec)
+	return out, err
+}
+
+// runDetail is a completed run's working: the months it covers, and the two
+// growth indices measured over them.
+//
+// It exists for the fund look-through, which measures a fund's holdings against
+// the fund's own line and must do it off the same numbers the chart above it was
+// drawn from. Recomputing them there would be a second definition of "what this
+// run did", and two of those eventually disagree.
+type runDetail struct {
+	months []string
+	run    result
+	bench  *result
+}
+
+// simulateSpec is Backtest with its working kept. Unexported because that
+// working is not payload — every HTTP caller wants Backtest exactly as it is.
+func (e *Engine) simulateSpec(ctx context.Context, spec BacktestSpec) (Backtest, runDetail, error) {
 	historian, ok := e.provider.(quotes.Historian)
 	if !ok {
-		return Backtest{}, quotes.ErrNoHistory
+		return Backtest{}, runDetail{}, quotes.ErrNoHistory
 	}
 	// Same reason every other upstream path calls this: a base URL or timeout
 	// edited in Settings has to be in force now, not after a restart.
@@ -332,7 +363,7 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 
 	holdings, err := weights(spec.Holdings)
 	if err != nil {
-		return Backtest{}, err
+		return Backtest{}, runDetail{}, err
 	}
 	benchmark := store.NormalizeSymbol(spec.Benchmark)
 
@@ -343,17 +374,17 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 	firstMonth := map[string]string{}
 	for _, h := range holdings {
 		if err := e.loadMonthly(ctx, historian, h.Symbol, series, raw, firstMonth); err != nil {
-			return Backtest{}, err
+			return Backtest{}, runDetail{}, err
 		}
 		if h.Replacement != "" {
 			if err := e.loadMonthly(ctx, historian, h.Replacement, series, raw, firstMonth); err != nil {
-				return Backtest{}, err
+				return Backtest{}, runDetail{}, err
 			}
 		}
 	}
 	if benchmark != "" {
 		if err := e.loadMonthly(ctx, historian, benchmark, series, raw, firstMonth); err != nil {
-			return Backtest{}, err
+			return Backtest{}, runDetail{}, err
 		}
 	}
 
@@ -393,7 +424,7 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 	}
 	months := window(commonMonths(legs), spec.StartYear, spec.EndYear)
 	if len(months) < 2 {
-		return Backtest{}, fmt.Errorf(
+		return Backtest{}, runDetail{}, fmt.Errorf(
 			"%w: its holdings share %d month(s) of history in that period, which is not enough for a single monthly return",
 			ErrBadSpec, len(months))
 	}
@@ -508,7 +539,7 @@ func (e *Engine) Backtest(ctx context.Context, spec BacktestSpec) (Backtest, err
 		}
 	}
 	copy(out.Holdings, holdings)
-	return out, nil
+	return out, runDetail{months: months, run: run, bench: bench}, nil
 }
 
 // riskFree reads the Treasury bill's month-end yields, through the same cache
@@ -1202,14 +1233,20 @@ func holdingPerformance(months []string, holdings []HoldingResult,
 		}
 
 		for _, h := range holdings {
-			base := series[h.Symbol][period.From]
-			if base <= 0 {
+			base, last := series[h.Symbol][period.From], series[h.Symbol][end]
+			// Both ends, not just the first. A portfolio's legs are intersected
+			// and so always have both, but a fund's holdings are not — one that
+			// stopped trading part way through has a base and no close to
+			// measure to, and reading the missing one as zero would report it
+			// as −100% rather than as unmeasurable.
+			if base <= 0 || last <= 0 {
+				period.Missing = append(period.Missing, h.Symbol)
 				continue
 			}
 			period.Returns = append(period.Returns, HoldingReturn{
 				Symbol:  h.Symbol,
 				Weight:  h.Weight,
-				Percent: (series[h.Symbol][end]/base - 1) * 100,
+				Percent: (last/base - 1) * 100,
 				Proxied: h.ReplacedUntil != "" && period.From < h.ReplacedUntil,
 			})
 		}

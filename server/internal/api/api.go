@@ -111,6 +111,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/portfolios/{id}/backtest", s.handleBacktestPortfolio)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
 
+	// A fund is opened, not saved, so there is nothing to POST and nothing to
+	// list. The symbol is one path segment for the same reason a logo's is.
+	mux.HandleFunc("GET /api/funds/{symbol}", s.handleFund)
+
 	mux.HandleFunc("GET /api/sinks", s.handleListSinks)
 	mux.HandleFunc("POST /api/sinks", s.handleCreateSink)
 	mux.HandleFunc("PATCH /api/sinks/{id}", s.handleUpdateSink)
@@ -794,6 +798,43 @@ func (s *Server) failBacktest(w http.ResponseWriter, err error) {
 		// somebody chose. Say what is missing, as the performance sheet does.
 		writeError(w, http.StatusNotImplemented, err.Error())
 	case errors.Is(err, engine.ErrBadSpec):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		s.fail(w, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Funds
+// ---------------------------------------------------------------------------
+
+// handleFund looks a fund up and returns its run and its look-through.
+//
+// The benchmark rides in the query string rather than being stored, because
+// nothing about a fund page is stored: it is a lookup, and the comparison a
+// reader wants is part of the question they are asking, not a setting.
+func (s *Server) handleFund(w http.ResponseWriter, r *http.Request) {
+	fund, err := s.engine.Fund(r.Context(), r.PathValue("symbol"), r.URL.Query().Get("benchmark"))
+	if err != nil {
+		s.failFund(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"fund": fund})
+}
+
+// failFund sorts the ways a fund page can fail into the ones the reader can do
+// something about and the ones they can't.
+func (s *Server) failFund(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, quotes.ErrNoConstituents), errors.Is(err, quotes.ErrNoHistory):
+		// Both are "this quote source doesn't do that", which is a configuration
+		// somebody chose rather than a fault — the same 501 the performance
+		// sheet answers with.
+		writeError(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, quotes.ErrNotFund), errors.Is(err, quotes.ErrNotFound),
+		errors.Is(err, engine.ErrBadSpec):
+		// A typo, or a symbol that is a company rather than a basket. Fixable
+		// where it was typed, so it is a 400 with the reason in it.
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		s.fail(w, err)

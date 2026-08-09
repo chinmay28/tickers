@@ -288,6 +288,44 @@ Nothing here models fees, taxes or spreads, and there is no inflation
 adjustment: it is what the allocation did, not what an account holding it would
 have.
 
+**Funds** — look through an ETF. Type a symbol (or open `#/funds/QQQ` directly)
+and the fund is run as a one-holding portfolio: the same growth chart, summary
+table and calendar years as above, all of them the fund's own adjusted series
+and none of them derived from what it holds. Under them, its top holdings over
+the same windows, in the same sortable table, each with its weight in the fund
+and its gap to the fund's own return.
+
+Nothing here is saved. A fund is opened, not added — the symbol is in the URL,
+so a page is something you can send somebody, and it costs no row, no setting
+and no schedule.
+
+- **The holdings are today's**, stamped with when they were read, and the card
+  says what share of the fund they add up to. That matters most over long
+  windows: ten years of a fund's *current* holdings is a story about the
+  companies that are in it now, not about the fund, and the page says so instead
+  of leaving you to infer it. The fund's own half of the page is unaffected —
+  that is why the two halves come from different places.
+- **A holding too young for a window is named**, not quietly dropped. Ask for
+  ten years of a fund holding something that listed in 2020 and the table says
+  which names are missing and why, rather than being silently shorter.
+- **The run is never shortened to the youngest holding.** A fund that started
+  holding something last year has not existed only since last year — unlike a
+  portfolio, whose legs are all held at once and are intersected.
+- **Holdings the source can't price** — cash lines, foreign listings — are
+  listed on their own rather than dropped, because they are part of the fund
+  and part of no number above.
+- Series are shared with the performance sheet and with backtests, so a fund
+  holding something you already chart costs no extra request.
+
+The holdings come from Yahoo's `quoteSummary`, which — unlike the endpoint
+everything else uses — needs a session cookie and a crumb. All of that is
+confined to this feature: it is done lazily, reused, and retried once when the
+crumb expires, and a source that stops answering costs you this table and
+nothing else. Yahoo reports a fund's **top ten** holdings, so that is what the
+page shows; the rest of the fund is stated as a percentage rather than implied.
+A quote source that can't answer at all leaves the page unavailable with a
+reason, in the way the performance sheet does.
+
 **Publishing** — where snapshots go. A destination is a base URL, a key, an
 optional category, and a format. After every refresh the snapshot is
 `PUT {base}/{key}`; if that fails (typically a 404 because the entry doesn't
