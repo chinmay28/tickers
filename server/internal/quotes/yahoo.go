@@ -470,16 +470,35 @@ const (
 	// keeps it rare.
 	crumbTTL = 30 * time.Minute
 
-	// cookieHost is where the session cookie comes from. It is a different host
-	// from the API — Yahoo sets nothing usable on query1 — which is why this is
-	// a constant rather than a path under the base URL.
-	cookieHost = "https://fc.yahoo.com/"
-
 	// maxHoldings caps what will be read out of one response. Yahoo returns ten;
 	// the cap is here so a source that changed its mind and returned five
 	// hundred could not turn a fund page into five hundred history fetches.
 	maxHoldings = 50
+
+	// anything is the Accept header for the two crumbed requests.
+	//
+	// Not "application/json", which is right for the chart endpoint and wrong
+	// here: the crumb is served as text/plain, and a JSON-only Accept gets an
+	// HTTP 406 back instead of a token. Sending it on the summary request too
+	// costs nothing and removes the same class of failure from the endpoint
+	// that matters.
+	anything = "*/*"
+
+	// browserAccept is what the cookie request asks for. It is fetching a page,
+	// not an API, and a source that fingerprints its callers should see
+	// something consistent with the browser this client claims to be.
+	browserAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 )
+
+// cookieHosts are where a session cookie is looked for, in order, when talking
+// to Yahoo itself.
+//
+// Two of them because the first is what every other client uses and neither is
+// documented. fc.yahoo.com answers with a 404 and the cookie; the main site is
+// the fallback for the day that stops being true. Both set the cookie on
+// `.yahoo.com`, which is what lets the jar send it to the API host — a
+// host-only cookie from either would never reach query1.
+var cookieHosts = []string{"https://fc.yahoo.com/", "https://finance.yahoo.com/"}
 
 // httpError carries the status code of a non-2xx response, so a caller that
 // can do something about a particular code — re-handshake on a 401 — can see
@@ -493,18 +512,61 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("quote provider returned HTTP %d: %s", e.status, e.body)
 }
 
-// cookieURL is where to go for a session cookie.
+// cookieSources is where to go for a session cookie.
 //
-// Against real Yahoo that is fc.yahoo.com, which is not the API host. Against
-// anything else — a stub, a proxy, a mirror — it is that host's own root,
-// because an operator who redirected the API somewhere is not also running
-// Yahoo's cookie domain. This is what keeps the whole path exercisable with
-// `--quote-base-url` pointed at a throwaway server.
-func cookieURL(base string) string {
+// Against real Yahoo those are its own hosts, none of which is the API host.
+// Against anything else — a stub, a proxy, a mirror — it is that host's own
+// root, because an operator who redirected the API somewhere is not also
+// running Yahoo's cookie domain. This is what keeps the whole path exercisable
+// with `--quote-base-url` pointed at a throwaway server.
+func cookieSources(base string) []string {
 	if base == DefaultBaseURL {
-		return cookieHost
+		return cookieHosts
 	}
-	return base + "/"
+	return []string{base + "/"}
+}
+
+// seedCookies collects a session cookie, stopping as soon as the jar holds one
+// the API host will actually be sent.
+//
+// Every status is ignored: Yahoo answers the cookie host with a 404 and the
+// header that matters, so a version of this that checked would fail on the
+// success case.
+func (y *Yahoo) seedCookies(ctx context.Context, settings Settings, client *http.Client) {
+	for _, source := range cookieSources(settings.BaseURL) {
+		if y.hasSessionCookie(settings.BaseURL) {
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", settings.UserAgent)
+		req.Header.Set("Accept", browserAccept)
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
+		resp.Body.Close()
+	}
+}
+
+// hasSessionCookie reports whether the jar would send anything to the API host.
+//
+// The question is deliberately asked about the *API* host rather than about the
+// host the cookie came from: a cookie scoped to fc.yahoo.com alone is one the
+// crumbed endpoints will never see, and would look like a successful handshake
+// right up until the 401.
+func (y *Yahoo) hasSessionCookie(base string) bool {
+	if y.jar == nil {
+		return false
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	return len(y.jar.Cookies(parsed)) > 0
 }
 
 // authorise returns a crumb, doing the handshake if the one in hand is missing
@@ -522,20 +584,13 @@ func (y *Yahoo) authorise(ctx context.Context) (string, error) {
 		return y.crumb, nil
 	}
 
-	// The cookie is collected for its side effect on the jar. Yahoo answers this
-	// with a 404 and the right Set-Cookie header, so the status is deliberately
-	// not checked: a handshake that gave up here would fail on the success case.
-	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, cookieURL(settings.BaseURL), nil); err == nil {
-		req.Header.Set("User-Agent", settings.UserAgent)
-		if resp, err := client.Do(req); err == nil {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))
-			resp.Body.Close()
-		}
-	}
+	y.seedCookies(ctx, settings, client)
 
-	body, err := y.get(ctx, settings.BaseURL+"/v1/test/getcrumb")
+	// Accepting anything, because the crumb is text and asking for JSON is
+	// answered with a 406 rather than a token.
+	body, err := y.getAccepting(ctx, settings.BaseURL+"/v1/test/getcrumb", anything)
 	if err != nil {
-		return "", fmt.Errorf("could not get a session token from the quote source: %w", err)
+		return "", crumbFailure(err)
 	}
 	crumb := strings.TrimSpace(string(body))
 	// An empty 200 is Yahoo's other way of refusing, and it is worth its own
@@ -546,6 +601,30 @@ func (y *Yahoo) authorise(ctx context.Context) (string, error) {
 
 	y.crumb, y.crumbAt = crumb, time.Now()
 	return crumb, nil
+}
+
+// crumbFailure turns a refused handshake into something an operator can act on.
+//
+// Three of these are worth naming because they call for three different
+// responses, and "HTTP 406" beside a broken card calls for none of them. The
+// rest keep the underlying error, which already carries the status and a
+// snippet of what came back.
+func crumbFailure(err error) error {
+	var status *httpError
+	if errors.As(err, &status) {
+		switch status.status {
+		case http.StatusNotAcceptable:
+			return fmt.Errorf(
+				"the quote source rejected this client's headers when asked for a session token (HTTP 406) — try a different User-Agent in Settings: %w", err)
+		case http.StatusTooManyRequests:
+			return fmt.Errorf(
+				"the quote source is rate-limiting this address (HTTP 429) — fund holdings will work again once it stops: %w", err)
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return fmt.Errorf(
+				"the quote source would not issue a session token (HTTP %d) — it did not accept the session cookie: %w", status.status, err)
+		}
+	}
+	return fmt.Errorf("could not get a session token from the quote source: %w", err)
 }
 
 // forgetCrumb drops the held token so the next call handshakes again.
@@ -689,14 +768,20 @@ func (y *Yahoo) summary(ctx context.Context, symbol string) ([]byte, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		crumb, err := y.authorise(ctx)
 		if err != nil {
+			// The handshake is a means, not the goal. Not every deployment of
+			// this API demands a crumb — a mirror, a caching proxy, a region
+			// Yahoo treats differently — so a refused token is worth one plain
+			// attempt before the feature is declared unavailable.
+			if body, plain := y.askSummary(ctx, symbol, ""); plain == nil {
+				return body, nil
+			}
+			// Reported as the handshake failure rather than as whatever the
+			// uncrumbed attempt said: the token is the thing that went wrong,
+			// and its message is the one with a fix in it.
 			return nil, err
 		}
-		settings, _ := y.current()
-		endpoint := fmt.Sprintf("%s/v10/finance/quoteSummary/%s?modules=%s&formatted=false&crumb=%s",
-			settings.BaseURL, url.PathEscape(symbol),
-			url.QueryEscape("topHoldings,quoteType"), url.QueryEscape(crumb))
 
-		body, err := y.get(ctx, endpoint)
+		body, err := y.askSummary(ctx, symbol, crumb)
 		if err == nil {
 			return body, nil
 		}
@@ -712,6 +797,17 @@ func (y *Yahoo) summary(ctx context.Context, symbol string) ([]byte, error) {
 	// Unreachable: the loop either returns a body or returns the error that
 	// stopped it. Present so the compiler does not have to take that on trust.
 	return nil, errors.New("the quote source would not accept a session token")
+}
+
+// askSummary makes the request itself, with a crumb or without one.
+func (y *Yahoo) askSummary(ctx context.Context, symbol, crumb string) ([]byte, error) {
+	settings, _ := y.current()
+	endpoint := fmt.Sprintf("%s/v10/finance/quoteSummary/%s?modules=%s&formatted=false",
+		settings.BaseURL, url.PathEscape(symbol), url.QueryEscape("topHoldings,quoteType"))
+	if crumb != "" {
+		endpoint += "&crumb=" + url.QueryEscape(crumb)
+	}
+	return y.getAccepting(ctx, endpoint, anything)
 }
 
 // maxLogoBytes caps one image. Yahoo's brand images are a few kilobytes; a
@@ -894,13 +990,24 @@ func (y *Yahoo) image(ctx context.Context, src string, known LogoValidators) (Lo
 const maxBody = 8 << 20
 
 func (y *Yahoo) get(ctx context.Context, endpoint string) ([]byte, error) {
+	return y.getAccepting(ctx, endpoint, "application/json")
+}
+
+// getAccepting is get with the Accept header spelled out.
+//
+// It exists because not everything on this API answers with JSON: the crumb is
+// served as plain text, and asking for JSON gets an HTTP 406 from Yahoo's edge
+// rather than a crumb. That is content negotiation working exactly as
+// specified, and it is invisible until the one endpoint that isn't JSON is the
+// one you need.
+func (y *Yahoo) getAccepting(ctx context.Context, endpoint, accept string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	settings, client := y.current()
 	req.Header.Set("User-Agent", settings.UserAgent)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 
 	resp, err := client.Do(req)
 	if err != nil {

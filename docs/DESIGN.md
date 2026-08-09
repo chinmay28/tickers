@@ -642,6 +642,23 @@ somebody reloaded it would be worse than no page. Everything about it is
 confined to the fund path, so a handshake that starts failing costs this table
 and leaves quotes, history and publishing untouched.
 
+Three things about that handshake are not guessable and each cost a failure to
+find:
+
+- **The crumb is `text/plain`.** Every other request here asks for
+  `application/json`, and asking the crumb endpoint for it is answered with an
+  HTTP 406 and no token — content negotiation working exactly as specified. The
+  two crumbed requests accept anything.
+- **The cookie has to be one the *API* host will be sent.** It is collected from
+  `fc.yahoo.com`, which is not the API host, and only works because Yahoo scopes
+  it to `.yahoo.com`. So the check after collecting it asks whether the jar
+  would send anything to the base URL, not whether a cookie arrived — a
+  host-only cookie is a successful-looking prelude to a `401`.
+- **A refused handshake is not the end.** Not every deployment of this API
+  demands a crumb, so a token that cannot be got is followed by one plain
+  attempt before the feature is called unavailable. When that fails too, the
+  handshake's error is the one reported, because it is the one with a fix in it.
+
 The composition cache is separate from the price and payout caches and lives far
 longer — a day against ten minutes — for two reasons that agree: funds
 reconstitute quarterly, and this is the endpoint worth asking least often.

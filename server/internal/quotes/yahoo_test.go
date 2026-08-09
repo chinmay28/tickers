@@ -971,3 +971,94 @@ func TestConstituentsRejectsAnEmptySessionToken(t *testing.T) {
 		t.Errorf("the message is %q, which does not say that the source refused", err.Error())
 	}
 }
+
+func TestCrumbRequestAcceptsSomethingOtherThanJSON(t *testing.T) {
+	// The crumb is served as text/plain. Asking for JSON only is answered by
+	// Yahoo's edge with an HTTP 406 and no token — content negotiation working
+	// exactly as specified, and invisible until the one endpoint on this API
+	// that isn't JSON is the one you need.
+	var accept string
+	server := &crumbServer{issued: "abc123", body: topHoldingsJSON}
+	inner := server.handler(t)
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/test/getcrumb" {
+			accept = r.Header.Get("Accept")
+			if !strings.Contains(accept, "*/*") {
+				// Answer as Yahoo does, so the test fails the way production did.
+				w.WriteHeader(http.StatusNotAcceptable)
+				w.Write([]byte(`{"finance":{"error":{"code":"Not Acceptable","description":"HTTP 406 Not Acceptable"}}}`))
+				return
+			}
+		}
+		inner(w, r)
+	})
+
+	if _, err := y.Constituents(context.Background(), "QQQ"); err != nil {
+		t.Fatalf("the handshake failed: %v", err)
+	}
+	if !strings.Contains(accept, "*/*") {
+		t.Errorf("the crumb was requested with Accept: %q, which excludes the text/plain it is served as", accept)
+	}
+}
+
+func TestCrumbFailureNamesWhatToDoAboutIt(t *testing.T) {
+	// A 406 beside a broken card tells an operator nothing. Which of the three
+	// refusals it was decides what they change, so each one says.
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/test/getcrumb" {
+			w.WriteHeader(http.StatusNotAcceptable)
+			w.Write([]byte(`{"finance":{"error":{"description":"HTTP 406 Not Acceptable"}}}`))
+			return
+		}
+		// No cookie, and no holdings without a crumb either.
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	_, err := y.Constituents(context.Background(), "QQQ")
+	if err == nil {
+		t.Fatal("a refused handshake was not reported")
+	}
+	if !strings.Contains(err.Error(), "User-Agent") {
+		t.Errorf("the message is %q; a 406 is about the headers, and saying so is the whole fix", err.Error())
+	}
+}
+
+func TestConstituentsFallsBackToAnUncrumbedRequest(t *testing.T) {
+	// The handshake is a means, not the goal. A deployment that refuses to mint
+	// a token but answers the question anyway should not cost the feature.
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/test/getcrumb":
+			w.WriteHeader(http.StatusNotAcceptable)
+		case strings.HasPrefix(r.URL.Path, "/v10/finance/quoteSummary/"):
+			if r.URL.Query().Has("crumb") {
+				t.Errorf("the fallback request still carried a crumb, which is the thing that could not be got")
+			}
+			w.Write([]byte(topHoldingsJSON))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	fund, err := y.Constituents(context.Background(), "QQQ")
+	if err != nil {
+		t.Fatalf("a source that needs no crumb was treated as unavailable: %v", err)
+	}
+	if len(fund.Holdings) != 2 {
+		t.Errorf("got %d holdings from the uncrumbed request", len(fund.Holdings))
+	}
+}
+
+func TestCookieIsCollectedBeforeTheCrumb(t *testing.T) {
+	// A cookie the API host would never be sent is not a handshake — it is a
+	// successful-looking prelude to a 401.
+	server := &crumbServer{issued: "abc123", body: topHoldingsJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	if _, err := y.Constituents(context.Background(), "QQQ"); err != nil {
+		t.Fatalf("the handshake failed: %v", err)
+	}
+	if !y.hasSessionCookie(y.Effective().BaseURL) {
+		t.Error("no session cookie is held for the API host after a successful handshake")
+	}
+}
