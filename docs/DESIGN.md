@@ -943,6 +943,45 @@ The replacement drops to its own line underneath instead, which is also the
 right reading order: it qualifies the holding above it rather than being a
 fourth thing to fill in. One grid, two `grid-template-areas`, no JavaScript.
 
+### Tables on a phone
+
+Every table in this app lives in an `overflow-x: auto` box, and that box has one
+property worth knowing before touching any of them: **a table inside it lays out
+at max-content and never wraps.** Anything that widens one cell — a date, a
+qualifier, a chip — does not make that column wrap. It makes the table wider,
+and the widening comes off the far end, where the last column slides out of
+sight. It is still scrollable. Nobody scrolls sideways through a table whose
+fourth column they have no reason to think exists, so scrollable is not
+findable, and a column nobody finds may as well not have been computed.
+
+Four rules claw the width back, and they are general because the problem is:
+
+1. **Cell padding shrinks.** 0.7rem either side of six columns is 130px of a
+   390px screen spent on air.
+2. **A value's caption goes under it, not beside it** — the high and its date,
+   the return and its baseline, the cycle and what triggered it. `.perf-when`
+   is `display: block` on a phone and inline everywhere else.
+3. **A qualifier on a row header goes under it too, and loses the header's
+   uppercasing on the way down.** "PART YEAR" letter-spaced is half again the
+   width of "part year", and it is a note about the row rather than a label
+   for it.
+4. **A row header long enough to set its column's width wraps.** "Year to date"
+   over two lines costs a row 14px of height; the column it widens costs the
+   last column its place on the screen.
+
+Two things are exceptions on purpose:
+
+- **The run log stops being a table.** Four columns of counters is a table; the
+  fifth thing each row carries is a sentence — an HTTP failure with a URL in it
+  — and a sentence in the 90px left over is a column of syllables. On a phone
+  the row becomes a block: counters on one line, detail across the full width
+  underneath. The one count that cannot be read without its heading grows a
+  word, since its heading is gone.
+- **The summary table has its own breakpoint, at 940px rather than 640px.** It
+  was overflowing on an iPad held upright by more than it ever did on a phone,
+  on the far side of a media query written for phones. A breakpoint belongs to
+  the thing that stops fitting, not to a class of device.
+
 ### The performance sheet
 
 A second `<dialog>` in the shell, for the same reason: a chart being scrubbed
