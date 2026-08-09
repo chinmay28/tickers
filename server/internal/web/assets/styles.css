@@ -1057,6 +1057,20 @@ svg {
   display: flex;
   align-items: flex-end;
 }
+/* Sections an old route still links to. The header is sticky, so scrolling one
+   to the top of the viewport puts its heading underneath the header — the
+   reader lands on the section and cannot see which section it is. */
+[id^='section-'] {
+  scroll-margin-top: 4.75rem;
+}
+/* The control that opens the cycle log deeper. Inside the card's padded body
+   under a table that has none of its own, so it brings its own. */
+.runs__more {
+  display: flex;
+  justify-content: center;
+  padding: 0.85rem;
+  border-top: 1px solid var(--border);
+}
 .holding__name {
   display: inline-flex;
   align-items: center;

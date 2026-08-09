@@ -154,7 +154,7 @@ func TestRunCycleIsRecordedAndSurfacedAsStatus(t *testing.T) {
 		t.Errorf("status.Provider = %q", status.Provider)
 	}
 
-	runs, err := st.Runs(10)
+	runs, _, err := st.Runs(10)
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("runs = %d (err %v), want 1", len(runs), err)
 	}

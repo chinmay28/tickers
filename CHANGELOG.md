@@ -7,6 +7,28 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Publishing moves under Settings, and the cycle log pages
+
+**Publishing is now the last part of Settings**, not a tab of its own.
+Destinations, the payload they receive and the cycles that sent it are all
+answers to "is this configured the way I meant", and they were a whole tab away
+from the interval that decides how often any of it happens. The page now reads
+in the order the work happens: what to fetch and how often, where it goes, what
+it looks like, what happened to it. `#/publishing` still works and lands on the
+section.
+
+**Recent cycles opens on the newest 25**, with **Show 25 older** up to the 500
+the server keeps — the log had been fetching and rendering a fixed 40 rows on
+every ten-second poll, which buried the row anyone was actually looking for.
+
+- The window is always "the newest N", never a page number. The log is appended
+  to at one end and pruned at the other while it is being read, so a page number
+  means something different on each poll; this way the newest cycle is the first
+  row however deep the log has been opened.
+- Opening it deeper sticks until you leave the page.
+- `GET /api/runs` answers with a `more` flag alongside the rows, so the button
+  appears only when there is something behind it.
+
 ### Look through a fund
 
 A new **Funds** page opens any ETF the quote source knows — `#/funds/QQQ` — and

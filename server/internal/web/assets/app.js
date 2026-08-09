@@ -278,6 +278,19 @@ const del = send('DELETE');
 const POLL_MS = 10_000;
 const DEV_FLASH_MS = 3000;
 
+/** How many cycles the log shows at a time.
+ *
+ *  Small on purpose. The log answers "did the last one go, and if not why" far
+ *  more often than it answers anything about last Tuesday, and a page that
+ *  opens with two hundred rows buries the row that matters under the ones that
+ *  don't. Deeper is one button away and stays open once asked for. */
+const RUNS_PAGE = 25;
+
+/** The most the server will return, matching store.RunKeep. Asking past it is
+ *  clamped there rather than refused, so this only decides when the button
+ *  stops being offered. */
+const RUNS_MAX = 500;
+
 const state = {
   data: null,
   connected: true,
@@ -306,12 +319,20 @@ const state = {
    *  of handlers drives both. */
   fund: null,
   runs: [],
+  /** How many cycles the log is showing, and whether the server has older ones
+   *  behind them. The count grows a page at a time and never shrinks while the
+   *  page is open — a reader who opened the log deeper should not have it fold
+   *  back up under them on the next poll. */
+  runsShown: RUNS_PAGE,
+  runsMore: false,
   busy: false,
   /** An inline, non-`act` request is in flight (a button showing "Testing…"),
    *  so a background redraw would undo its state mid-flight. */
   inlineBusy: false,
   /** A background redraw was skipped and is owed once the field is released. */
   renderPending: false,
+  /** A section the next redraw should scroll to, once — see MOVED. */
+  pendingScroll: '',
 };
 
 async function loadState(opts) {
@@ -340,11 +361,19 @@ async function refreshView(opts) {
   if (route() === 'funds' && routeArg() && state.fund?.symbol !== routeArg().toUpperCase()) {
     loadFund(routeArg());
   }
-  if (route() === 'publishing') {
+  if (route() === 'settings') {
     try {
-      state.runs = (await api('/runs?limit=40'))?.runs ?? [];
+      // The window is "the newest N", not "page number N". It grows when the
+      // reader asks for more and is re-fetched whole on every poll, which is
+      // what keeps a log being appended to at one end and pruned at the other
+      // from needing cursors that go stale between redraws — the newest cycle
+      // is always the first row, however deep the page has been opened.
+      const body = await api(`/runs?limit=${state.runsShown}`);
+      state.runs = body?.runs ?? [];
+      state.runsMore = Boolean(body?.more);
     } catch {
       state.runs = [];
+      state.runsMore = false;
     }
   }
   await loadState(opts);
@@ -490,14 +519,31 @@ function restoreFocus(snap) {
  * Router
  * ------------------------------------------------------------------ */
 
-const ROUTES = ['watchlist', 'portfolios', 'funds', 'publishing', 'settings'];
+const ROUTES = ['watchlist', 'portfolios', 'funds', 'settings'];
+
+/** Routes that used to exist and now land somewhere else.
+ *
+ *  Publishing is part of Settings: destinations, the payload they receive and
+ *  the cycles that sent it are all answers to "is this configured the way I
+ *  meant", and they were a whole tab away from the interval that decides how
+ *  often any of it happens. The old hash still works — it is in bookmarks and
+ *  in the phone's tab bar history — and it lands on the section rather than at
+ *  the top of a long page. */
+const MOVED = { publishing: { route: 'settings', section: 'publishing' } };
 
 /** The route is the first segment, so a page can carry a subject in the second.
  *  Funds is the only one that does — `#/funds/QQQ` — and it is a path rather
  *  than a query because a fund page is a thing you send somebody, not a filter
  *  you set. Every existing hash has one segment and is unaffected. */
 function route() {
-  return ROUTES.includes(routePath()[0]) ? routePath()[0] : 'watchlist';
+  const first = routePath()[0];
+  if (MOVED[first]) return MOVED[first].route;
+  return ROUTES.includes(first) ? first : 'watchlist';
+}
+
+/** The section a moved route should be scrolled to, once. */
+function movedSection() {
+  return MOVED[routePath()[0]]?.section ?? '';
 }
 
 /** What the route is about: `QQQ` in `#/funds/QQQ`, empty where there is none. */
@@ -573,9 +619,6 @@ function render({ force = false } = {}) {
     case 'funds':
       view.innerHTML = renderFunds(data);
       break;
-    case 'publishing':
-      view.innerHTML = renderPublishing(data);
-      break;
     case 'settings':
       view.innerHTML = renderSettings(data);
       break;
@@ -586,6 +629,19 @@ function render({ force = false } = {}) {
 
   restoreDrafts();
   restoreFocus(focus);
+  scrollToSection();
+}
+
+/** Scroll a moved route to the section it used to be, exactly once.
+ *
+ *  Once, because #view is redrawn every ten seconds: a scroll that ran on every
+ *  redraw would drag the page back the moment anyone scrolled away from it. The
+ *  flag is set by the hash change and cleared here. */
+function scrollToSection() {
+  if (!state.pendingScroll) return;
+  const target = $(`#section-${state.pendingScroll}`);
+  state.pendingScroll = '';
+  target?.scrollIntoView({ block: 'start', behavior: 'auto' });
 }
 
 function renderFooter(data) {
@@ -1794,9 +1850,9 @@ function renderPublishing(data) {
   const preview = JSON.stringify(data.preview, null, 2);
 
   return `
-    <div class="page-head">
+    <div class="page-head page-head--sub" id="section-publishing">
       <div>
-        <h1>Publishing</h1>
+        <h2>Publishing</h2>
         <p>
           After every refresh the snapshot is PUT to
           <code>{base URL}/{key}</code>; if that fails it is POSTed to the base
@@ -1809,7 +1865,7 @@ function renderPublishing(data) {
 
     <div class="card">
       <div class="card__head">
-        <h2 class="card__title">Destinations</h2>
+        <h3 class="card__title">Destinations</h3>
         <button class="btn btn--sm btn--primary" data-action="new-sink" type="button">Add destination</button>
       </div>
       <div class="card__body">
@@ -1834,7 +1890,7 @@ function renderPublishing(data) {
 
     <div class="card">
       <div class="card__head">
-        <h2 class="card__title">Payload preview</h2>
+        <h3 class="card__title">Payload preview</h3>
         <span class="field__hint">format: minion (legacy) · exactly what a destination receives right now</span>
       </div>
       <div class="card__body">
@@ -1853,10 +1909,19 @@ function renderCycles(data) {
   const engine = data.engine;
 
   return `
-    <div class="page-head page-head--sub">
+    <div class="page-head page-head--sub" id="section-cycles">
       <div>
         <h2>Recent cycles</h2>
-        <p>The last ${runs.length} refresh cycles, newest first. Every cycle is recorded whether it succeeded or not.</p>
+        <p>
+          ${
+            // "The last 25 of them" rather than "25", because with a button
+            // offering more the count is a position in a log, not its size.
+            state.runsMore
+              ? `The newest ${runs.length} refresh cycles, and there are older ones.`
+              : `All ${runs.length} recorded refresh ${runs.length === 1 ? 'cycle' : 'cycles'}, newest first.`
+          }
+          Every cycle is recorded whether it succeeded or not.
+        </p>
       </div>
       <button class="btn btn--outline" id="refresh-view" type="button">Reload</button>
     </div>
@@ -1879,6 +1944,15 @@ function renderCycles(data) {
                 </tr></thead>
                 <tbody>${runs.map(runRow).join('')}</tbody>
               </table></div>`
+        }
+        ${
+          state.runsMore && state.runsShown < RUNS_MAX
+            ? `<div class="runs__more">
+                 <button class="btn btn--sm btn--outline" data-action="more-runs" type="button">
+                   Show ${RUNS_PAGE} older
+                 </button>
+               </div>`
+            : ''
         }
       </div>
     </div>
@@ -2242,6 +2316,14 @@ function renderSettings(data) {
         </div>
       </div>
     </div>
+
+    ${
+      // Publishing last, and in this order: where snapshots go, what they look
+      // like, and what happened to them. It ends the page because the cycle log
+      // is the one section that grows — everything above it stays a fixed
+      // height however long the app has been running.
+      renderPublishing(data)
+    }
   `;
 }
 
@@ -2315,6 +2397,13 @@ $('#view').addEventListener('click', (event) => {
     case 'period':
       setRun({ period: button.dataset.key });
       render({ force: true });
+      break;
+    // Opening the log deeper. It re-fetches rather than appending, so the rows
+    // already on screen are refreshed by the same request that adds the older
+    // ones and the newest cycle stays the first row.
+    case 'more-runs':
+      state.runsShown = Math.min(state.runsShown + RUNS_PAGE, RUNS_MAX);
+      refreshView({ force: true });
       break;
     case 'holdings-sort': {
       const key = button.dataset.key;
@@ -3502,6 +3591,7 @@ $('#dev-badge').addEventListener('click', () => {
  * ------------------------------------------------------------------ */
 
 window.addEventListener('hashchange', () => {
+  state.pendingScroll = movedSection();
   // A route change wants fresh data for the view it lands on; Activity in
   // particular has its own collection. It redraws unconditionally — a tab that
   // didn't move because a field still had focus would be a worse bug than the
@@ -3510,5 +3600,8 @@ window.addEventListener('hashchange', () => {
   refreshView({ force: true });
 });
 
+// A moved hash typed straight into the address bar fires no hashchange, so the
+// first paint has to pick the section up too.
+state.pendingScroll = movedSection();
 refreshView();
 setInterval(loadState, POLL_MS);
