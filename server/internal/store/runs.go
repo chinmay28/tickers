@@ -43,16 +43,30 @@ func (s *Store) AppendRun(r Run) (Run, error) {
 	return r, nil
 }
 
-// Runs returns the most recent cycles, newest first.
-func (s *Store) Runs(limit int) ([]Run, error) {
-	if limit <= 0 || limit > RunKeep {
-		limit = 50
+// RunPage is how many cycles a request returns when it doesn't say.
+const RunPage = 25
+
+// Runs returns the most recent cycles, newest first, and whether there are
+// older ones behind them.
+//
+// `more` comes from asking for one row past the page rather than from a second
+// COUNT: two queries against a table the refresh loop is inserting into can
+// disagree, and the disagreement shows up as a "show older" button that leads
+// to nothing.
+func (s *Store) Runs(limit int) ([]Run, bool, error) {
+	if limit <= 0 {
+		limit = RunPage
+	}
+	// Clamped rather than rejected: the log is pruned to RunKeep, so asking for
+	// more is asking for everything, which is what this gives.
+	if limit > RunKeep {
+		limit = RunKeep
 	}
 	rows, err := s.db.Query(`
 		SELECT id, started_at, finished_at, trigger, ok_count, error_count, publishes, error
-		FROM runs ORDER BY id DESC LIMIT ?`, limit)
+		FROM runs ORDER BY id DESC LIMIT ?`, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 
@@ -65,7 +79,7 @@ func (s *Store) Runs(limit int) ([]Run, error) {
 		)
 		if err := rows.Scan(&r.ID, &startedAt, &finishedAt, &r.Trigger,
 			&r.OKCount, &r.ErrorCount, &blob, &r.Error); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		r.StartedAt = parseTime(startedAt)
 		r.FinishedAt = parseTime(finishedAt)
@@ -79,12 +93,20 @@ func (s *Store) Runs(limit int) ([]Run, error) {
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+
+	more := len(out) > limit
+	if more {
+		out = out[:limit]
+	}
+	return out, more, nil
 }
 
 // LastRun returns the most recent cycle, or ok=false when there hasn't been one.
 func (s *Store) LastRun() (Run, bool, error) {
-	runs, err := s.Runs(1)
+	runs, _, err := s.Runs(1)
 	if err != nil || len(runs) == 0 {
 		return Run{}, false, err
 	}

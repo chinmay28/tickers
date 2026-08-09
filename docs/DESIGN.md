@@ -834,6 +834,42 @@ The client polls `/api/state` every 10s, deliberately shorter than the server's
 30s minimum refresh interval, so a cycle's results never sit invisible for a
 whole poll.
 
+### Four routes, and one that used to be five
+
+Publishing is a section of Settings rather than a page of its own. Destinations,
+the payload they receive and the cycles that sent it are all answers to "is this
+configured the way I meant", and they sat a whole tab away from the interval
+that decides how often any of it happens. The page reads in the order the work
+happens: what to fetch and how often, where it goes, what it looked like, what
+happened to it.
+
+The old `#/publishing` hash still resolves — it is in bookmarks and in phone
+history — and lands on the section rather than at the top of a long page. The
+scroll runs **once**, off a flag the hash change sets and the render clears: a
+view redrawn every ten seconds would otherwise drag the page back to that
+section every time the reader scrolled away from it. The section carries
+`scroll-margin-top`, because the header is sticky and a heading scrolled to the
+top of the viewport lands underneath it.
+
+### The cycle log is a window, not a page number
+
+It shows the newest N and grows by 25 when asked, up to the 500 the server
+keeps. Deliberately not offset paging: the log is appended to at one end and
+pruned at the other *while it is being read*, so "page 3" quietly means
+something different on each poll, and a cursor would need a stack of them to
+walk back up. "The newest N" is immune to both — the newest cycle is the first
+row however deep the log has been opened, and the poll re-fetches the whole
+window rather than merging anything.
+
+N never shrinks while the page is open. Someone who opened the log deeper is
+reading something down there, and folding it back up under them on the next
+poll would be the redraw-under-the-cursor bug wearing different clothes.
+
+The server answers with the rows and a `more` flag rather than a total. It comes
+from selecting one row past the window, not from a second `COUNT`: two queries
+against a table the refresh loop is inserting into can disagree, and that
+disagreement shows up as a button leading to nothing.
+
 Redrawing the whole view every 10s is fine for read-only rows and hostile to
 anyone typing into a form, so a redraw nobody asked for is not allowed to
 happen under a cursor. Two rules cover it, and both are needed:

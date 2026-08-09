@@ -1271,3 +1271,27 @@ func TestFundEndpointSaysWhenTheSourceCannotAnswer(t *testing.T) {
 		t.Fatalf("status %d, body %v — an absent capability is a 501, as it is for history", rec.Code, body)
 	}
 }
+
+func TestRunsEndpointPagesAndSaysWhenThereIsMore(t *testing.T) {
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+	for range 5 {
+		if _, err := h.engine.RunCycle(context.Background(), store.TriggerManual); err != nil {
+			t.Fatalf("cycle: %v", err)
+		}
+	}
+
+	_, body := h.do(t, http.MethodGet, "/api/runs?limit=2", nil)
+	if got := len(body["runs"].([]any)); got != 2 {
+		t.Fatalf("got %d runs, asked for 2", got)
+	}
+	// The flag is what decides whether the page offers to open deeper. Without
+	// it the button is either always there or never.
+	if body["more"] != true {
+		t.Errorf("more = %v; there are older cycles than the two returned", body["more"])
+	}
+
+	_, body = h.do(t, http.MethodGet, "/api/runs?limit=100", nil)
+	if body["more"] != false {
+		t.Errorf("more = %v; every cycle was returned", body["more"])
+	}
+}

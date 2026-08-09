@@ -326,26 +326,13 @@ page shows; the rest of the fund is stated as a percentage rather than implied.
 A quote source that can't answer at all leaves the page unavailable with a
 reason, in the way the performance sheet does.
 
-**Publishing** — where snapshots go. A destination is a base URL, a key, an
-optional category, and a format. After every refresh the snapshot is
-`PUT {base}/{key}`; if that fails (typically a 404 because the entry doesn't
-exist yet) it is `POST {base}`. The page shows a live preview of exactly what a
-destination receives, and **Test** sends the real payload to one destination on
-demand.
+**Settings** — everything that configures a running instance, and the evidence
+that it worked. The refresh interval, history retention, the quote source,
+pinned symbols and logos are at the top; **Publishing** and **Recent cycles**
+are the last two sections of the same page. `#/publishing` still works and
+lands on the Publishing section.
 
-Two formats:
-
-| Format | Payload |
-|---|---|
-| `minion` (default) | `{"VTI": "295.50", "VTI/GLD": "0.9478", "BTC-USD": "N/A", "timestamp": "08/07 14:03:22"}` — the original script's shape, for existing consumers |
-| `detailed` | per-symbol objects with `price`, `previousClose`, `change`, `changePercent`, `currency`, `status`, plus an ISO timestamp |
-
-Below those, **Recent cycles** — the last refresh cycles, with per-symbol
-counts, which verb each destination accepted, and the failures in full. It sits
-here rather than on a page of its own because almost every question it answers
-("did it go?", "why didn't it?") is about a destination listed above it.
-
-**Settings** — three groups, all live:
+The sections, in the order the page shows them:
 
 - *Refresh loop* — how often symbols are fetched (a seconds field plus
   30s/1m/5m/15m/1h presets; 30s is the floor), how long price history is kept,
@@ -381,6 +368,31 @@ here rather than on a page of its own because almost every question it answers
 Below those, a read-only **Server** card shows what the process was started
 with: listen address, database path, whether the client is embedded or served
 from disk, and the quote settings actually in force.
+
+**Publishing** — where snapshots go. A destination is a base URL, a key, an
+optional category, and a format. After every refresh the snapshot is
+`PUT {base}/{key}`; if that fails (typically a 404 because the entry doesn't
+exist yet) it is `POST {base}`. The section shows a live preview of exactly what
+a destination receives, and **Test** sends the real payload to one destination
+on demand.
+
+Two formats:
+
+| Format | Payload |
+|---|---|
+| `minion` (default) | `{"VTI": "295.50", "VTI/GLD": "0.9478", "BTC-USD": "N/A", "timestamp": "08/07 14:03:22"}` — the original script's shape, for existing consumers |
+| `detailed` | per-symbol objects with `price`, `previousClose`, `change`, `changePercent`, `currency`, `status`, plus an ISO timestamp |
+
+Below those, **Recent cycles** — the newest refresh cycles, with per-symbol
+counts, which verb each destination accepted, and the failures in full. It sits
+here rather than on a page of its own because almost every question it answers
+("did it go?", "why didn't it?") is about a destination listed above it.
+
+It opens on the newest 25 and **Show 25 older** extends it, up to the 500 the
+server keeps. The window is always "the newest N" rather than a page number:
+the log is appended to while you read it, and a page number would quietly mean
+something different each time it refreshed. Opening it deeper sticks until you
+leave the page.
 
 Everything in Settings takes effect on the next cycle. Nothing needs a restart.
 

@@ -490,7 +490,7 @@ func TestAppendRunPrunesToRunKeep(t *testing.T) {
 		}
 	}
 
-	runs, err := st.Runs(RunKeep)
+	runs, _, err := st.Runs(RunKeep)
 	if err != nil {
 		t.Fatalf("runs: %v", err)
 	}
@@ -836,5 +836,44 @@ func TestCompositesBehaveLikeOrdinaryRows(t *testing.T) {
 	}
 	if tickers[0].Expression != "VTI/GLD" {
 		t.Errorf("the list query lost the expression: %+v", tickers[0])
+	}
+}
+
+func TestRunsPagesFromTheNewestEnd(t *testing.T) {
+	st := newTestStore(t)
+
+	for i := range 7 {
+		if _, err := st.AppendRun(Run{
+			StartedAt: time.Now(), FinishedAt: time.Now(),
+			Trigger: TriggerSchedule, OKCount: i,
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	page, more, err := st.Runs(3)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(page) != 3 {
+		t.Fatalf("got %d runs, asked for 3", len(page))
+	}
+	if !more {
+		t.Error("the page reports nothing behind it, and four older cycles are there")
+	}
+	// A log read to answer "did the last one go" must open at the newest.
+	if page[0].OKCount != 6 {
+		t.Errorf("the page opens at the run with %d quotes; the newest has 6", page[0].OKCount)
+	}
+
+	all, more, err := st.Runs(RunKeep)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(all) != 7 {
+		t.Errorf("got %d runs of 7 when asking for everything", len(all))
+	}
+	if more {
+		t.Error("every run came back and the page still claims there are older ones")
 	}
 }

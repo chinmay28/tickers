@@ -1023,12 +1023,16 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	runs, err := s.store.Runs(limit)
+	runs, more, err := s.store.Runs(limit)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+	// `more` rather than a total. The log is a window on a table being pruned
+	// from one end and appended to at the other, and a count would be stale
+	// before it was rendered; "there is at least one older cycle" is both true
+	// for longer and the only thing the page does with it.
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "more": more})
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
