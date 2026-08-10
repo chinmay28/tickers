@@ -1203,6 +1203,29 @@ thead .sectors__col {
   align-items: center;
   gap: 0.4rem;
 }
+/* The company under the symbol. Indented past the mark so it hangs off the
+   ticker as a second line of one name rather than reading as a second fact
+   about the row, and capped in width because a fund holds things called
+   "Taiwan Semiconductor Manufacturing Company Limited" — left alone it would
+   set the column's width and push the returns behind a scroll. It wraps
+   instead: a name is worth two lines, and the rows are already tall enough for
+   the second one. */
+.holding__company {
+  display: block;
+  margin-left: 2rem;
+  max-width: 32ch;
+  /* The cell it sits in is a row header, and a header here is set in small
+     spaced capitals — which is a label's voice, not a name's. "Rolls-Royce
+     Holdings plc" has capitals that mean something, and shouting it makes the
+     row read as two headings instead of one name under its symbol. */
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+  font-weight: 400;
+  font-size: 0.78rem;
+  line-height: 1.25;
+  color: var(--muted);
+}
 /* The benchmark is in the table to be ranked against, not to be mistaken for
    something held. Tinted rather than greyed: it has to stay as readable as the
    rows around it, since reading it against them is the entire reason it is
@@ -1784,6 +1807,13 @@ thead .sectors__col {
      the same reason. */
   .holding__name {
     flex-wrap: wrap;
+  }
+  /* And its company name is held to a narrower measure. The name is the least
+     of the three things in the row: at this width the return is what the
+     column beside it is for, and a name allowed to set the column's width
+     takes that from it. Two short lines are the cheaper cost. */
+  .holding__company {
+    max-width: 18ch;
   }
 
   /* The run log stops being a table altogether. Four columns of small facts is
