@@ -217,6 +217,123 @@ type Compositor interface {
 // any fund holds — the look-through is unavailable rather than broken.
 var ErrNoConstituents = errors.New("this quote provider cannot say what a fund holds")
 
+// SectorWeight is one slice of where a symbol's money is invested.
+//
+// Weight is a percentage of the symbol rather than a fraction, matching
+// Constituent.Weight and every other percentage that crosses this package's
+// boundary. Sources quote it both ways, and converting at the edge is what
+// keeps the rest of the app from having to know which one it is talking to.
+type SectorWeight struct {
+	Sector string
+	Weight float64
+}
+
+// SectorNames are the sectors this app knows, in one fixed order.
+//
+// Fixed, and shared with the web client, because the whole point of the card
+// they feed is that two allocations are drawn side by side: "Energy" has to be
+// the same colour in both pies, and it has to stay that colour whichever
+// sectors happen to be in either of them. An order that came out of the data —
+// largest first, say — would repaint every slice the moment a comparison
+// changed.
+//
+// Alphabetical rather than by size or by any of the several conflicting
+// "standard" orders, because it is the one order that is stable, obvious, and
+// nobody's opinion.
+var SectorNames = []string{
+	"Basic Materials",
+	"Communication Services",
+	"Consumer Cyclical",
+	"Consumer Defensive",
+	"Energy",
+	"Financial Services",
+	"Healthcare",
+	"Industrials",
+	"Real Estate",
+	"Technology",
+	"Utilities",
+}
+
+// sectorAliases maps a source's spelling to the canonical name.
+//
+// The key is the name with everything but its letters removed, because the two
+// modules that answer this question disagree with each other: a fund's
+// breakdown comes back keyed `consumer_cyclical` and a company's profile says
+// "Consumer Cyclical". Folding both to bare letters is what lets one table
+// serve the pair — and, later, a second provider that has invented a third
+// spelling.
+var sectorAliases = map[string]string{
+	"basicmaterials":        "Basic Materials",
+	"materials":             "Basic Materials",
+	"communicationservices": "Communication Services",
+	"communication":         "Communication Services",
+	"consumercyclical":      "Consumer Cyclical",
+	"consumerdiscretionary": "Consumer Cyclical",
+	"consumerdefensive":     "Consumer Defensive",
+	"consumerstaples":       "Consumer Defensive",
+	"energy":                "Energy",
+	"financialservices":     "Financial Services",
+	"financial":             "Financial Services",
+	"financials":            "Financial Services",
+	"healthcare":            "Healthcare",
+	"industrials":           "Industrials",
+	"realestate":            "Real Estate",
+	"technology":            "Technology",
+	"informationtechnology": "Technology",
+	"utilities":             "Utilities",
+}
+
+// NormalizeSector maps whatever a source calls a sector onto SectorNames.
+//
+// A name it has never seen is trimmed and handed back as it came rather than
+// dropped or filed under something plausible. It will be drawn without a colour
+// of its own, which is a far smaller lie than counting a sector this build has
+// not heard of as part of a different one.
+func NormalizeSector(name string) string {
+	letters := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return -1
+		}
+	}, name)
+	if canonical, ok := sectorAliases[letters]; ok {
+		return canonical
+	}
+	return strings.TrimSpace(name)
+}
+
+// Classifier is a provider that can also say what a symbol's money is invested
+// in, sector by sector.
+//
+// Optional in the way Historian, Distributor and Compositor are, and asserted
+// at the call site for the same reason. It is deliberately not a method on
+// Compositor even though one source answers both from one request: a company is
+// not a fund and has no constituents, and it still has a sector — folding the
+// two together would make the sector of every individual holding unaskable,
+// which is exactly what a portfolio's look-through is made of.
+type Classifier interface {
+	// Sectors returns where one symbol's money is, largest slice first, in
+	// percentages of that symbol. A fund answers with its breakdown and a
+	// company with a single 100% slice; anything the source will not classify
+	// is ErrUnclassified, which is a durable answer and not a failure.
+	Sectors(ctx context.Context, symbol string) ([]SectorWeight, error)
+}
+
+// ErrNoSectors is what a caller gets when the quote source cannot say what
+// sector anything is in — the allocation card is unavailable rather than
+// broken.
+var ErrNoSectors = errors.New("this quote provider cannot say what sectors a symbol is invested in")
+
+// ErrUnclassified means the source knows this symbol and will not put it in a
+// sector. Durable, like ErrNotFund: a currency pair, a bond fund and a gold
+// trust are all permanently sectorless, and a caller is meant to say so and
+// stop asking.
+var ErrUnclassified = errors.New("that symbol has no sector breakdown")
+
 // ErrNotFund means the source knows this symbol and it has no holdings to
 // report. Durable, like ErrNoLogo: a caller is meant to say so and stop asking.
 var ErrNotFund = errors.New("that symbol is not a fund")

@@ -278,6 +278,28 @@ reinvested — this is a total return, not a price chart.
   nothing invents a jump on the splice date, and the result always names the
   substitution — a proxy nobody was told about is a fabrication. The benchmark
   is never substituted.
+- **Sector allocation** at the bottom: a pie of where the money actually is,
+  and one beside it for every fund you name in **Compare against** — which
+  starts at the portfolio's benchmark, since that is the comparison you have
+  already chosen for every other number on the page. Clear the box to see the
+  allocation on its own; up to four comparisons are drawn, and any past that are
+  named as dropped rather than silently missing.
+  - It is a **look-through**, holding by holding: each fund's own breakdown
+    scaled by what it is held at. Two 60/40s built from different index funds
+    can be ten points apart in technology, and nothing else on the page would
+    say so.
+  - **The slices do not add up to 100, and are not made to.** Each pie says what
+    share of it got a sector at all, and draws the rest in grey. A holding
+    nothing can be said about — gold, cash, a bond fund, a currency pair — is
+    named under the pies rather than folded into the gap, because "40% of this
+    is gold" is the allocation, not a hole in the data.
+  - The breakdown is what the source says **today**, so nothing here feeds a
+    return: it describes the allocation as it stands and never a period.
+  - A colour means one sector everywhere, whichever pies are on screen and
+    however big the slice is in each — that is what makes two of them
+    comparable. The exact figures sit under the pies in a table that is also
+    the legend — three of the eleven fills are too pale to carry a number on
+    their own against a light background, so the figures are text.
 - Holdings need not be on the watchlist, and a holding you also chart costs no
   extra request — the daily series is shared with the performance sheet.
 - **Rebalancing** happens on calendar boundaries (December for annual), not
@@ -314,14 +336,17 @@ and no schedule.
 - **Holdings the source can't price** — cash lines, foreign listings — are
   listed on their own rather than dropped, because they are part of the fund
   and part of no number above.
+- **The same sector card as a portfolio's**, with the fund as its subject —
+  a fund is one holding at 100%, so it is the same look-through. It defaults to
+  comparing against whatever the page is benchmarked to.
 - Series are shared with the performance sheet and with backtests, so a fund
   holding something you already chart costs no extra request.
 
-The holdings come from Yahoo's `quoteSummary`, which — unlike the endpoint
-everything else uses — needs a session cookie and a crumb. All of that is
-confined to this feature: it is done lazily, reused, and retried once when the
-crumb expires, and a source that stops answering costs you this table and
-nothing else. Yahoo reports a fund's **top ten** holdings, so that is what the
+The holdings and the sector breakdowns both come from Yahoo's `quoteSummary`,
+which — unlike the endpoint everything else uses — needs a session cookie and a
+crumb. All of that is confined to these two features: it is done lazily,
+reused, and retried once when the crumb expires, and a source that stops
+answering costs you those cards and nothing else. Yahoo reports a fund's **top ten** holdings, so that is what the
 page shows; the rest of the fund is stated as a percentage rather than implied.
 A quote source that can't answer at all leaves the page unavailable with a
 reason, in the way the performance sheet does.

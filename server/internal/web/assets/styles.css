@@ -44,6 +44,34 @@
   --mark-key-l: 58%;
   --mark-ink-l: 76%;
   --mark-fill: 18%;
+  /* The sector pies. Eleven fixed hues, one per sector, assigned by position
+     in quotes.SectorNames and never by size — two pies side by side are only
+     comparable if "Energy" is the same colour in both, whatever share it has
+     in either and whichever other sectors are on screen.
+     The *order* is the accessibility mechanism, not decoration: slices are
+     drawn round the circle in this order, so neighbouring slices are always
+     neighbouring slots, and the ordering was picked by search over the eleven
+     hues to maximise the worst adjacent pair under simulated protanopia and
+     deuteranopia. It clears ΔE 9.2 (OKLab ×100) in both themes, against a
+     target of 8. Re-run that search before reordering anything here.
+     Three of the light fills sit under 3:1 against the card, which is why the
+     card carries the figures as a table and not only as a picture. */
+  --sector-1: #d55181; /* Basic Materials */
+  --sector-2: #008300; /* Communication Services */
+  --sector-3: #9085e9; /* Consumer Cyclical */
+  --sector-4: #c07a2e; /* Consumer Defensive */
+  --sector-5: #159fc0; /* Energy */
+  --sector-6: #e66767; /* Financial Services */
+  --sector-7: #bb60cf; /* Healthcare */
+  --sector-8: #d95926; /* Industrials */
+  --sector-9: #199e70; /* Real Estate */
+  --sector-10: #3987e5; /* Technology */
+  --sector-11: #c98500; /* Utilities */
+  /* The part of a basket that is in no sector at all — cash, bonds, gold, a
+     currency pair — and the fallback for a sector name this build has never
+     heard of. Grey on purpose: it is the one slice that means "nothing to
+     say", and the table beside the pie is what tells the two cases apart. */
+  --sector-none: #55636c;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 24px 60px rgb(0 0 0 / 0.45);
   --radius: 14px;
@@ -85,6 +113,20 @@
     --mark-key-l: 46%;
     --mark-ink-l: 32%;
     --mark-fill: 13%;
+    /* The same eleven hues stepped for the light card, in the same order —
+       not the dark values flipped. Validated as their own set. */
+    --sector-1: #e87ba4;
+    --sector-2: #008300;
+    --sector-3: #4a3aa7;
+    --sector-4: #9c5a1e;
+    --sector-5: #0f8fb0;
+    --sector-6: #e34948;
+    --sector-7: #a03fb5;
+    --sector-8: #eb6834;
+    --sector-9: #1baf7a;
+    --sector-10: #2a78d6;
+    --sector-11: #eda100;
+    --sector-none: #9aa8b0;
     --shadow: 0 1px 2px rgb(15 30 40 / 0.08);
     --shadow-lg: 0 24px 60px rgb(15 30 40 / 0.16);
   }
@@ -1050,6 +1092,91 @@ svg {
   gap: 0.3rem;
   margin: 0 0 0.7rem;
 }
+/* ------------------------------------------------------------------ *
+ * Sector allocation
+ *
+ * A row of donuts and the table that is both their legend and their
+ * numbers. The two are one component, not a chart with a caption: three of
+ * the eleven light fills are under 3:1 against the card, so the figures in
+ * text are what keeps the card readable rather than a courtesy.
+ * ------------------------------------------------------------------ */
+.sectors__form {
+  display: grid;
+  /* Capped rather than 1fr: the field takes a handful of symbols, and one
+     stretched across a laptop reads as though it wanted a paragraph. */
+  grid-template-columns: minmax(12rem, 26rem) auto;
+  justify-content: start;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
+/* The pies wrap rather than scroll. A row that scrolled sideways would put
+   the comparison off-screen, and a comparison you have to swipe to is not
+   one — five across on a laptop, two on a phone, all of them the same size. */
+.sectors__pies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.1rem;
+  justify-content: flex-start;
+}
+.pie {
+  margin: 0;
+  width: 8.25rem;
+}
+.pie__chart {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.pie__caption {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 0.4rem;
+  text-align: center;
+}
+.pie__label {
+  font-weight: 650;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.pie__meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.sectors__table {
+  margin-top: 1.1rem;
+}
+/* Right-aligned and tabular so the columns can be read down as well as
+   across — comparing two allocations is a vertical scan of the gaps. */
+.sectors__col {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+thead .sectors__col {
+  font-family: var(--sans);
+  overflow-wrap: anywhere;
+}
+/* The remainder row. Quieter because it is what the card could *not* say. */
+.sectors__rest th,
+.sectors__rest td {
+  color: var(--muted);
+}
+.sector__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+/* The swatch is the legend. A ring of the surface around it is the same 2px
+   gap the slices carry, so a chip and its slice read as the same object. */
+.sector__swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: none;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px var(--border);
+}
+
 /* A submit sitting in a form-grid cell beside the fields rather than under
    them. The label above it is empty, so the button needs the height the label
    would have taken to line up with the inputs it belongs to. */
@@ -1515,6 +1642,16 @@ svg {
   .select {
     font-size: 16px;
     min-height: 2.75rem;
+  }
+
+  /* The comparison box and its button stack. Side by side, neither the field
+     nor the button has room to be tapped at this width — and a button left
+     hanging at the end of its own row reads as belonging to what follows it. */
+  .sectors__form {
+    grid-template-columns: 1fr;
+  }
+  .sectors__form .btn {
+    width: 100%;
   }
 
   /* The dialog becomes a bottom sheet: full width, anchored to the bottom

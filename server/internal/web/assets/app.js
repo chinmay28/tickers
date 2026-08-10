@@ -256,7 +256,13 @@ async function api(path, options = {}) {
     }
   }
   if (!response.ok) {
-    throw new Error(body?.error || `HTTP ${response.status}`);
+    const error = new Error(body?.error || `HTTP ${response.status}`);
+    // The status rides along for the one caller that treats a code as an
+    // answer rather than a failure: a 501 means the quote source doesn't do
+    // that, which is a card that shouldn't be drawn, not an error to shout
+    // about. Everything else still only ever reads the message.
+    error.status = response.status;
+    throw error;
   }
   return body;
 }
@@ -313,6 +319,13 @@ const state = {
    *  the page shows the result under the list, and running a second replaces
    *  the first rather than growing a stack of them. */
   backtest: null,
+  /** The sector card under each run, by the slot the run lives in. Per slot
+   *  rather than one between them, because Portfolios and Funds each keep their
+   *  own run: opening a fund and coming back would otherwise leave the
+   *  portfolio's chart with the card underneath it gone. Each entry carries the
+   *  subject it belongs to, the comparison symbols as they were typed, and what
+   *  came back — see sectorSubject for what `key` is. */
+  sectors: {},
   /** The fund being looked through: its symbol, whether it is in flight, and
    *  what came back. Shaped like `backtest` on purpose — the two pages show the
    *  same card, so the period and the sort live in the same fields and one set
@@ -984,7 +997,7 @@ function renderPortfolios(data) {
       </div>
     </div>
 
-    ${renderBacktest(data)}
+    ${renderBacktest()}
   `;
 }
 
@@ -1063,17 +1076,22 @@ function portfolioRow(p) {
   `;
 }
 
+/** What a run calls itself. Read off the saved list rather than off the result,
+ *  which knows what it simulated and not whose allocation it was — and shared
+ *  with the sector card underneath so the two headings can never disagree. */
+function backtestName(id) {
+  if (id === 'draft') return 'Unsaved allocation';
+  return state.data?.portfolios?.find((p) => p.id === id)?.name ?? 'Portfolio';
+}
+
 /** The result panel: whichever run was asked for last, in whatever state it is
  *  in. Nothing at all before the first run — an empty chart frame implies the
  *  answer is "flat" rather than "not asked yet". */
-function renderBacktest(data) {
+function renderBacktest() {
   const run = state.backtest;
   if (!run) return '';
 
-  const name =
-    run.id === 'draft'
-      ? 'Unsaved allocation'
-      : data.portfolios?.find((p) => p.id === run.id)?.name ?? 'Portfolio';
+  const name = backtestName(run.id);
 
   if (run.status === 'loading') {
     return `
@@ -1134,6 +1152,7 @@ function renderBacktest(data) {
     </div>
 
     ${holdingsCard(b)}
+    ${sectorsCard(sectorSubject(b, { label: name }))}
   `;
 }
 
@@ -1640,6 +1659,361 @@ function yieldCell(value) {
   return `${value.toFixed(2)}%`;
 }
 
+/* ------------------------- Sector allocation -------------------------
+ *
+ * Where the money actually is, and how that compares with the funds a reader
+ * names. It sits under the holding table because it answers the question that
+ * one leaves open: "what did each holding do" is about the names, and this is
+ * about what the names amount to.
+ *
+ * A look-through, not a lookup — the server adds up each holding's own
+ * breakdown scaled by what it is held at, so two 60/40s built from different
+ * index funds can and do come out ten points apart in technology.
+ *
+ * Portfolios and Funds share it, as they share the holding card, because a fund
+ * is one holding at 100% and the maths does not care which page asked. */
+
+/** The sectors, in the order the pies are drawn round and the colour tokens are
+ *  numbered.
+ *
+ *  This list is `quotes.SectorNames` in the server, and the two have to agree —
+ *  a sector's colour is looked up by its position here, and the server sorts
+ *  slices into the same order so every pie on the card runs the same way round.
+ *  That is the whole comparison mechanism: "Energy" is one colour in every pie,
+ *  whichever pies are on screen, however big its slice is in each.
+ *
+ *  A sector the server sends that is not on this list is drawn in the neutral
+ *  and still named in the table — see styles.css. */
+const SECTORS = [
+  'Basic Materials',
+  'Communication Services',
+  'Consumer Cyclical',
+  'Consumer Defensive',
+  'Energy',
+  'Financial Services',
+  'Healthcare',
+  'Industrials',
+  'Real Estate',
+  'Technology',
+  'Utilities',
+];
+
+/** A sector's fill. The neutral doubles as the colour of the part of a basket
+ *  that has no sector at all, which is right: both are "nothing to say here",
+ *  and the table beside the pie is what tells them apart by name. */
+function sectorFill(name) {
+  const slot = SECTORS.indexOf(name);
+  return slot < 0 ? 'var(--sector-none)' : `var(--sector-${slot + 1})`;
+}
+
+/** A share of a basket. Never signed — an allocation is not a move — and one
+ *  decimal, because the sources quote these to about that. */
+function share(value) {
+  if (value === null || value === undefined) return '—';
+  return `${value.toFixed(1)}%`;
+}
+
+/** What the card is looking through, and what it compares against until
+ *  somebody says otherwise.
+ *
+ *  `symbol` is given on the fund page, where the subject is the fund itself
+ *  rather than an allocation; everywhere else the run's own holdings are it,
+ *  with the weights the simulation actually used rather than the ones typed
+ *  into the form.
+ *
+ *  The default comparison is the run's benchmark. It is the fund a reader has
+ *  already chosen to measure this against on every other card on the page, so
+ *  making them type it again here would be asking a question they have
+ *  answered. */
+function sectorSubject(b, { label, symbol } = {}) {
+  const holdings = symbol
+    ? [{ symbol, weight: 100 }]
+    : (b.holdings ?? []).map((h) => ({ symbol: h.symbol, weight: h.weight }));
+  return {
+    // Which run this belongs to. A second portfolio, or another fund, is a
+    // different subject and drops the card rather than showing the last one's
+    // pies under the new one's name.
+    key: `${runSlot()}:${symbol || currentRun()?.id || label}`,
+    label,
+    holdings,
+    benchmark: b.benchmark?.label ?? '',
+  };
+}
+
+/** The card. Its comparison box carries the subject in its draft key, so what
+ *  is typed into one run's box is never put back into the next one's — a box
+ *  reading "SPY, QQQ" over pies drawn for the benchmark alone is worse than an
+ *  empty one. */
+function sectorsCard(subject) {
+  if (!subject.holdings.length) return '';
+  const run = state.sectors[runSlot()];
+  // Nothing until the lookup for *this* subject has been asked for, and nothing
+  // ever on a quote source that cannot classify anything — a page missing a
+  // card, not a broken one.
+  if (!run || run.key !== subject.key || run.status === 'unavailable') return '';
+
+  return `
+    <div class="card">
+      <div class="card__head">
+        <div class="card__heading">
+          <h3 class="card__title">Sector allocation</h3>
+          <span class="card__meta">what the money is actually in, holding by holding</span>
+        </div>
+      </div>
+      <div class="card__body">
+        <form class="sectors__form" data-sector-form
+              data-form-key="sectors:${esc(subject.key)}" autocomplete="off">
+          <div class="field">
+            <label class="field__label" for="sector-peers">Compare against</label>
+            <input class="input" id="sector-peers" name="peers" type="text" placeholder="SPY, QQQ"
+                   value="${esc(run.peers ?? '')}" />
+            <span class="field__hint">
+              ${
+                subject.benchmark
+                  ? `Defaults to the benchmark, ${esc(subject.benchmark)}. Clear it to see the allocation on its own.`
+                  : 'Any funds you like, separated by commas. Clear it to see the allocation on its own.'
+              }
+            </span>
+          </div>
+          <div class="field field--actions">
+            <button class="btn btn--outline" type="submit">Compare</button>
+          </div>
+        </form>
+        ${sectorsBody(run)}
+      </div>
+    </div>`;
+}
+
+function sectorsBody(run) {
+  if (run.status === 'loading') {
+    return '<div class="empty"><strong>Looking through the holdings</strong>What each one is invested in, scaled by what it is held at.</div>';
+  }
+  if (run.status === 'error') {
+    return `<div class="empty"><strong>Couldn't work out the sectors</strong>${esc(run.error)}</div>`;
+  }
+
+  const report = run.data;
+  const baskets = [report.subject, ...(report.peers ?? [])];
+  return `
+    ${(report.notes ?? []).map((note) => `<p class="field__hint">${esc(note)}</p>`).join('')}
+    <div class="sectors__pies">${baskets.map(sectorPie).join('')}</div>
+    ${sectorTable(baskets)}
+    ${baskets.map(unclassifiedNote).join('')}`;
+}
+
+/* The pie itself.
+ *
+ * A donut rather than a disc: the hole is where the coverage goes, and it is
+ * the number that stops the picture reading as the whole basket. Slices are
+ * separated by a ring of the card's own colour rather than by a stroke of
+ * their own, so two neighbouring sectors are told apart by a gap and not only
+ * by hue — which is what makes the card survive being looked at by somebody who
+ * cannot see the difference between the two.
+ *
+ * The part of a basket nothing could be said about is drawn, in the neutral,
+ * rather than the slices being scaled up to fill the circle. A bond fund is
+ * mostly not in any equity sector, and a pie that hid that would say it was
+ * 60% financials. */
+const PIE = { size: 132, outer: 60, inner: 36, gap: 2 };
+
+/** How much of a basket got a sector, as a figure to print.
+ *
+ *  Clamped at 100 because sources round: eleven weightings quoted to two
+ *  decimals routinely add up to 100.4, and "100.4% in a sector" reads as a bug
+ *  in this app rather than as rounding in somebody else's feed. The pie itself
+ *  divides by the sum it actually has, so a basket over 100 is drawn in correct
+ *  proportion either way. */
+function coverage(basket) {
+  return Math.min(100, basket.covered ?? 0);
+}
+
+function sectorPie(basket) {
+  const slices = (basket.slices ?? []).filter((s) => s.weight > 0.005);
+  const rest = 100 - (basket.covered ?? 0);
+  // Last, and always last: it is the remainder, so it closes the circle.
+  if (rest > 0.05) slices.push({ sector: '', weight: rest, rest: true });
+
+  const label = `${basket.label}: ${
+    slices.length
+      ? slices.map((s) => `${s.sector || 'unclassified'} ${share(s.weight)}`).join(', ')
+      : 'nothing the quote source will put in a sector'
+  }`;
+
+  return `
+    <figure class="pie">
+      <svg class="pie__chart" viewBox="0 0 ${PIE.size} ${PIE.size}" role="img" aria-label="${esc(label)}">
+        ${
+          slices.length
+            ? slicePaths(slices)
+            : `<circle cx="${PIE.size / 2}" cy="${PIE.size / 2}" r="${
+                (PIE.outer + PIE.inner) / 2
+              }" fill="none" stroke="var(--border)" stroke-width="${PIE.outer - PIE.inner}" />`
+        }
+      </svg>
+      <figcaption class="pie__caption">
+        <span class="pie__label">${esc(basket.label)}</span>
+        <span class="pie__meta">${
+          basket.covered > 0 ? `${esc(share(coverage(basket)))} in a sector` : 'no sector breakdown'
+        }</span>
+      </figcaption>
+    </figure>`;
+}
+
+function slicePaths(slices) {
+  const c = PIE.size / 2;
+  // One slice at 100% has no arc — its start and end are the same point, and
+  // every arc flag would be a guess. A ring is the same picture and cannot be
+  // drawn wrong.
+  if (slices.length === 1) {
+    return `<circle cx="${c}" cy="${c}" r="${(PIE.outer + PIE.inner) / 2}" fill="none"
+                    stroke="${sectorFill(slices[0].sector)}" stroke-width="${PIE.outer - PIE.inner}"
+            ><title>${esc(sliceTitle(slices[0]))}</title></circle>`;
+  }
+
+  const total = slices.reduce((sum, s) => sum + s.weight, 0) || 100;
+  // From twelve o'clock, clockwise, which is the only way anybody reads a pie.
+  const point = (radius, turn) => {
+    const angle = turn * 2 * Math.PI - Math.PI / 2;
+    return `${(c + radius * Math.cos(angle)).toFixed(2)} ${(c + radius * Math.sin(angle)).toFixed(2)}`;
+  };
+
+  let at = 0;
+  return slices
+    .map((slice) => {
+      const from = at;
+      at += slice.weight / total;
+      const big = at - from > 0.5 ? 1 : 0;
+      const d = [
+        `M${point(PIE.outer, from)}`,
+        `A${PIE.outer} ${PIE.outer} 0 ${big} 1 ${point(PIE.outer, at)}`,
+        `L${point(PIE.inner, at)}`,
+        `A${PIE.inner} ${PIE.inner} 0 ${big} 0 ${point(PIE.inner, from)}`,
+        'Z',
+      ].join(' ');
+      return `<path d="${d}" fill="${
+        slice.rest ? 'var(--sector-none)' : sectorFill(slice.sector)
+      }" stroke="var(--surface)" stroke-width="${PIE.gap}" stroke-linejoin="round"
+      ><title>${esc(sliceTitle(slice))}</title></path>`;
+    })
+    .join('');
+}
+
+function sliceTitle(slice) {
+  return `${slice.sector || 'Not in any sector the quote source names'} — ${share(slice.weight)}`;
+}
+
+/** The legend and the numbers, in one table.
+ *
+ *  One thing rather than two because they are one thing: a swatch beside a name
+ *  is what makes the pies readable, and the exact figures beside it are what
+ *  makes them comparable. Three of the eleven fills sit under 3:1 against the
+ *  light card, so the numbers being here in text is not a nicety — it is what
+ *  keeps the card readable when the colours are not. */
+function sectorTable(baskets) {
+  const rows = SECTORS.filter((name) =>
+    baskets.some((b) => (b.slices ?? []).some((s) => s.sector === name)),
+  );
+  // Anything the server named that this build has never heard of, after the
+  // ones it has. Never in practice; visible rather than swallowed if ever.
+  for (const basket of baskets) {
+    for (const slice of basket.slices ?? []) {
+      if (!rows.includes(slice.sector)) rows.push(slice.sector);
+    }
+  }
+  if (!rows.length) return '';
+
+  const weightIn = (basket, sector) =>
+    (basket.slices ?? []).find((s) => s.sector === sector)?.weight;
+
+  return `
+    <div class="table-scroll"><table class="table sectors__table">
+      <thead><tr>
+        <th>Sector</th>
+        ${baskets.map((b) => `<th class="sectors__col">${esc(b.label)}</th>`).join('')}
+      </tr></thead>
+      <tbody>
+        ${rows
+          .map(
+            (sector) => `<tr>
+              <th><span class="sector__name"><span class="sector__swatch" style="background:${sectorFill(
+                sector,
+              )}"></span>${esc(sector)}</span></th>
+              ${baskets
+                .map((b) => `<td class="sectors__col">${esc(share(weightIn(b, sector)))}</td>`)
+                .join('')}
+            </tr>`,
+          )
+          .join('')}
+        <tr class="sectors__rest">
+          <th><span class="sector__name"><span class="sector__swatch"
+              style="background:var(--sector-none)"></span>Unclassified</span></th>
+          ${baskets
+            .map(
+              (b) => `<td class="sectors__col">${esc(share(100 - coverage(b)))}</td>`,
+            )
+            .join('')}
+        </tr>
+      </tbody>
+    </table></div>`;
+}
+
+/** Which of a basket's holdings the source would not place.
+ *
+ *  Named rather than folded silently into the remainder, because for a
+ *  portfolio it is usually the most interesting line on the card: "40% of this
+ *  is gold" is not a gap in the data, it is the allocation. */
+function unclassifiedNote(basket) {
+  const missing = basket.unclassified ?? [];
+  // A basket that *is* one symbol has already said this twice — "no sector
+  // breakdown" under its pie and 100% on the Unclassified row — and naming the
+  // fund inside itself reads as a stutter.
+  if (!missing.length || basket.symbol) return '';
+  return `
+    <p class="field__hint">
+      In ${esc(basket.label)}, ${missing.map((s) => `<span class="chip">${esc(s)}</span>`).join(' ')}
+      ${missing.length === 1 ? 'is' : 'are'} not in any sector the quote source names.
+    </p>`;
+}
+
+/** Look an allocation's sectors up. `typed` is given only when somebody edited
+ *  the comparison box; otherwise the choice already on screen is carried, and a
+ *  fresh subject falls back to its own benchmark. */
+async function loadSectors(subject, typed) {
+  // The slot is read once: the route can change while the request is in flight,
+  // and the answer belongs to the page that asked for it either way.
+  const slot = runSlot();
+  // Unset means "nobody has said", which takes the benchmark; an empty string
+  // means somebody cleared the box, which means none. The same distinction the
+  // fund page draws, for the same reason.
+  const carried = state.sectors[slot]?.key === subject.key ? state.sectors[slot].peers : undefined;
+  const peers = typed ?? carried ?? subject.benchmark;
+  state.sectors[slot] = { key: subject.key, peers, status: 'loading' };
+  render({ force: true });
+
+  try {
+    const body = await post('/sectors', {
+      holdings: subject.holdings,
+      label: subject.label,
+      peers: symbolList(peers),
+    });
+    // The page may have moved on — another run, or off it entirely — while the
+    // request was in flight.
+    if (state.sectors[slot]?.key !== subject.key) return;
+    state.sectors[slot] = { ...state.sectors[slot], status: 'ready', data: body.sectors };
+  } catch (err) {
+    if (state.sectors[slot]?.key !== subject.key) return;
+    state.sectors[slot] = {
+      ...state.sectors[slot],
+      // A quote source that cannot classify anything answers 501, and that is a
+      // configuration somebody chose rather than a fault: the card goes away
+      // instead of accusing the page of being broken.
+      status: err.status === 501 ? 'unavailable' : 'error',
+      error: err.message || String(err),
+    };
+  }
+  render({ force: true });
+}
+
 /* ------------------------------ Funds -------------------------------
  *
  * A fund page is the backtest page with one holding in it, and the holding
@@ -1767,6 +2141,7 @@ function renderFund(run) {
     </div>
 
     ${holdingsCard(f, caption)}
+    ${sectorsCard(sectorSubject(f, { label: f.symbol, symbol: f.symbol }))}
     ${unpricedCard(f)}`;
 }
 
@@ -1831,6 +2206,9 @@ async function loadFund(symbol) {
     // the request was in flight.
     if (state.fund?.symbol !== symbol) return;
     state.fund = { ...state.fund, status: 'ready', data: body.fund };
+    // After the run, not alongside it: the sector card is a second fan-out
+    // upstream, and it must not hold up the page it sits at the bottom of.
+    loadSectors(sectorSubject(body.fund, { label: symbol, symbol }));
   } catch (err) {
     if (state.fund?.symbol !== symbol) return;
     state.fund = { ...state.fund, status: 'error', error: err.message || String(err) };
@@ -2543,6 +2921,19 @@ $('#view').addEventListener('submit', (event) => {
   event.preventDefault();
   const values = Object.fromEntries(new FormData(form).entries());
 
+  if ('sectorForm' in form.dataset) {
+    // The subject is whatever run is on screen; only the comparison changed, so
+    // nothing above the card is re-fetched.
+    const run = currentRun();
+    if (run?.status !== 'ready') return;
+    const subject =
+      runSlot() === 'fund'
+        ? sectorSubject(run.data, { label: run.data.symbol, symbol: run.data.symbol })
+        : sectorSubject(run.data, { label: backtestName(run.id) });
+    loadSectors(subject, values.peers ?? '');
+    return;
+  }
+
   if ('fundForm' in form.dataset) {
     const symbol = (values.symbol || '').trim().toUpperCase();
     if (!symbol) return;
@@ -3060,6 +3451,10 @@ async function runBacktest(id, spec) {
     // while the request was in flight.
     if (state.backtest?.id !== id) return;
     state.backtest = { ...state.backtest, status: 'ready', data: body.backtest };
+    // After the run rather than with it: the sector card is a second fan-out
+    // upstream, against the source's crumbed endpoint, and the chart above it
+    // must not wait on that.
+    loadSectors(sectorSubject(body.backtest, { label: backtestName(id) }));
   } catch (err) {
     if (state.backtest?.id !== id) return;
     state.backtest = { ...state.backtest, status: 'error', error: err.message || String(err) };

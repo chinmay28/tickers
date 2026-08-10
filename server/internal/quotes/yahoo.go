@@ -680,7 +680,19 @@ type quoteSummaryResponse struct {
 					HoldingName    string      `json:"holdingName"`
 					HoldingPercent yahooNumber `json:"holdingPercent"`
 				} `json:"holdings"`
+				// SectorWeightings is a fund's exposure, and it arrives as a
+				// list of single-entry objects — `[{"technology":0.41},…]` —
+				// rather than as one object or as a list of name/value pairs.
+				// A map per element is the shape that actually parses.
+				SectorWeightings []map[string]yahooNumber `json:"sectorWeightings"`
 			} `json:"topHoldings"`
+			// AssetProfile is where a *company's* sector lives. It is a
+			// different module from topHoldings, asked for in the same request,
+			// because the two answer the same question about different kinds of
+			// thing and a portfolio holds both.
+			AssetProfile struct {
+				Sector string `json:"sector"`
+			} `json:"assetProfile"`
 			QuoteType struct {
 				LongName  string `json:"longName"`
 				ShortName string `json:"shortName"`
@@ -696,8 +708,9 @@ type quoteSummaryResponse struct {
 
 // Constituents implements Compositor.
 //
-// One request for two modules: the holdings, and the fund's own name to put at
-// the top of the page. Asking separately would double the number of crumbed
+// One request for every module anything here needs: the holdings, the sector
+// breakdown, the company profile behind it, and the fund's own name to put at
+// the top of the page. Asking separately would multiply the number of crumbed
 // requests, which are the fragile ones.
 func (y *Yahoo) Constituents(ctx context.Context, symbol string) (Composition, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
@@ -757,6 +770,84 @@ func (y *Yahoo) Constituents(ctx context.Context, symbol string) (Composition, e
 	return out, nil
 }
 
+// Sectors implements Classifier, off the same request Constituents uses.
+//
+// Two modules answer this, and which one has the answer says what the symbol
+// is. A fund's `topHoldings` carries a breakdown that rarely reaches 100% —
+// bonds, cash and anything unclassifiable are simply absent from it, which is
+// why the caller reports coverage rather than presenting the slices as the
+// whole. A company has no breakdown and one sector, which is the same statement
+// at 100%.
+func (y *Yahoo) Sectors(ctx context.Context, symbol string) ([]SectorWeight, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return nil, errors.New("a symbol is required")
+	}
+
+	body, err := y.summary(ctx, symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed quoteSummaryResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("decode sectors for %s: %w", symbol, err)
+	}
+	if parsed.QuoteSummary.Error != nil {
+		return nil, fmt.Errorf("%s: %s", symbol, parsed.QuoteSummary.Error.Description)
+	}
+	if len(parsed.QuoteSummary.Result) == 0 {
+		return nil, fmt.Errorf("%s: %w", symbol, ErrNotFound)
+	}
+
+	res := parsed.QuoteSummary.Result[0]
+	// Accumulated into a map rather than appended, because a source that split
+	// one sector across two spellings would otherwise draw it as two slices of
+	// the same colour sitting next to each other.
+	totals := map[string]float64{}
+	for _, entry := range res.TopHoldings.SectorWeightings {
+		for name, share := range entry {
+			if !share.Set || share.Value == 0 {
+				continue
+			}
+			if sector := NormalizeSector(name); sector != "" {
+				// Yahoo quotes a fraction of the fund; the interface is in percent.
+				totals[sector] += share.Value * 100
+			}
+		}
+	}
+	if len(totals) == 0 {
+		if sector := NormalizeSector(res.AssetProfile.Sector); sector != "" {
+			totals[sector] = 100
+		}
+	}
+	if len(totals) == 0 {
+		// Durable, and worth saying what the source did call it: "the source
+		// lists BTC-USD as cryptocurrency" is a complete answer, where "no
+		// sectors" reads like an outage.
+		kind := strings.ToLower(res.QuoteType.QuoteType)
+		if kind == "" {
+			kind = "something it will not classify"
+		}
+		return nil, fmt.Errorf("%w: the quote source lists %s as %s", ErrUnclassified, symbol, kind)
+	}
+
+	out := make([]SectorWeight, 0, len(totals))
+	for sector, weight := range totals {
+		out = append(out, SectorWeight{Sector: sector, Weight: weight})
+	}
+	// Largest first, and by name where two are equal — a map's order is random,
+	// and a list that reshuffles between two identical requests would make the
+	// cache above look like it was returning different answers.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Weight != out[j].Weight {
+			return out[i].Weight > out[j].Weight
+		}
+		return out[i].Sector < out[j].Sector
+	})
+	return out, nil
+}
+
 // summary makes one crumbed request, handshaking first and once more if the
 // answer says the crumb is stale.
 //
@@ -803,7 +894,7 @@ func (y *Yahoo) summary(ctx context.Context, symbol string) ([]byte, error) {
 func (y *Yahoo) askSummary(ctx context.Context, symbol, crumb string) ([]byte, error) {
 	settings, _ := y.current()
 	endpoint := fmt.Sprintf("%s/v10/finance/quoteSummary/%s?modules=%s&formatted=false",
-		settings.BaseURL, url.PathEscape(symbol), url.QueryEscape("topHoldings,quoteType"))
+		settings.BaseURL, url.PathEscape(symbol), url.QueryEscape("topHoldings,assetProfile,quoteType"))
 	if crumb != "" {
 		endpoint += "&crumb=" + url.QueryEscape(crumb)
 	}

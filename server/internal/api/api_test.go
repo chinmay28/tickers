@@ -1295,3 +1295,77 @@ func TestRunsEndpointPagesAndSaysWhenThereIsMore(t *testing.T) {
 		t.Errorf("more = %v; every cycle was returned", body["more"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Sector allocation
+// ---------------------------------------------------------------------------
+
+type classifyingProvider struct {
+	stubProvider
+	sectors map[string][]quotes.SectorWeight
+}
+
+func (c classifyingProvider) Sectors(_ context.Context, symbol string) ([]quotes.SectorWeight, error) {
+	weights, ok := c.sectors[symbol]
+	if !ok {
+		return nil, quotes.ErrUnclassified
+	}
+	return weights, nil
+}
+
+func TestSectorsEndpointLooksThroughAnAllocation(t *testing.T) {
+	h := newHarness(t, classifyingProvider{
+		stubProvider: stubProvider{prices: map[string]float64{"VTI": 300}},
+		sectors: map[string][]quotes.SectorWeight{
+			"VTI": {{Sector: "Technology", Weight: 40}, {Sector: "Industrials", Weight: 60}},
+			"SPY": {{Sector: "Technology", Weight: 30}, {Sector: "Industrials", Weight: 70}},
+		},
+	})
+
+	rec, body := h.do(t, http.MethodPost, "/api/sectors", map[string]any{
+		"holdings": []map[string]any{{"symbol": "VTI", "weight": 100}},
+		"label":    "All equity",
+		"peers":    []string{"SPY"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %v", rec.Code, body)
+	}
+
+	report := body["sectors"].(map[string]any)
+	subject := report["subject"].(map[string]any)
+	if subject["label"] != "All equity" {
+		t.Errorf("the subject came back labelled %v, not what was asked for", subject["label"])
+	}
+	if got := len(subject["slices"].([]any)); got != 2 {
+		t.Errorf("the subject has %d slices, want the holding's two", got)
+	}
+	if got := len(report["peers"].([]any)); got != 1 {
+		t.Fatalf("%d comparisons came back for the one asked for", got)
+	}
+}
+
+func TestSectorsEndpointRejectsAnAllocationThatIsNotOne(t *testing.T) {
+	h := newHarness(t, classifyingProvider{
+		stubProvider: stubProvider{prices: map[string]float64{"VTI": 300}},
+		sectors:      map[string][]quotes.SectorWeight{},
+	})
+
+	rec, body := h.do(t, http.MethodPost, "/api/sectors", map[string]any{"holdings": []any{}})
+	// Fixable where it was typed, so it says why rather than logging a 500.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, body %v — an empty allocation is a 400", rec.Code, body)
+	}
+}
+
+func TestSectorsEndpointSaysWhenTheSourceCannotAnswer(t *testing.T) {
+	// The degradation that matters: a provider that cannot classify anything
+	// leaves the card unavailable with a reason, and the client drops it.
+	h := newHarness(t, stubProvider{prices: map[string]float64{"VTI": 300}})
+
+	rec, body := h.do(t, http.MethodPost, "/api/sectors", map[string]any{
+		"holdings": []map[string]any{{"symbol": "VTI", "weight": 100}},
+	})
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status %d, body %v — an absent capability is a 501, as it is for history", rec.Code, body)
+	}
+}

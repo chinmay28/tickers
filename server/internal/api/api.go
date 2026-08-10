@@ -110,6 +110,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/portfolios/{id}", s.handleDeletePortfolio)
 	mux.HandleFunc("POST /api/portfolios/{id}/backtest", s.handleBacktestPortfolio)
 	mux.HandleFunc("POST /api/backtest", s.handleBacktest)
+	// Sectors is its own endpoint rather than part of a backtest, because it
+	// answers a question the simulation has no bearing on: what an allocation
+	// holds does not depend on the months it was run over, the money in it or
+	// how often it rebalanced. Folding it in would mean re-running thirty years
+	// of history to change which fund the pie is compared against.
+	mux.HandleFunc("POST /api/sectors", s.handleSectors)
 
 	// A fund is opened, not saved, so there is nothing to POST and nothing to
 	// list. The symbol is one path segment for the same reason a logo's is.
@@ -802,6 +808,61 @@ func (s *Server) failBacktest(w http.ResponseWriter, err error) {
 	default:
 		s.fail(w, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Sector allocation
+// ---------------------------------------------------------------------------
+
+// sectorBody is one card's question: a basket, and what to draw beside it.
+//
+// It is not portfolioBody. The two share a holdings list and nothing else — a
+// sector card has no start year, no rebalancing and no money in it — and giving
+// the create/patch payload a `peers` field it would ignore is how a client ends
+// up sending one and wondering why it was stored.
+type sectorBody struct {
+	Holdings *[]store.Holding `json:"holdings"`
+	Label    *string          `json:"label"`
+	Peers    *[]string        `json:"peers"`
+}
+
+// handleSectors looks through an allocation and whatever it is being compared
+// against.
+//
+// A POST for the reason a backtest is one: it fans out to an upstream request
+// per distinct symbol the first time it runs, and a URL a browser is free to
+// prefetch, retry or cache is the wrong shape for that.
+func (s *Server) handleSectors(w http.ResponseWriter, r *http.Request) {
+	var body sectorBody
+	if !decode(w, r, &body) {
+		return
+	}
+	spec := engine.SectorSpec{}
+	if body.Holdings != nil {
+		spec.Holdings = *body.Holdings
+	}
+	if body.Label != nil {
+		spec.Label = *body.Label
+	}
+	if body.Peers != nil {
+		spec.Peers = *body.Peers
+	}
+
+	report, err := s.engine.Sectors(r.Context(), spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, quotes.ErrNoSectors):
+			// A source that can only price is a configuration somebody chose,
+			// not a fault — the same 501 the performance sheet answers with.
+			writeError(w, http.StatusNotImplemented, err.Error())
+		case errors.Is(err, engine.ErrBadSpec):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			s.fail(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sectors": report})
 }
 
 // ---------------------------------------------------------------------------
