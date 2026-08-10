@@ -1614,6 +1614,14 @@ function holdingRow(b, r, period, caption = HOLDINGS_CAPTION) {
   // the payload says *that* part of the move is a proxy's, and the holding
   // already says whose.
   const stand = (b.holdings ?? []).find((h) => h.symbol === r.symbol)?.replacement;
+  // What the symbol actually is. A fund's top holdings are whatever it happens
+  // to own, so half of them are tickers nobody recognises — `CCO.TO`,
+  // `028260.KS` — and a table of those is a ranking of strangers. The name is
+  // read off the fund's own constituent list rather than carried on the return,
+  // which is keyed by symbol and knows nothing else; a portfolio, whose
+  // holdings are symbols somebody chose and typed, has none to show and shows
+  // none.
+  const company = (b.constituents ?? []).find((c) => c.symbol === r.symbol)?.name;
   // The gap to the portfolio, which is what turns a return into a verdict. It
   // rides under the return rather than in a column of its own: within a period
   // it is the return minus a constant, so a column would sort into the order
@@ -1639,6 +1647,7 @@ function holdingRow(b, r, period, caption = HOLDINGS_CAPTION) {
               : ''
           }
         </span>
+        ${company ? `<span class="holding__company">${esc(company)}</span>` : ''}
       </th>
       <td class="field__hint">${
         r.isBenchmark
@@ -2171,7 +2180,9 @@ function unpricedCard(f) {
               (c) => `<tr>
                 <th><span class="holding__name">${symbolMark(c.symbol)}<span>${esc(
                   c.symbol,
-                )}</span></span>${c.name ? `<span class="field__hint">${esc(c.name)}</span>` : ''}</th>
+                )}</span></span>${
+                  c.name ? `<span class="holding__company">${esc(c.name)}</span>` : ''
+                }</th>
                 <td class="field__hint">${esc(
                   Number(c.weight).toLocaleString(undefined, { maximumFractionDigits: 2 }),
                 )}%</td>

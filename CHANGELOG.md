@@ -7,6 +7,24 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### A fund's holdings say who they are
+
+**Every row of the top-holdings table now carries its company name** under the
+symbol. A fund holds whatever it holds, and a table of `CCO.TO`, `ELE.MC` and
+`028260.KS` is a ranking of strangers — the reader has to recognise the name
+before the return beside it means anything. The name arrives with the weight in
+the same response, so nothing extra is fetched.
+
+- **Where a name exists.** It is read off the fund's own holdings list, which is
+  where names live; a portfolio's holdings are symbols somebody chose and typed,
+  and those rows are unchanged. The benchmark row has no name for the same
+  reason.
+- **Held and unpriced holdings** were already named, in the header's small
+  capitals — they now read as a name in both tables, at every width rather than
+  only on a phone.
+- On a phone the name is held to a narrow measure and wraps rather than widening
+  the column: at 390px the return is what the row is for.
+
 ### Sector allocation, and what to compare it against
 
 **A backtest and a fund page now end with a sector card**: a pie of where the

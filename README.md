@@ -327,6 +327,10 @@ and no schedule.
   companies that are in it now, not about the fund, and the page says so instead
   of leaving you to infer it. The fund's own half of the page is unaffected —
   that is why the two halves come from different places.
+- **Each holding carries its company name** under its symbol. A fund holds what
+  it holds, so half a top ten is tickers nobody could be expected to read —
+  `CCO.TO`, `028260.KS` — and the name is what turns the table into something
+  about companies. The source gives it with the weight, so it costs nothing.
 - **A holding too young for a window is named**, not quietly dropped. Ask for
   ten years of a fund holding something that listed in 2020 and the table says
   which names are missing and why, rather than being silently shorter.
