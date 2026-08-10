@@ -52,6 +52,11 @@ type Engine struct {
 	// three fed by an endpoint that needs authenticating, which is the other
 	// reason to ask it as seldom as possible.
 	fundCache map[string]fundEntry
+	// sectorCache is where each symbol's money is, by sector. Its own map for
+	// the reason all of these have one — a separate upstream question with its
+	// own answer — and on the same long TTL as fundCache, which it shares an
+	// endpoint and a fragility with. See sectors.go.
+	sectorCache map[string]sectorEntry
 
 	// kick asks the loop to run now and then resume its schedule. Buffered by
 	// one: several nudges in quick succession collapse into a single run,
@@ -76,6 +81,7 @@ func New(st *store.Store, provider quotes.Provider, publisher *publish.Publisher
 		historyCache:  map[string]historyEntry{},
 		dividendCache: map[string]dividendEntry{},
 		fundCache:     map[string]fundEntry{},
+		sectorCache:   map[string]sectorEntry{},
 	}
 }
 

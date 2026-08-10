@@ -7,6 +7,36 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Sector allocation, and what to compare it against
+
+**A backtest and a fund page now end with a sector card**: a pie of where the
+allocation's money actually is, and one beside it for every fund named in
+**Compare against** — which starts at the portfolio's own benchmark, since that
+is the comparison already chosen for every other number on the page. Clear the
+box for the allocation alone; four comparisons are drawn and anything past that
+is reported as dropped.
+
+- **A look-through, holding by holding.** Each fund's own breakdown scaled by
+  what it is held at, summed. Two 60/40s built from different index funds can be
+  ten points apart in technology, and nothing else on either page would say so.
+- **The slices are not made to add up to 100.** Each pie says what share of it
+  got a sector at all and draws the rest in grey; a holding nothing can be said
+  about — gold, cash, a bond fund — is named under the pies rather than folded
+  into the gap.
+- **A colour means one sector everywhere**, whichever pies are on screen and
+  whatever size the slice is. The eleven fills are ordered so that neighbouring
+  slices stay distinguishable under simulated protanopia and deuteranopia, in
+  both themes, and the figures are also there as text.
+- The breakdown is what the source says **today**, which is why nothing on this
+  card feeds a return.
+- `POST /api/sectors` is the endpoint. It is separate from the backtest because
+  a sector mix does not depend on the months a run covered — folding it in would
+  mean re-simulating thirty years to change which fund the pie sits beside.
+- Reading sectors is a new optional provider capability. A quote source without
+  it leaves the card out and everything else exactly as it was. Breakdowns are
+  cached per symbol for a day, alongside fund compositions and on the same
+  upstream request, so a benchmark that is also a holding costs one lookup.
+
 ### Publishing moves under Settings, and the cycle log pages
 
 **Publishing is now the last part of Settings**, not a tab of its own.

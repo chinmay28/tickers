@@ -3,6 +3,7 @@ package quotes
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1060,5 +1061,119 @@ func TestCookieIsCollectedBeforeTheCrumb(t *testing.T) {
 	}
 	if !y.hasSessionCookie(y.Effective().BaseURL) {
 		t.Error("no session cookie is held for the API host after a successful handshake")
+	}
+}
+
+// sectorWeightingsJSON is a fund's breakdown as Yahoo sends it: a list of
+// single-entry objects keyed by the source's own snake-case names, quoted as
+// fractions, and adding up to well under 1 — the rest of the fund is in things
+// it will not classify.
+const sectorWeightingsJSON = `{
+  "quoteSummary": {
+    "result": [{
+      "topHoldings": {
+        "holdings": [{ "symbol": "NVDA", "holdingPercent": 0.0921 }],
+        "sectorWeightings": [
+          { "realestate": 0.0025 },
+          { "consumer_cyclical": 0.1402 },
+          { "basic_materials": 0 },
+          { "technology": 0.6011 },
+          { "healthcare": 0.0512 }
+        ]
+      },
+      "quoteType": { "longName": "Invesco QQQ Trust, Series 1", "quoteType": "ETF" }
+    }],
+    "error": null
+  }
+}`
+
+// assetProfileJSON is a company: no breakdown at all, and one sector under a
+// different module with a different spelling.
+const assetProfileJSON = `{
+  "quoteSummary": {
+    "result": [{
+      "assetProfile": { "sector": "Financial Services", "industry": "Banks" },
+      "quoteType": { "longName": "JPMorgan Chase & Co.", "quoteType": "EQUITY" }
+    }],
+    "error": null
+  }
+}`
+
+func TestSectorsReadAFundsBreakdown(t *testing.T) {
+	server := &crumbServer{issued: "abc123", body: sectorWeightingsJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	sectors, err := y.Sectors(context.Background(), "qqq")
+	if err != nil {
+		t.Fatalf("reading a fund's sectors: %v", err)
+	}
+
+	// The zero-weight entry is dropped: a sector a fund is not in is not a
+	// slice, and drawing it would put a colour in the legend for nothing.
+	if len(sectors) != 4 {
+		t.Fatalf("got %d sectors from five entries, one of which is zero: %v", len(sectors), sectors)
+	}
+	if sectors[0].Sector != "Technology" || math.Abs(sectors[0].Weight-60.11) > 0.001 {
+		t.Errorf("the largest slice came back as %v; Yahoo quotes a fraction and this interface is in percent",
+			sectors[0])
+	}
+	// The source's own spellings, normalised — the client colours by name, and
+	// "consumer_cyclical" is not a name anything else in the app has heard of.
+	if sectors[1].Sector != "Consumer Cyclical" {
+		t.Errorf("the second slice is %q; the source's snake-case keys have to reach the app as canonical names",
+			sectors[1].Sector)
+	}
+}
+
+func TestSectorsFallBackToACompanysProfile(t *testing.T) {
+	server := &crumbServer{issued: "abc123", body: assetProfileJSON}
+	y := newTestYahoo(t, server.handler(t))
+
+	sectors, err := y.Sectors(context.Background(), "JPM")
+	if err != nil {
+		t.Fatalf("reading a company's sector: %v", err)
+	}
+	if len(sectors) != 1 || sectors[0].Sector != "Financial Services" || sectors[0].Weight != 100 {
+		t.Errorf("a company came back as %v; it has one sector and all of it is in that sector", sectors)
+	}
+}
+
+func TestSectorsSayWhenTheSourceWillNotClassify(t *testing.T) {
+	// A currency pair, a gold trust, a bond fund: known to the source and
+	// permanently sectorless. Durable, so the caller records it and stops
+	// asking rather than retrying forever.
+	server := &crumbServer{issued: "abc123", body: `{
+	  "quoteSummary": {
+	    "result": [{ "quoteType": { "quoteType": "CRYPTOCURRENCY" } }],
+	    "error": null
+	  }
+	}`}
+	y := newTestYahoo(t, server.handler(t))
+
+	_, err := y.Sectors(context.Background(), "BTC-USD")
+	if !errors.Is(err, ErrUnclassified) {
+		t.Fatalf("an unclassifiable symbol gave %v; it has to be ErrUnclassified so the caller caches the refusal", err)
+	}
+	if !strings.Contains(err.Error(), "cryptocurrency") {
+		t.Errorf("the message is %q; saying what the source did call it is what stops this reading as an outage", err)
+	}
+}
+
+func TestNormalizeSector(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"consumer_cyclical", "Consumer Cyclical"},
+		{"Consumer Cyclical", "Consumer Cyclical"},
+		{"realestate", "Real Estate"},
+		{"Real Estate", "Real Estate"},
+		{"Information Technology", "Technology"},
+		// Unknown to this build: kept as it came rather than filed under
+		// something plausible.
+		{"Shipping", "Shipping"},
+		{"  ", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeSector(c.in); got != c.want {
+			t.Errorf("NormalizeSector(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

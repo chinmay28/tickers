@@ -663,6 +663,61 @@ The composition cache is separate from the price and payout caches and lives far
 longer — a day against ten minutes — for two reasons that agree: funds
 reconstitute quarterly, and this is the endpoint worth asking least often.
 
+### Sector allocation
+
+`engine/sectors.go` answers a question the run above it has no bearing on: what
+an allocation is *invested in*. It is a look-through — each holding's own
+breakdown scaled by what it is held at, summed — because that is the only level
+at which the question has an answer. A portfolio holds funds and a fund holds
+companies; "60% VTI" says nothing about sectors on its own.
+
+**It is a fifth optional capability**, `Classifier`, asserted at the call site
+like the others and answering `501` when absent. It is deliberately *not* a
+method on `Compositor` even though one Yahoo request serves both: a company is
+not a fund, has no constituents, and still has a sector — folding the two
+together would make the sector of every individual holding unaskable, which is
+precisely what a look-through is made of. `ErrUnclassified` is its `ErrNotFund`,
+and durable in the same way.
+
+**It is its own endpoint, not part of the backtest.** Nothing about a sector mix
+depends on the months a run covered, the money in it or how often it rebalanced,
+so folding it in would mean re-simulating thirty years of history to change
+which fund the pie is compared against. `POST /api/sectors` takes an allocation
+and a peer list; a peer is one holding at 100%, which is the same code path and
+the reason Portfolios and Funds can share the card at all.
+
+Three decisions carry the honesty of the card, and each has a field:
+
+- **The slices are percentages of the whole basket and do not sum to 100.**
+  `Covered` is what does have a sector, and the client draws the rest in grey
+  rather than scaling the slices to fill the circle — a bond fund's equity
+  sectors cover almost none of it, and a pie that hid that would report it as
+  60% financials. (The client clamps the *printed* figure at 100: eleven
+  weightings rounded to two decimals routinely sum to 100.4, and that reads as a
+  bug here rather than as rounding upstream.)
+- **A holding nothing can be said about is named**, in `Unclassified`, not
+  dropped. For a real portfolio it is usually the most interesting line on the
+  card: gold, cash and currency pairs are genuinely sectorless.
+- **The breakdown is today's**, the same problem the look-through has — and the
+  answer is stronger here, because nothing on this card is measured over a
+  period at all. There is no history for today's composition to misdescribe.
+
+**Slices are sorted into `quotes.SectorNames` order, never by size.** The web
+client colours a slice by which sector it is, so two pies are only comparable if
+they run round the circle the same way; ordering by size would put the same
+sector somewhere different in every pie on the card. That fixed order is also
+the accessibility mechanism — adjacent slices are always adjacent palette slots,
+and the slot order was chosen by search over the eleven hues to maximise the
+worst adjacent pair under simulated protanopia and deuteranopia (ΔE 9.2 in both
+themes, against a target of 8). Reordering the list means redoing that search.
+
+The sector cache is separate again, on the composition's day-long TTL and
+sharing its endpoint and its fragility. It is the only cache here that
+**remembers a refusal**: a portfolio holding gold asks "what sector is GLD in?"
+on every render and the answer will never change, so `ErrUnclassified` is
+recorded alongside the successes. Nothing else is — a failed handshake is a
+fault, and re-asking after one is exactly right.
+
 ## Configuration precedence
 
 Two kinds of configuration, split by a single question: *can this change while
@@ -786,6 +841,7 @@ its life half-updated.
 | PATCH/DELETE | `/api/portfolios/{id}` | edit / remove |
 | POST | `/api/portfolios/{id}/backtest` | simulate a saved allocation |
 | POST | `/api/backtest` | simulate one that hasn't been saved |
+| POST | `/api/sectors` | look an allocation through, beside named peers |
 | GET/POST | `/api/sinks` | list / add |
 | PATCH/DELETE | `/api/sinks/{id}` | edit / remove |
 | POST | `/api/sinks/{id}/test` | send the real payload to one destination |
@@ -813,6 +869,9 @@ Conventions:
   browser is free to prefetch, retry or cache is the wrong shape for that. Both
   answer `501` when the quote source has no history at all — a configuration
   somebody chose, not a fault, the same way `/performance` does.
+- `/api/sectors` is a `POST` for the same reason and answers `501` on the same
+  principle. It takes the allocation rather than a portfolio ID because the
+  editor's unsaved runs and the fund page both need it, and neither has one.
 - `/api/state` carries saved portfolios but never their results. A backtest is
   slow and large; riding along with a ten-second poll would turn every redraw
   into a fan of upstream requests.
