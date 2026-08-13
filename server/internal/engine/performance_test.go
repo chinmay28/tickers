@@ -241,6 +241,30 @@ func TestComputeRangesReportWhereTheLatestValueSits(t *testing.T) {
 	}
 }
 
+func TestComputeRangesMeasureTheDistanceToEachEnd(t *testing.T) {
+	now := time.Date(2024, 3, 15, 0, 0, 0, 0, time.UTC)
+	// 130 in a 100–160 band is 30% above the low and 18.75% below the high.
+	ranges := computeRanges(
+		points("2023-01-03", 999.0, "2024-01-02", 100.0, "2024-02-01", 160.0, "2024-03-15", 130.0), now)
+
+	year := rangeFor(ranges, "1y")
+	if year.FromLow == nil || math.Abs(*year.FromLow-30) > 1e-9 {
+		t.Errorf("from the low = %v%%, want +30 (100 → 130)", deref(year.FromLow))
+	}
+	if year.FromHigh == nil || math.Abs(*year.FromHigh+18.75) > 1e-9 {
+		t.Errorf("from the high = %v%%, want −18.75 (160 → 130)", deref(year.FromHigh))
+	}
+
+	// A composite whose formula is a difference can put a whole band at or below
+	// zero, and a percentage measured off that end says nothing.
+	negative := computeRanges(points("2024-01-02", -4.0, "2024-03-15", -2.0), now)
+	all := rangeFor(negative, "all")
+	if all.FromLow != nil || all.FromHigh != nil {
+		t.Errorf("a band of −4 to −2 reported moves of %v%% and %v%%; neither end is a base to be a percentage of",
+			deref(all.FromLow), deref(all.FromHigh))
+	}
+}
+
 func TestComputeRangesNeedTheWindowCoveredNotMerelyOverlapped(t *testing.T) {
 	now := time.Date(2024, 3, 15, 0, 0, 0, 0, time.UTC)
 	// Three weeks of history. Every close it has falls inside the last month,

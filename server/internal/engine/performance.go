@@ -95,6 +95,18 @@ type Range struct {
 	// on the high. Nil when the window never moved, because everywhere in a
 	// band of zero width is equally the top and the bottom of it.
 	Position *float64 `json:"position"`
+	// FromLow and FromHigh are the move from each end of the band to Latest, as
+	// a percentage of that end. They are what makes a band of two ratios
+	// readable: "0.9430 against a high of 1.0178" needs the reader to do the
+	// division, and "7.4% below its high" is the same fact already divided.
+	//
+	// Latest is inside its own window by construction, so FromLow is never
+	// negative and FromHigh never positive. Both are nil where the end they are
+	// measured against is not positive — a composite whose formula is a
+	// difference can sit at or below zero, and a percentage of that is noise
+	// wearing a percent sign.
+	FromLow  *float64 `json:"fromLowPercent"`
+	FromHigh *float64 `json:"fromHighPercent"`
 }
 
 // historyTTL is how long a fetched daily series is reused. The series gains a
@@ -449,6 +461,14 @@ func computeRanges(points []Point, now time.Time) []Range {
 			if span := high.Value - low.Value; span > 0 {
 				position := (latest.Value - low.Value) / span * 100
 				r.Position = &position
+			}
+			if low.Value > 0 {
+				up := (latest.Value - low.Value) / low.Value * 100
+				r.FromLow = &up
+			}
+			if high.Value > 0 {
+				down := (latest.Value - high.Value) / high.Value * 100
+				r.FromHigh = &down
 			}
 		}
 		out = append(out, r)
