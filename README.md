@@ -184,11 +184,19 @@ measured over more than about a year also shows a compound annual rate, worked
 out from the dates the baseline actually has rather than the window's name.
 
 For a **composite** it is **highs and lows** instead — a ratio has no capital in
-it to have returned anything, but "it is at 22% of its all-time range" says
-something true about the same number. Each row gives the low and the high inside
-that window, the days they happened, and where the latest value sits between
-them: one month, three months, year to date, one year, five years, ten years,
-and all time.
+it to have returned anything, but "it is 7% below its all-time high, at 22% of
+that range" says something true about the same number. Each row gives **how far
+the latest value is from each end as a percentage**, with the low and the high
+themselves and the days they happened underneath, then where it sits between the
+two: one month, three months, year to date, one year, five years, ten years, and
+all time.
+
+The percentages are distances, not returns — measured against the ends of the
+band rather than against a baseline. A band with an end at or below zero, which
+a formula that subtracts can produce, shows the levels alone. The move above the
+chart is a percentage for a ratio as well: `−0.353017` is the number a reader has
+the least chance of sizing on sight, having no currency and no habitual magnitude
+to weigh it against.
 
 Either way, a period the series doesn't cover says **"not enough history"**
 rather than quietly measuring a young listing from its first day. A range is

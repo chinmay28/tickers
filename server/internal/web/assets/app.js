@@ -3616,7 +3616,10 @@ function paintPerf() {
       // A composite gets highs and lows where a symbol gets returns. There is
       // no capital in a ratio to have returned anything — "VTI/GLD made 8%"
       // invites a reader to treat a ratio as a holding — but "it is near the
-      // top of its five-year range" says something true about the same number.
+      // top of its five-year range, 7% below the high" says something true
+      // about the same number. Which is why the percentages in this table
+      // measure against the band's own ends rather than against a baseline:
+      // they are distances, not what anyone earned.
       composite
         ? `<h3 class="card__subtitle">Range</h3>${perfRanges(perf.data.ranges ?? [], format)}`
         : `<h3 class="card__subtitle">Returns</h3>${perfReturns(perf.data.returns ?? [], format)}`
@@ -3640,10 +3643,15 @@ function perfHeader(perf, visible, format, composite) {
   const first = visible[0];
   const last = visible[visible.length - 1];
   const change = isFlat(first.value, last.value) ? 0 : last.value - first.value;
-  // A composite's move is shown as a move, not as a percentage. The percentage
-  // of a ratio is a real quantity, but it reads as a return, and a ratio has
-  // nothing invested in it to return anything.
-  const pct = composite || !(first.value > 0) ? null : (change / first.value) * 100;
+  // Ratios get the percentage too. "−0.353017" is the move a reader has the
+  // least chance of sizing on sight — a ratio has no currency and no habitual
+  // magnitude to weigh it against, so the division they would have to do
+  // themselves is exactly the one worth doing for them. It stays out of the
+  // returns table for the reason it always was: a percentage *change* is a fact
+  // about the number, where a percentage *return* invites reading the ratio as
+  // a holding. Only a baseline at or below zero — a formula that subtracts —
+  // still falls back to the bare move.
+  const pct = !(first.value > 0) ? null : (change / first.value) * 100;
   const dir = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
   const currency = composite ? '' : perf.ticker.quote?.currency ?? '';
 
@@ -3659,9 +3667,9 @@ function perfHeader(perf, visible, format, composite) {
       </div>
       <div class="perf-head__delta">
         <div class="perf-change perf-change--${dir}">${esc(
-          // The move is shown to the same precision as the value it moved, so
-          // the two halves of the header never disagree about how exact they
-          // are — the watchlist row does the same.
+          // The fallback move is shown to the same precision as the value it
+          // moved, so the two halves of the header never disagree about how
+          // exact they are — the watchlist row does the same.
           pct === null
             ? signed(change, composite ? ratioDigits(last.value) : 2)
             : `${signed(pct, 2)}%`,
@@ -3812,13 +3820,21 @@ function wirePerfChart() {
 
 /** The high/low table — what a composite gets instead of returns.
  *
- *  "Now" is where the latest value sits between the two, which is the column
- *  that turns two numbers into a reading: a ratio at 4% of its five-year range
- *  is saying something a low and a high on their own leave to the reader. */
+ *  Each end is led by how far the latest value is from it, because that is the
+ *  reading the two ratios were only ever raw material for: "0.9430 against a
+ *  high of 1.0178" is a subtraction and a division away from "7.4% below its
+ *  high", and the reader should not be the one doing them. The levels and their
+ *  dates stay underneath — a percentage says how far, and only the number says
+ *  from where.
+ *
+ *  "In range" is the third reading and a different one: where the latest value
+ *  sits *between* the two, 0% on the low and 100% on the high. It is the column
+ *  a low and a high on their own leave to the reader. */
 function perfRanges(ranges, format) {
   if (!ranges.length) return '<div class="empty">No ranges could be computed.</div>';
   return `<div class="table-scroll"><table class="table">
-      <thead><tr><th>Period</th><th>Low</th><th>High</th><th>Now</th></tr></thead>
+      <thead><tr><th>Period</th><th>From low</th><th>From high</th>
+        <th title="Where it sits between the low and the high">In range</th></tr></thead>
       <tbody>${ranges.map((r) => perfRangeRow(r, format)).join('')}</tbody>
     </table></div>`;
 }
@@ -3833,12 +3849,34 @@ function perfRangeRow(r, format) {
       ? '<span class="field__hint">flat</span>'
       : `${Math.round(r.position)}%`;
 
+  // The colours follow the sign rather than the end, which is a deliberate flip
+  // from marking the low red and the high green: a distance from the low is a
+  // gain and a distance from the high is a loss, and a green "−7.37%" would be
+  // the row arguing with itself. A band with a zero or negative end gets no
+  // percentage from the server, and falls back to leading with the level.
+  const end = (pct, value, date) => {
+    const move =
+      pct === null || pct === undefined
+        ? esc(format(value))
+        : `${esc(signed(isFlat(value, r.latest) ? 0 : pct, 2))}%`;
+    const dir =
+      pct === null || pct === undefined || isFlat(value, r.latest)
+        ? 'flat'
+        : pct > 0
+          ? 'up'
+          : 'down';
+    const under =
+      pct === null || pct === undefined
+        ? esc(date)
+        : `<span>${esc(format(value))}</span> · <span>${esc(date)}</span>`;
+    return `<td><span class="perf-change perf-change--${dir}">${move}</span>
+        <span class="perf-when">${under}</span></td>`;
+  };
+
   return `<tr>
     <th>${esc(r.label)}</th>
-    <td><span class="perf-change perf-change--down">${esc(format(r.low))}</span>
-        <span class="perf-when">${esc(r.lowDate)}</span></td>
-    <td><span class="perf-change perf-change--up">${esc(format(r.high))}</span>
-        <span class="perf-when">${esc(r.highDate)}</span></td>
+    ${end(r.fromLowPercent, r.low, r.lowDate)}
+    ${end(r.fromHighPercent, r.high, r.highDate)}
     <td class="field__hint">${esc(position)}</td>
   </tr>`;
 }

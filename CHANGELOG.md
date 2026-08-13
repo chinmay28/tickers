@@ -7,6 +7,28 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### A ratio's moves are percentages
+
+**A composite's performance sheet now says how far, not how much.** A ratio has
+no currency and no habitual magnitude, so `−0.353017` is the one move a reader
+cannot size on sight — and dividing it by `VTI/GLD`'s own level is the arithmetic
+they were left to do. The sheet does it.
+
+- **The move above the chart is a percentage**, the same as a symbol's. It is a
+  percentage *change*, which is a fact about the number — not a return, which
+  would invite reading a ratio as a holding. The returns table is still a
+  symbol's alone.
+- **The range table leads with the distance to each end**: `−7.06%` from the
+  three-month high rather than `1.5236` beside a value the reader has to
+  subtract it from. The levels and their dates stay underneath, and the column
+  saying where it sits *between* the two is now headed **In range** — with three
+  percentages in a row, a column called "Now" was the ambiguous one.
+- **Colour follows the sign, not the end.** A distance from the low is a gain and
+  a distance from the high is a loss, so the low's column is green where it used
+  to be red. A green `−7.06%` would have been the row arguing with itself.
+- **A band with an end at or below zero shows the levels**, as before. A formula
+  that subtracts can produce one, and a percentage measured off it says nothing.
+
 ### A fund's holdings say who they are
 
 **Every row of the top-holdings table now carries its company name** under the

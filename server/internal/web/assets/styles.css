@@ -1468,6 +1468,13 @@ thead .sectors__col {
   font-size: 0.76rem;
   color: var(--muted);
 }
+/* A caption made of two numbers rather than prose — a level and the date it
+   happened on — may break between them and never inside one. On a phone the
+   caption is allowed to wrap, and "2026-" above "08-12" is a date the reader
+   has to reassemble. */
+.perf-when > span {
+  white-space: nowrap;
+}
 
 /* One line of scrub output, given its own row so the chart never reflows as
    the value under the finger changes width. */

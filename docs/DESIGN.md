@@ -378,6 +378,18 @@ are computed for every ticker and the client picks: returns for a symbol, ranges
 for a composite. Making that a payload decision instead would have meant the
 API's shape depending on the row, for no gain.
 
+A range carries **the distance from each of its ends as a percentage** as well
+as the ends themselves, and that is not the return sneaking back in. A return is
+measured against a baseline and answers what something made; these are measured
+against the band's own high and low and answer where in it the value now is —
+"7% below the high" is the division a reader would otherwise do off two ratios
+by eye, and the one they are least equipped to do, since a ratio has no currency
+and no habitual magnitude. The percentage of the *visible chart span*, above the
+chart, is shown for a ratio for the same reason. Both are nil, and fall back to
+the bare numbers, where the end they would be a percentage of is not positive: a
+formula that subtracts can sit at or below zero, and a percentage of that is
+noise wearing a percent sign.
+
 The two disagree about where a window starts, on purpose:
 
 - A return is measured from the **last close on or before** the start. It needs
