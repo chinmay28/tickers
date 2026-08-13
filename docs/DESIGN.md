@@ -390,6 +390,14 @@ the bare numbers, where the end they would be a percentage of is not positive: a
 formula that subtracts can sit at or below zero, and a percentage of that is
 noise wearing a percent sign.
 
+Every window but the shortest starts on a **date**, because that is how the
+periods are read: a month is the same day last month, not thirty days. **A day
+is counted in closes** — the previous one — and it is the only window that is,
+because it is the only one whose calendar reading has nothing in it. Dated, "1
+day" over a weekend selects a stretch the market was shut for: unavailable every
+Sunday, and every Monday until that day's close arrives. Both projections use
+the same anchor, so the day's return and the day's band are the same two closes.
+
 The two disagree about where a window starts, on purpose:
 
 - A return is measured from the **last close on or before** the start. It needs

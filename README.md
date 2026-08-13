@@ -178,18 +178,28 @@ sheet: a chart of the daily closes behind it, and a table underneath. Pick a
 span with the chips above the chart — 1M through 10Y and All — and drag across
 the line to read any single day off it.
 
-For an ordinary symbol the table is **returns**: a week, a month, three months,
-the year to date, and one, three, five and ten years, plus all time. Anything
-measured over more than about a year also shows a compound annual rate, worked
-out from the dates the baseline actually has rather than the window's name.
+For an ordinary symbol the table is **returns**: a day, a week, a month, three
+months, the year to date, and one, three, five and ten years, plus all time.
+Anything measured over more than about a year also shows a compound annual rate,
+worked out from the dates the baseline actually has rather than the window's
+name.
+
+**A day means the previous close**, counted rather than dated. Every other window
+starts on a date — a month is the same day last month — but a series of daily
+closes has no 24 hours in it to measure: dated, "1 day" would be empty every
+Sunday and every Monday until that day's close arrived, and a row saying "not
+enough history" about a twenty-year-old symbol teaches a reader to distrust the
+rest of the sheet.
 
 For a **composite** it is **highs and lows** instead — a ratio has no capital in
 it to have returned anything, but "it is 7% below its all-time high, at 22% of
 that range" says something true about the same number. Each row gives **how far
 the latest value is from each end as a percentage**, with the low and the high
 themselves and the days they happened underneath, then where it sits between the
-two: one month, three months, year to date, one year, five years, ten years, and
-all time.
+two: one day, one week, one month, three months, year to date, one year, five
+years, ten years, and all time. The short windows are there because the table
+reports distances — a pair of bare extremes needed a month to be worth printing,
+where "0.1% off yesterday's close" is a reading in its own right.
 
 The percentages are distances, not returns — measured against the ends of the
 band rather than against a baseline. A band with an end at or below zero, which

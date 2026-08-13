@@ -7,6 +7,26 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### A day and a week
+
+**The performance sheet reports two shorter windows.** A day joins the returns
+table above the week, and both a day and a week join the range table, which
+previously began at a month. That table now reports the distance to each end
+rather than a bare pair of extremes, and a distance is worth having over a
+window a high and a low were not: "0.1% off yesterday's close" is a reading,
+where "yesterday 1.4175, today 1.4161" is two numbers and a subtraction.
+
+- **A day means the previous close.** It is the one window counted in closes
+  rather than started on a date — a series of daily closes has no 24 hours in it
+  to measure. Dated, it would be empty every Sunday and every Monday until that
+  day's close arrived, and "not enough history" beside a symbol with twenty
+  years of it is a row that teaches the reader to distrust the sheet.
+- **A day needs two closes**, so a listing's first day says so rather than
+  reporting a move of zero against itself.
+- The chart's own spans are unchanged; they were never the same list — the chips
+  offer 6M, which no table row does, and the tables report three years, which no
+  chip does.
+
 ### A ratio's moves are percentages
 
 **A composite's performance sheet now says how far, not how much.** A ratio has
