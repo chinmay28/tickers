@@ -902,8 +902,8 @@ func TestPerformanceEndpointServesTheChartAndTheReturns(t *testing.T) {
 	// Every window comes back whether or not the series reaches it, so the
 	// table can say "not enough history" rather than quietly losing a row.
 	returns := byKey(t, perf["returns"])
-	if len(returns) != 9 {
-		t.Fatalf("got %d return windows, want all 9: %v", len(returns), returns)
+	if len(returns) != 10 {
+		t.Fatalf("got %d return windows, want all 10: %v", len(returns), returns)
 	}
 	if year := returns["1y"]; year["available"] != true || year["changePercent"].(float64) != 100 {
 		t.Errorf("1y = %v, want an available +100%% (100 → 200)", year)
@@ -923,8 +923,8 @@ func TestPerformanceEndpointServesTheChartAndTheReturns(t *testing.T) {
 	// Ranges ride along for every ticker; the client shows them in place of
 	// returns for composites, where a return would be a category error.
 	ranges := byKey(t, perf["ranges"])
-	if len(ranges) != 7 {
-		t.Fatalf("got %d range windows, want all 7: %v", len(ranges), ranges)
+	if len(ranges) != 9 {
+		t.Fatalf("got %d range windows, want all 9: %v", len(ranges), ranges)
 	}
 	all := ranges["all"]
 	if all["available"] != true || all["low"].(float64) != 100 || all["high"].(float64) != 200 {

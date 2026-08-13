@@ -365,22 +365,33 @@ var windows = []struct {
 	// "all time" is as far back as the source goes, which is the only honest
 	// definition available to something reading a third-party feed.
 	start func(now time.Time) time.Time
-	// ranged marks the windows that also get a high/low row. The very short
-	// ones don't: five sessions have a highest and a lowest close, but nobody
-	// calls that a range.
+	// sessions is a length counted in closes instead, and it replaces start
+	// where it is set. Only the shortest window uses it, because only the
+	// shortest one is read that way: "a day" on a series of daily closes means
+	// the previous close, and dating it 24 hours back instead would leave the
+	// row empty every Sunday and every Monday until that day's close landed —
+	// which is a fact about the calendar, not about the ticker.
+	sessions int
+	// ranged marks the windows that also get a high/low row — every one but
+	// three years, which stays a return only. The short ones earned theirs when
+	// the table started reporting the distance to each end rather than a bare
+	// pair of extremes: "0.1% off yesterday's close" is a reading, where a
+	// one-day high and low are two numbers and a subtraction left to the
+	// reader.
 	ranged bool
 }{
-	{"1w", "1 week", func(t time.Time) time.Time { return t.AddDate(0, 0, -7) }, false},
-	{"1m", "1 month", func(t time.Time) time.Time { return t.AddDate(0, -1, 0) }, true},
-	{"3m", "3 months", func(t time.Time) time.Time { return t.AddDate(0, -3, 0) }, true},
+	{"1d", "1 day", nil, 2, true},
+	{"1w", "1 week", func(t time.Time) time.Time { return t.AddDate(0, 0, -7) }, 0, true},
+	{"1m", "1 month", func(t time.Time) time.Time { return t.AddDate(0, -1, 0) }, 0, true},
+	{"3m", "3 months", func(t time.Time) time.Time { return t.AddDate(0, -3, 0) }, 0, true},
 	{"ytd", "Year to date", func(t time.Time) time.Time {
 		return time.Date(t.Year()-1, time.December, 31, 0, 0, 0, 0, time.UTC)
-	}, true},
-	{"1y", "1 year", func(t time.Time) time.Time { return t.AddDate(-1, 0, 0) }, true},
-	{"3y", "3 years", func(t time.Time) time.Time { return t.AddDate(-3, 0, 0) }, false},
-	{"5y", "5 years", func(t time.Time) time.Time { return t.AddDate(-5, 0, 0) }, true},
-	{"10y", "10 years", func(t time.Time) time.Time { return t.AddDate(-10, 0, 0) }, true},
-	{"all", "All time", nil, true},
+	}, 0, true},
+	{"1y", "1 year", func(t time.Time) time.Time { return t.AddDate(-1, 0, 0) }, 0, true},
+	{"3y", "3 years", func(t time.Time) time.Time { return t.AddDate(-3, 0, 0) }, 0, false},
+	{"5y", "5 years", func(t time.Time) time.Time { return t.AddDate(-5, 0, 0) }, 0, true},
+	{"10y", "10 years", func(t time.Time) time.Time { return t.AddDate(-10, 0, 0) }, 0, true},
+	{"all", "All time", nil, 0, true},
 }
 
 // annualiseAbove is how long a window has to be before a compound annual rate
@@ -400,7 +411,10 @@ func computeReturns(points []Point, now time.Time) []Return {
 		if len(points) > 0 {
 			latest := points[len(points)-1]
 			base, ok := points[0], true
-			if w.start != nil {
+			switch {
+			case w.sessions > 0:
+				base, ok = sessionsBack(points, w.sessions)
+			case w.start != nil:
 				base, ok = baseline(points, w.start(now))
 			}
 			if ok && base.Date != latest.Date {
@@ -442,7 +456,7 @@ func computeRanges(points []Point, now time.Time) []Range {
 			continue
 		}
 		r := Range{Key: w.key, Label: w.label}
-		if from, ok := windowStart(points, w.start, now); ok {
+		if from, ok := windowStart(points, w.start, w.sessions, now); ok {
 			low, high := points[from], points[from]
 			for _, p := range points[from:] {
 				if p.Value < low.Value {
@@ -483,9 +497,18 @@ func computeRanges(points []Point, now time.Time) []Range {
 // has falls inside the last ten years, but calling their high a ten-year high is
 // the same fabrication as quoting that symbol a ten-year return — so a window is
 // only available when the series was already running when it opened.
-func windowStart(points []Point, start func(time.Time) time.Time, now time.Time) (int, bool) {
+func windowStart(points []Point, start func(time.Time) time.Time, sessions int, now time.Time) (int, bool) {
 	if len(points) == 0 {
 		return 0, false
+	}
+	// A window measured in closes is covered exactly when it has them all. It
+	// needs no date test: counting back from the end cannot reach past the
+	// series' own beginning without running out of points first.
+	if sessions > 0 {
+		if len(points) < sessions {
+			return 0, false
+		}
+		return len(points) - sessions, true
 	}
 	if start == nil {
 		return 0, true
@@ -498,6 +521,21 @@ func windowStart(points []Point, start func(time.Time) time.Time, now time.Time)
 	// A series that stops before the window opens — a delisted symbol still on
 	// the watchlist — has no range inside it either.
 	return from, from < len(points)
+}
+
+// sessionsBack is the close a window measured in sessions is measured from —
+// the nth-from-last point, so two sessions is the one before the latest.
+//
+// This is what "1 day" means to anyone reading a series of daily closes: the
+// previous one. Asking for the close 24 hours before now instead would answer
+// Friday's on a Saturday, nothing at all on a Sunday, and — until that day's
+// close arrives — nothing on a Monday either, which would put "not enough
+// history" beside a symbol with twenty years of it.
+func sessionsBack(points []Point, sessions int) (Point, bool) {
+	if len(points) < sessions {
+		return Point{}, false
+	}
+	return points[len(points)-sessions], true
 }
 
 // baseline is the last point on or before target — the close a return is

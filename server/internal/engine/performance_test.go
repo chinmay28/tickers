@@ -210,10 +210,65 @@ func TestComputeRangesFindTheHighAndLowInsideEachWindow(t *testing.T) {
 		t.Errorf("1 year range = %v–%v, want 90–120 from within the last year", year.Low, year.High)
 	}
 
-	// The very short windows have no range row — five sessions have a highest
-	// close, but nobody calls that a range.
-	if rangeFor(ranges, "1w").Label != "" {
-		t.Error("a one-week range was reported; that is a number, not a range")
+	// Three years is the one window with a return and no range, so a row that
+	// exists in one table and not the other stays exercised.
+	if rangeFor(ranges, "3y").Label != "" {
+		t.Error("a three-year range was reported; that window is a return only")
+	}
+}
+
+func TestComputeShortWindowsCountSessionsRatherThanDays(t *testing.T) {
+	// A Sunday. The last close is Friday's, so every calendar reading of "a day
+	// ago" lands on a day this series has nothing for.
+	now := time.Date(2024, 3, 17, 0, 0, 0, 0, time.UTC)
+	closes := points(
+		// A week before the week, so the one-week window is covered rather than
+		// merely overlapped. It sits outside the window and must not widen it.
+		"2024-03-04", 999.0,
+		"2024-03-11", 100.0,
+		"2024-03-12", 104.0,
+		"2024-03-13", 101.0,
+		"2024-03-14", 102.0,
+		"2024-03-15", 110.0,
+	)
+
+	day := returnFor(computeReturns(closes, now), "1d")
+	if !day.Available || day.From != "2024-03-14" {
+		t.Fatalf("1 day measured from %q (available=%v), want Friday's move from Thursday's close",
+			day.From, day.Available)
+	}
+	if day.ChangePercent == nil || math.Abs(*day.ChangePercent-7.843137254901961) > 1e-9 {
+		t.Errorf("1 day = %v%%, want 102 → 110", deref(day.ChangePercent))
+	}
+
+	// The same window as a band: the last two closes, which is where the day's
+	// move puts the latest at one end or the other of it.
+	ranges := computeRanges(closes, now)
+	band := rangeFor(ranges, "1d")
+	if !band.Available || band.Low != 102 || band.High != 110 {
+		t.Fatalf("1 day range = %+v, want 102–110 from the last two closes", band)
+	}
+	if band.Position == nil || *band.Position != 100 {
+		t.Errorf("position = %v, want 100: a close that rose is the higher of the two",
+			deref(band.Position))
+	}
+
+	// A week is dated, not counted, and reaches back over the weekend to the
+	// Monday — the range table now reports it beside the longer windows.
+	week := rangeFor(ranges, "1w")
+	if !week.Available || week.Low != 100 || week.High != 110 {
+		t.Errorf("1 week range = %+v, want 100–110 across the week's five closes", week)
+	}
+
+	// One close is a price, not a move: there is no previous one to measure
+	// against, and inventing the series' own first point as a baseline would
+	// report a day's return of zero on a listing's first day.
+	single := points("2024-03-15", 110.0)
+	if r := returnFor(computeReturns(single, now), "1d"); r.Available {
+		t.Errorf("1 day = %+v for a one-close series; there is nothing to measure from", r)
+	}
+	if r := rangeFor(computeRanges(single, now), "1d"); r.Available {
+		t.Errorf("1 day range = %+v for a one-close series", r)
 	}
 }
 
