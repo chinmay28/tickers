@@ -8,7 +8,7 @@ dependencies.
 server/
 ├── cmd/tickers/          entrypoint & CLI
 └── internal/
-    ├── version/          vMAJOR.MINOR.<commit count>
+    ├── version/          vYEAR.MONTH.<commit count>
     ├── store/            SQLite: schema, migrations, every query
     ├── quotes/           quote providers (Yahoo Finance)
     ├── publish/          downstream publishing + the legacy payload
@@ -28,7 +28,7 @@ GOOS=linux GOARCH=arm64 ../scripts/build.sh    # → a Raspberry Pi binary
 ```
 
 `build.sh` sets `CGO_ENABLED=0` and stamps the version. A bare `go build
-./cmd/tickers` also works but reports version `v1.0.0` — patch `0` means an
+./cmd/tickers` also works but reports version `v2026.8.0` — patch `0` means an
 unstamped development build.
 
 The only third-party dependency is `modernc.org/sqlite`, a pure-Go SQLite. That
@@ -108,13 +108,14 @@ change would alter what an existing consumer receives, it fails there first.
 
 ## Version
 
-`internal/version/version.go` holds `Major` and `Minor` as constants; `Patch` is
+The scheme is `vYEAR.MONTH.PATCH`, a calendar version.
+`internal/version/version.go` holds `Year` and `Month` as constants; `Patch` is
 the repository's commit count, stamped at link time:
 
 ```
 -ldflags "-X github.com/chinmay28/tickers/server/internal/version.Patch=$(git rev-list --count HEAD)"
 ```
 
-`scripts/version.sh` is the one place that computes it, and reads `Major`/
-`Minor` out of this file — keep the two constants in a form its `sed` can find.
+`scripts/version.sh` is the one place that computes it, and reads `Year`/
+`Month` out of this file — keep the two constants in a form its `sed` can find.
 A shallow clone reports patch `0` rather than an undercount.
