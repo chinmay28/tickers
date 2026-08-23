@@ -17,7 +17,7 @@ name: Release
 #
 # The release body is the matching section of CHANGELOG.md.
 #
-# NOTE the version is `vMAJOR.MINOR.<commit count>` (scripts/version.sh), so
+# NOTE the version is `vYEAR.MONTH.<commit count>` (scripts/version.sh), so
 # this workflow needs `fetch-depth: 0` — a shallow checkout reports patch 0 —
 # and it refuses to publish if the tag doesn't equal the version the build
 # stamps into the binary.
@@ -31,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release this ref as (e.g. v1.0.42); created if absent'
+        description: 'Tag to release this ref as (e.g. v2026.8.42); created if absent'
         required: true
 
 permissions:
@@ -77,7 +77,7 @@ jobs:
           echo "tag=$TAG version=$version"
           # Patch 0 is the "unstamped build" marker — no git, or a shallow
           # clone whose commit count is a lie. Never publish one, even if
-          # somebody tags it v1.0.0 so the equality check below would pass.
+          # somebody tags it v2026.8.0 so the equality check below would pass.
           if [ "$patch" = 0 ]; then
             echo "::error::this build reports patch 0, which marks an unstamped build."
             echo "The checkout has no commit graph — 'fetch-depth: 0' is required."

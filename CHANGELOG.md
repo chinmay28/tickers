@@ -1,11 +1,30 @@
 # Changelog
 
-Versions are `vMAJOR.MINOR.PATCH` where the patch number is the repository's
+Versions are `vYEAR.MONTH.PATCH` where the patch number is the repository's
 commit count (see [README](./README.md#versioning)). The release workflow reads
 the section matching a tag out of this file and uses it as the release body, so
 each heading must be `## <tag> — <title>`.
 
 ## Unreleased
+
+### A calendar version
+
+**The version is now `vYEAR.MONTH.PATCH`.** The patch number is still the
+repository's commit count — every commit is still a patch release — but the
+leading numbers are the calendar year and month a release line opened rather
+than a semantic major/minor. `v2026.8.42` is the 42nd commit on the 2026.8
+line.
+
+Nothing about the app changes; this is the same scheme
+[sand-vault](https://github.com/chinmay28/sand-vault) uses, so a version string
+means the same thing across the family. `Year`/`Month` live where `Major`/
+`Minor` did — `server/internal/version/version.go`, one declaration in the
+tree — and `scripts/version.sh` still reads them from there. The month is not
+zero-padded, so every tag stays valid semver.
+
+Tickers never used major/minor to promise anything: the one compatibility
+promise it makes is the published payload's format, which is pinned by
+`internal/publish`'s tests and called out here, not by a version number.
 
 ### A day and a week
 

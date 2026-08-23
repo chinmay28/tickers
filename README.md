@@ -97,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/chinmay28/tickers/main/scripts/quic
 ```
 
 The download's checksum is verified before anything is swapped in, and
-`TICKERS_RELEASE=v1.0.42` pins a specific release instead of the latest.
+`TICKERS_RELEASE=v2026.8.42` pins a specific release instead of the latest.
 Releases publish **`linux/arm64`** and **`linux/amd64`**; other architectures
 build from source (the default), which works everywhere. Both modes install the
 same thing — one static binary with the web client embedded, under the same
@@ -483,25 +483,37 @@ non-zero if every symbol failed.
 
 ## Versioning
 
-The same scheme CountRoster uses: **`vMAJOR.MINOR.PATCH`, where the patch
-number is the repository's commit count** — every commit is a patch release,
-so `v1.0.42` is the 42nd commit on the 1.0 line. It's shown in the app header,
-printed by `tickers version`, and returned by `/api/health`.
+**`vYEAR.MONTH.PATCH`** — a calendar version, where **the patch number is the
+repository's commit count** — every commit is a patch release, so `v2026.8.42`
+is the 42nd commit on the 2026.8 line. It's shown in the app header, printed by
+`tickers version`, and returned by `/api/health`.
 
-Tickers starts on **1.0**. Major and minor are constants in
-[`server/internal/version/version.go`](./server/internal/version/version.go)
-and are bumped by hand; `scripts/version.sh` is the one place that assembles
-the whole string, reading those constants so nothing can disagree about them.
+There is no semantic major/minor: the leading numbers say *when* a release line
+opened, not what it promises about compatibility. The one compatibility promise
+this project makes — the published payload's format — is pinned by
+`internal/publish`'s tests, not by a version number, and anything that would
+break it is called out in [`CHANGELOG.md`](./CHANGELOG.md).
+
+- `YEAR`/`MONTH` are constants in
+  [`server/internal/version/version.go`](./server/internal/version/version.go).
+  Bump them by hand when a release line opens — they are deliberately not read
+  from the build clock, so rebuilding an old tree still reports what it
+  originally shipped.
+- The month is not zero-padded (`v2026.8.42`, not `v2026.08.42`): semver forbids
+  a leading zero, and an unpadded month keeps every tag something a semver
+  parser will accept.
+- `scripts/version.sh` is the one place that assembles the whole string, reading
+  those constants so nothing can disagree about them.
 
 ```bash
-scripts/version.sh            # v1.0.42
+scripts/version.sh            # v2026.8.42
 scripts/version.sh --patch    # 42
 ```
 
 A build with no git — a tarball, or a **shallow clone** — reports patch `0`.
 That's deliberate: `git clone --depth 1` answers `rev-list --count HEAD` with
 `1`, which isn't an error and isn't obviously wrong, it just quietly ships a
-build calling itself `v1.0.1`. Patch `0` is the agreed "unstamped development
+build calling itself `v2026.8.1`. Patch `0` is the agreed "unstamped development
 build" marker, it matches the Go default, and the release workflow refuses to
 publish one. Anything building a release needs the full commit graph:
 `fetch-depth: 0` in Actions, and `--filter=blob:none` rather than `--depth 1`

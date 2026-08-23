@@ -343,7 +343,7 @@ else
   log "cloning $TICKERS_REPO (ref: $TICKERS_REF)…"
   mkdir -p "$PREFIX"
   # NOT --depth 1: the version's patch number is the commit count, and a
-  # shallow clone would make every build call itself 1.0.1. --filter=blob:none
+  # shallow clone would make every build call itself 2026.8.1. --filter=blob:none
   # keeps it cheap — the whole commit graph, but only the blobs the checkout
   # actually needs. Fall back for git < 2.19.
   git clone --filter=blob:none --branch "$TICKERS_REF" "$TICKERS_REPO" "$SRC_DIR" \
