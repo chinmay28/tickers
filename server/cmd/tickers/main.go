@@ -21,13 +21,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/chinmay28/tickers/server/internal/api"
 	"github.com/chinmay28/tickers/server/internal/archive"
-	"github.com/chinmay28/tickers/server/internal/collector"
+	"github.com/chinmay28/tickers/server/internal/archiver"
 	"github.com/chinmay28/tickers/server/internal/engine"
 	"github.com/chinmay28/tickers/server/internal/publish"
 	"github.com/chinmay28/tickers/server/internal/quotes"
@@ -129,76 +128,31 @@ func bindFlags(fs *flag.FlagSet, cfg *config) {
 	fs.BoolVar(&cfg.verbose, "verbose", envOr("TICKERS_VERBOSE", "") != "", "log every API request")
 }
 
-// DefaultArchive is where `tickers collect` keeps the archive when nothing
-// says otherwise. `serve` has no default: there, an empty path is what keeps
-// the collector off.
-const DefaultArchive = "./data/archive.sqlite"
-
-// DefaultArchiveExtras are collected alongside the exchange lists: the two
-// largest cryptocurrencies and the indices every analysis wants a benchmark
-// from. None of them is listed on a US exchange, which is why they need
-// naming.
-const DefaultArchiveExtras = "BTC-USD,ETH-USD,^GSPC,^DJI,^IXIC,^RUT,^VIX"
-
-// archiveConfig is the collector's half of the flags. It is operator
-// configuration — a file path and a request budget — rather than a setting,
-// which is why it is flags and env and not the Settings page.
+// archiveConfig is the archive's startup half: where it lives if the Data
+// page hasn't said, and where the exchange lists come from. Everything else
+// about it — what to collect, how fast, from which sources — is a setting,
+// changed on the Data page without a restart.
 type archiveConfig struct {
 	path        string
-	intervals   string
-	extras      string
-	listed      bool
 	universeURL string
-	spacing     time.Duration
 }
 
-func bindArchiveFlags(fs *flag.FlagSet, cfg *archiveConfig, defaultPath string) {
-	fs.StringVar(&cfg.path, "archive", envOr("TICKERS_ARCHIVE", defaultPath),
-		"path to the market-data archive (empty leaves the collector off)")
-	fs.StringVar(&cfg.intervals, "archive-intervals", envOr("TICKERS_ARCHIVE_INTERVALS", "1d,5m,1h"),
-		"bar widths to collect: any of 1d, 5m, 1h")
-	fs.StringVar(&cfg.extras, "archive-extras", envOr("TICKERS_ARCHIVE_EXTRAS", DefaultArchiveExtras),
-		"comma-separated symbols to collect besides the exchange lists")
-	fs.BoolVar(&cfg.listed, "archive-listed", envOr("TICKERS_ARCHIVE_LISTED", "true") == "true",
-		"collect every symbol listed on a US exchange")
+func bindArchiveFlags(fs *flag.FlagSet, cfg *archiveConfig) {
+	fs.StringVar(&cfg.path, "archive", envOr("TICKERS_ARCHIVE", ""),
+		"market-data archive folder, used until one is chosen on the Data page (empty: none)")
 	fs.StringVar(&cfg.universeURL, "universe-url", envOr("TICKERS_UNIVERSE_URL", universe.DefaultBaseURL),
 		"where to read the exchange symbol lists (Nasdaq Trader's symbol directory)")
-	fs.DurationVar(&cfg.spacing, "archive-spacing", envDuration("TICKERS_ARCHIVE_SPACING", collector.DefaultSpacing),
-		"gap between two archive requests to the quote provider")
 }
 
-// newCollector opens the archive and builds a collector over provider. The
-// caller closes the archive.
-func newCollector(cfg archiveConfig, provider quotes.Archivist, log *slog.Logger) (*collector.Collector, *archive.Archive, error) {
-	var intervals []quotes.Interval
-	for _, s := range strings.Split(cfg.intervals, ",") {
-		if s = strings.TrimSpace(s); s == "" {
-			continue
-		}
-		i, err := quotes.ParseInterval(s)
-		if err != nil {
-			return nil, nil, fmt.Errorf("--archive-intervals: %w", err)
-		}
-		intervals = append(intervals, i)
-	}
-	ccfg := collector.Config{
-		Intervals: intervals,
-		Extras:    collector.ParseSymbols(cfg.extras),
-		Spacing:   cfg.spacing,
-	}
-	if cfg.listed {
-		ccfg.Universe = universe.Source{BaseURL: cfg.universeURL, Client: &http.Client{Timeout: time.Minute}}
-	}
-	a, err := archive.Open(cfg.path)
-	if err != nil {
-		return nil, nil, err
-	}
-	c, err := collector.New(a, provider, ccfg, log)
-	if err != nil {
-		a.Close()
-		return nil, nil, err
-	}
-	return c, a, nil
+func newArchiver(acfg archiveConfig, st *store.Store, eng *engine.Engine, provider *quotes.Yahoo, log *slog.Logger) *archiver.Manager {
+	return archiver.New(archiver.Options{
+		Store:        st,
+		Yahoo:        provider,
+		Symbols:      eng.Symbols,
+		FallbackPath: acfg.path,
+		UniverseURL:  acfg.universeURL,
+		Log:          log,
+	})
 }
 
 // newProvider builds the quote source.
@@ -222,7 +176,7 @@ func serve(args []string) error {
 	var acfg archiveConfig
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	bindFlags(fs, &cfg)
-	bindArchiveFlags(fs, &acfg, "")
+	bindArchiveFlags(fs, &acfg)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -238,17 +192,10 @@ func serve(args []string) error {
 	provider := newProvider(cfg)
 	eng := engine.New(st, provider, publish.New(), log)
 
-	// The collector shares the provider, so a user agent fixed on the Settings
+	// The archive shares the provider, so a user agent fixed on the Settings
 	// page — which the engine pushes into it every cycle — fixes both.
-	var coll *collector.Collector
-	if acfg.path != "" {
-		c, a, err := newCollector(acfg, provider, log)
-		if err != nil {
-			return fmt.Errorf("archive: %w", err)
-		}
-		defer a.Close()
-		coll = c
-	}
+	archives := newArchiver(acfg, st, eng, provider, log)
+	eng.UseArchive(archives)
 
 	webHandler, err := web.Handler(cfg.webDist)
 	if err != nil {
@@ -263,6 +210,7 @@ func serve(args []string) error {
 			Logger:  log,
 			Web:     webHandler,
 			Runtime: runtimeInfo(cfg),
+			Archive: archives,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No write timeout: a manual refresh can legitimately take longer than
@@ -281,20 +229,15 @@ func serve(args []string) error {
 	go eng.Start(ctx)
 
 	errs := make(chan error, 1)
-	collected := make(chan struct{})
-	if coll != nil {
-		// An archive failure is logged, not fatal: the watchlist and the
-		// published payload are what this process is for, and they don't
-		// depend on the archive at all.
-		go func() {
-			defer close(collected)
-			if err := coll.Run(ctx); err != nil {
-				log.Error("archive collector stopped", "error", err)
-			}
-		}()
-	} else {
-		close(collected)
-	}
+	// An archive failure is logged and shown on the Data page, never fatal:
+	// the watchlist and the published payload are what this process is for,
+	// and neither depends on the archive.
+	archived := make(chan struct{})
+	go func() {
+		archives.Run(ctx)
+		close(archived)
+	}()
+
 	go func() {
 		log.Info("tickers listening",
 			"version", version.String(), "addr", server.Addr, "db", cfg.db)
@@ -314,7 +257,7 @@ func serve(args []string) error {
 		// Let the collector finish the write it is in before the deferred
 		// Close pulls the archive out from under it.
 		select {
-		case <-collected:
+		case <-archived:
 		case <-shutdownCtx.Done():
 		}
 		return err
@@ -366,78 +309,82 @@ func publishOnce(args []string) error {
 	return nil
 }
 
-// collect runs the archive collector on its own, until interrupted. It is for a
-// host that wants the archive without the watchlist — or wants it in a
-// process that can be stopped, restarted and upgraded separately.
-//
-// It reads the quote-source flags but not the Settings page's overrides: there
-// is no main database here to read them from.
+// collect runs the archive on its own, until interrupted: the collector with
+// no web server and no watchlist refresh. It reads the same database as
+// serve, so the Data page's settings apply — which is also why the two must
+// not run at once against one archive.
 func collect(args []string) error {
 	var cfg config
 	var acfg archiveConfig
 	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
-	fs.StringVar(&cfg.quoteBaseURL, "quote-base-url", envOr("TICKERS_QUOTE_BASE_URL", ""),
-		"quote API root to use instead of Yahoo's")
-	fs.StringVar(&cfg.quoteUserAgent, "quote-user-agent", envOr("TICKERS_QUOTE_USER_AGENT", ""),
-		"User-Agent sent to the quote provider (empty uses a browser default)")
-	fs.IntVar(&cfg.quoteTimeout, "quote-timeout", envInt("TICKERS_QUOTE_TIMEOUT", 0),
-		"seconds to wait for one quote request (0 uses the provider default)")
-	fs.BoolVar(&cfg.verbose, "verbose", envOr("TICKERS_VERBOSE", "") != "", "log every archive request")
-	bindArchiveFlags(fs, &acfg, DefaultArchive)
+	bindFlags(fs, &cfg)
+	bindArchiveFlags(fs, &acfg)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if acfg.path == "" {
-		return errors.New("--archive is required")
-	}
 	log := newLogger(cfg.verbose)
-	c, a, err := newCollector(acfg, newProvider(cfg), log)
+	st, err := store.Open(cfg.db)
 	if err != nil {
 		return err
 	}
-	defer a.Close()
+	defer st.Close()
+	provider := newProvider(cfg)
+	eng := engine.New(st, provider, publish.New(), log)
+	if c, err := st.Config(); err == nil {
+		eng.ApplyConfig(c)
+	}
+	archives := newArchiver(acfg, st, eng, provider, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Info("collecting", "version", version.String(), "archive", acfg.path)
-	return c.Run(ctx)
+	log.Info("collecting", "version", version.String())
+	archives.Run(ctx)
+	return nil
 }
 
 // coverage prints how far the archive has got. It only reads, so it is safe to
-// run against the archive a live collector is writing.
+// run against an archive a live collector is writing.
 func coverage(args []string) error {
-	var path string
+	var cfg config
+	var acfg archiveConfig
 	fs := flag.NewFlagSet("coverage", flag.ContinueOnError)
-	fs.StringVar(&path, "archive", envOr("TICKERS_ARCHIVE", DefaultArchive), "path to the market-data archive")
+	bindFlags(fs, &cfg)
+	bindArchiveFlags(fs, &acfg)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("no archive at %s", path)
+	path := acfg.path
+	if path == "" {
+		if st, err := store.Open(cfg.db); err == nil {
+			if c, err := st.ArchiveConfig(); err == nil {
+				path = c.Path
+			}
+			st.Close()
+		}
+	}
+	if path == "" {
+		return errors.New("no archive: pass --archive, or choose a folder on the Data page")
 	}
 	a, err := archive.Open(path)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
-	st, err := a.Stats()
+	s, err := a.Stats()
 	if err != nil {
 		return err
 	}
-	synced, _ := a.UniverseSyncedAt()
-	fmt.Printf("%d symbols tracked, %d retired", st.Active, st.Retired)
-	if !synced.IsZero() {
-		fmt.Printf("; exchange lists read %s", synced.Local().Format("2006-01-02 15:04"))
-	}
-	fmt.Println()
-	if len(st.Intervals) == 0 {
+	size, _ := a.Size()
+	fmt.Printf("%s — %d symbols tracked (%d first in line), %d retired, %d excluded; %.1f GB on disk\n",
+		path, s.Active, s.Priority, s.Retired, s.Excluded, float64(size)/(1<<30))
+	if len(s.Intervals) == 0 {
 		fmt.Println("nothing collected yet")
 		return nil
 	}
-	fmt.Printf("\n%-8s %9s %9s %8s  %-10s  %-16s  %-16s\n", "interval", "started", "complete", "failing", "deepest", "newest", "stalest")
-	for _, i := range st.Intervals {
-		fmt.Printf("%-8s %9d %9d %8d  %-10s  %-16s  %-16s\n", i.Interval, i.Started, i.Complete, i.Failing,
-			i.Oldest.Format("2006-01-02"), i.Newest.Local().Format("2006-01-02 15:04"), i.Laggard.Local().Format("2006-01-02 15:04"))
+	fmt.Printf("\n%-8s %9s %9s %8s %14s  %-10s  %-16s  %-16s\n", "interval", "started", "complete", "failing", "bars", "deepest", "newest", "stalest")
+	for _, i := range s.Intervals {
+		fmt.Printf("%-8s %9d %9d %8d %14d  %-10s  %-16s  %-16s\n", i.Interval, i.Started, i.Complete, i.Failing, i.Bars,
+			i.Oldest.Format("2006-01-02"), i.Newest.Local().Format("2006-01-02 15:04"), i.Stalest.Local().Format("2006-01-02 15:04"))
 	}
 	return nil
 }
@@ -472,15 +419,6 @@ func newLogger(verbose bool) *slog.Logger {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return fallback
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
 	}
 	return fallback
 }

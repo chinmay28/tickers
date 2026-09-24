@@ -57,6 +57,9 @@ type Engine struct {
 	// own answer — and on the same long TTL as fundCache, which it shares an
 	// endpoint and a fragility with. See sectors.go.
 	sectorCache map[string]sectorEntry
+	// archive, when set, is read before the provider for daily history,
+	// dividends and sparklines. See archive.go.
+	archive ArchiveReader
 
 	// kick asks the loop to run now and then resume its schedule. Buffered by
 	// one: several nudges in quick succession collapse into a single run,

@@ -16,10 +16,11 @@ const (
 	Daily      Interval = "1d"
 	Hourly     Interval = "1h"
 	FiveMinute Interval = "5m"
+	OneMinute  Interval = "1m"
 )
 
 // Intervals is every width the archive knows, widest first.
-var Intervals = []Interval{Daily, Hourly, FiveMinute}
+var Intervals = []Interval{Daily, Hourly, FiveMinute, OneMinute}
 
 // ParseInterval turns a spelling back into an Interval, refusing anything the
 // archive has no policy for — a typo in a flag should stop the process, not
@@ -30,7 +31,7 @@ func ParseInterval(s string) (Interval, error) {
 			return i, nil
 		}
 	}
-	return "", fmt.Errorf("unknown interval %q (want one of 1d, 1h, 5m)", s)
+	return "", fmt.Errorf("unknown interval %q (want one of 1d, 1h, 5m, 1m)", s)
 }
 
 // Step is how much time one bar covers. A daily bar is a calendar day here,
@@ -43,6 +44,8 @@ func (i Interval) Step() time.Duration {
 		return time.Hour
 	case FiveMinute:
 		return 5 * time.Minute
+	case OneMinute:
+		return time.Minute
 	}
 	return 0
 }

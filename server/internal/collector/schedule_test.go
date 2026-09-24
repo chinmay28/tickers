@@ -2,6 +2,7 @@ package collector
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,178 +12,205 @@ import (
 
 var now = time.Date(2026, 9, 24, 18, 0, 0, 0, time.UTC)
 
-func policy(t *testing.T, i quotes.Interval) Policy {
-	t.Helper()
-	ps, err := Policies([]quotes.Interval{i})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ps[0]
+// tgt is a Yahoo target with the reach the collector would give it when
+// minute bars are collected too.
+func tgt(symbol string, i quotes.Interval, cur archive.Cursor) target {
+	all := []quotes.Interval{quotes.Daily, quotes.OneMinute, quotes.FiveMinute, quotes.Hourly}
+	r, _ := reachFor(Source{Reach: YahooReach, Live: true}, i, all)
+	order := map[quotes.Interval]int{quotes.Daily: 0, quotes.OneMinute: 1, quotes.FiveMinute: 2, quotes.Hourly: 3}[i]
+	cur.Interval = i
+	return target{symbol: symbol, interval: i, reach: r, order: order, cursor: cur}
 }
 
-func tgt(t *testing.T, symbol string, i quotes.Interval, cov archive.Coverage) target {
-	t.Helper()
-	p := policy(t, i)
-	cov.Interval = i
-	order := map[quotes.Interval]int{quotes.Daily: 0, quotes.FiveMinute: 1, quotes.Hourly: 2}[i]
-	return target{symbol: symbol, policy: p, order: order, coverage: cov}
-}
-
-func TestNextPrefersAtRiskThenForwardThenSeedThenBackfill(t *testing.T) {
-	targets := []target{
-		// A daily series ten years deep, still digging.
-		tgt(t, "DEEP", quotes.Daily, archive.Coverage{Oldest: now.AddDate(-10, 0, 0), Newest: now.Add(-time.Hour)}),
-		// A daily series only one year deep.
-		tgt(t, "SHALLOW", quotes.Daily, archive.Coverage{Oldest: now.AddDate(-1, 0, 0), Newest: now.Add(-time.Hour)}),
-		// Never fetched.
-		tgt(t, "NEW", quotes.FiveMinute, archive.Coverage{}),
-		// Due forward, a day stale.
-		tgt(t, "STALE", quotes.Daily, archive.Coverage{Oldest: now.AddDate(-30, 0, 0), Newest: now.Add(-25 * time.Hour), Complete: true}),
-		// Five-minute bars 55 days stale: four days from losing bars for good.
-		tgt(t, "RISK", quotes.FiveMinute, archive.Coverage{Oldest: now.Add(-80 * day), Newest: now.Add(-55 * day), Complete: true}),
-	}
-
+func drain(targets []target) []string {
 	var order []string
-	for len(order) < len(targets) {
-		tk, ok := next(targets, now)
+	for {
+		tk, ok := next(targets, now, nil)
+		if !ok {
+			return order
+		}
+		order = append(order, targets[tk.target].symbol+"/"+tk.kind.String())
+		targets[tk.target].cursor.NextAttempt = now.Add(time.Hour)
+	}
+}
+
+func TestNextOrdersRiskThenPriorityThenForwardSeedBackfill(t *testing.T) {
+	vip := tgt("VIP", quotes.Daily, archive.Cursor{Oldest: now.AddDate(-20, 0, 0), Newest: now.Add(-time.Hour)})
+	vip.priority = true
+	targets := []target{
+		tgt("DEEP", quotes.Daily, archive.Cursor{Oldest: now.AddDate(-10, 0, 0), Newest: now.Add(-time.Hour)}),
+		tgt("SHALLOW", quotes.Daily, archive.Cursor{Oldest: now.AddDate(-1, 0, 0), Newest: now.Add(-time.Hour)}),
+		tgt("NEW", quotes.OneMinute, archive.Cursor{}),
+		tgt("STALE", quotes.Daily, archive.Cursor{Oldest: now.AddDate(-30, 0, 0), Newest: now.Add(-25 * time.Hour), Complete: true}),
+		// Minute bars 24 days stale: within a quarter-horizon of losing bars.
+		tgt("RISK", quotes.OneMinute, archive.Cursor{Oldest: now.Add(-40 * day), Newest: now.Add(-24 * day), Complete: true}),
+		vip,
+	}
+	got := drain(targets)
+	want := []string{"RISK/forward", "VIP/backward", "STALE/forward", "NEW/seed", "SHALLOW/backward", "DEEP/backward"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("order = %v, want %v — near-horizon first, then priority symbols, then keeping up, then breadth-first digging", got, want)
+	}
+}
+
+func TestNextOnlyChoosesReadySources(t *testing.T) {
+	a := tgt("A", quotes.Daily, archive.Cursor{})
+	b := tgt("B", quotes.Daily, archive.Cursor{})
+	b.source = 1
+	targets := []target{a, b}
+	tk, ok := next(targets, now, func(s int) bool { return s == 1 })
+	if !ok || targets[tk.target].symbol != "B" {
+		t.Fatalf("with source 0 waiting, next = %v/%v, want B from the ready source", ok, tk)
+	}
+	if _, ok := next(targets, now, func(int) bool { return false }); ok {
+		t.Error("a task was chosen with no source ready")
+	}
+}
+
+func TestFinerForwardMakesCoarserIntradayOneShot(t *testing.T) {
+	yahoo := Source{Reach: YahooReach, Live: true}
+	all := []quotes.Interval{quotes.Daily, quotes.OneMinute, quotes.FiveMinute, quotes.Hourly}
+	if r, _ := reachFor(yahoo, quotes.FiveMinute, all); r.Every != 0 {
+		t.Error("five-minute bars go forward although minute bars do — they can be built from them")
+	}
+	if r, _ := reachFor(yahoo, quotes.Daily, all); r.Every == 0 {
+		t.Error("daily bars stopped going forward; a daily bar is the official session and is never built")
+	}
+	noMinutes := []quotes.Interval{quotes.Daily, quotes.FiveMinute, quotes.Hourly}
+	if r, _ := reachFor(yahoo, quotes.FiveMinute, noMinutes); r.Every == 0 {
+		t.Error("with minute bars off, five-minute bars must go forward themselves")
+	}
+	if r, _ := reachFor(Source{Reach: YahooReach}, quotes.Daily, all); r.Every != 0 {
+		t.Error("a source that isn't live went forward; it only fills gaps")
+	}
+	if _, ok := reachFor(Source{Reach: map[quotes.Interval]Reach{quotes.Daily: {}}}, quotes.OneMinute, all); ok {
+		t.Error("an interval the source doesn't serve got a reach")
+	}
+}
+
+func TestOneShotSeriesNeverWakeTheLoop(t *testing.T) {
+	five := tgt("A", quotes.FiveMinute, archive.Cursor{Oldest: now.Add(-59 * day), Newest: now.Add(-30 * day), Complete: true})
+	if _, ok := next([]target{five}, now, nil); ok {
+		t.Error("a finished one-shot backfill was scheduled again")
+	}
+	if w := wake([]target{five}, now); !w.IsZero() {
+		t.Errorf("wake = %s for a finished one-shot series, want never", w)
+	}
+	waiting := tgt("B", quotes.Daily, archive.Cursor{NextAttempt: now.Add(time.Minute)})
+	if w := wake([]target{five, waiting}, now); !w.Equal(now.Add(time.Minute)) {
+		t.Errorf("wake = %s, want the backoff's end", w)
+	}
+}
+
+func TestMinuteBarsWalkBackAWeekAtATimeToTheHorizon(t *testing.T) {
+	m := tgt("A", quotes.OneMinute, archive.Cursor{})
+	var windows []string
+	for i := 0; i < 10; i++ {
+		tk, ok := next([]target{m}, now, nil)
 		if !ok {
 			break
 		}
-		order = append(order, targets[tk.target].symbol+"/"+tk.kind.String())
-		// Take it off the board.
-		targets[tk.target].coverage.NextAttempt = now.Add(time.Hour)
+		windows = append(windows, fmt.Sprintf("%s:%s", tk.kind, tk.to.Sub(tk.from)))
+		m.cursor = advance(m, tk, quotes.CandleSeries{Candles: make([]quotes.Candle, 1)}, true, now)
 	}
-	want := []string{"RISK/forward", "STALE/forward", "NEW/seed", "SHALLOW/backward", "DEEP/backward"}
-	if len(order) != len(want) {
-		t.Fatalf("order = %v, want %v", order, want)
+	if len(windows) != 4 || windows[0] != "seed:168h0m0s" {
+		t.Errorf("windows = %v, want a week's seed then weeks back to within a day of the 29-day horizon, four requests in all", windows)
 	}
-	for i := range want {
-		if order[i] != want[i] {
-			t.Fatalf("order = %v, want %v — breadth-first backfill after keeping up, and anything near the horizon first", order, want)
-		}
-	}
-}
-
-func TestNextSkipsSeriesWaitingOutABackoffAndFinishedOnes(t *testing.T) {
-	targets := []target{
-		tgt(t, "WAIT", quotes.Daily, archive.Coverage{NextAttempt: now.Add(time.Minute)}),
-		tgt(t, "DONE", quotes.Daily, archive.Coverage{Oldest: now.AddDate(-40, 0, 0), Newest: now.Add(-time.Hour), Complete: true}),
-	}
-	if tk, ok := next(targets, now); ok {
-		t.Fatalf("next = %s/%v, want nothing due", targets[tk.target].symbol, tk.kind)
-	}
-	w := wake(targets, now)
-	if !w.Equal(now.Add(time.Minute)) {
-		t.Errorf("wake = %s, want the backoff's end a minute out", w)
-	}
-}
-
-func TestSeedWindows(t *testing.T) {
-	targets := []target{tgt(t, "A", quotes.Daily, archive.Coverage{}), tgt(t, "B", quotes.FiveMinute, archive.Coverage{})}
-	tk, _ := next(targets, now)
-	if tk.kind != seed || !tk.to.Equal(now) || !tk.from.Equal(now.Add(-3652*day)) {
-		t.Errorf("daily seed = %v %s–%s, want the last decade", tk.kind, tk.from, tk.to)
-	}
-	targets[0].coverage.NextAttempt = now.Add(time.Hour)
-	tk, _ = next(targets, now)
-	if !tk.from.Equal(now.Add(-59 * day)) {
-		t.Errorf("5m seed starts %s, want the whole 59-day horizon in one request", tk.from)
+	if !m.cursor.Complete {
+		t.Error("the walk reached the horizon and isn't complete")
 	}
 }
 
 func TestForwardOverlapsAndClampsToTheHorizon(t *testing.T) {
-	p := policy(t, quotes.FiveMinute)
-	fresh := forwardTask(0, p, archive.Coverage{Newest: now.Add(-2 * day)}, now)
+	r := YahooReach[quotes.OneMinute]
+	fresh := forwardTask(0, r, archive.Cursor{Newest: now.Add(-2 * day)}, now)
 	if !fresh.from.Equal(now.Add(-3*day)) || !fresh.to.Equal(now) {
 		t.Errorf("forward = %s–%s, want a day of overlap before the newest point", fresh.from, fresh.to)
 	}
-	// Off for three months: the gap past the horizon is gone for good, and
-	// asking for it would fail every time.
-	lost := forwardTask(0, p, archive.Coverage{Newest: now.Add(-90 * day)}, now)
-	if !lost.from.Equal(now.Add(-59 * day)) {
-		t.Errorf("a series past the horizon resumes at %s, want the horizon's edge", lost.from)
-	}
-	// A daily series years behind catches up a span at a time.
-	d := policy(t, quotes.Daily)
-	behind := forwardTask(0, d, archive.Coverage{Newest: now.AddDate(-20, 0, 0)}, now)
-	if got := behind.to.Sub(behind.from); got != d.Span {
-		t.Errorf("catch-up window is %s, want one span", got)
+	lost := forwardTask(0, r, archive.Cursor{Newest: now.Add(-90 * day)}, now)
+	if !lost.from.Equal(now.Add(-29*day)) || lost.to.Sub(lost.from) != r.Span {
+		t.Errorf("a series past the horizon resumes %s–%s, want the edge and one span", lost.from, lost.to)
 	}
 }
 
-func TestAdvanceMarksTheBeginning(t *testing.T) {
-	daily := tgt(t, "AAPL", quotes.Daily, archive.Coverage{Oldest: now.AddDate(-10, 0, 0), Newest: now})
-	back := backwardTask(0, daily.policy, daily.coverage, now)
-	if !back.to.Equal(daily.coverage.Oldest) || back.to.Sub(back.from) != daily.policy.Span {
-		t.Fatalf("backward = %s–%s, want one span ending where the coverage starts", back.from, back.to)
+func TestAdvanceKnowsWhereHistoryBegins(t *testing.T) {
+	d := tgt("AAPL", quotes.Daily, archive.Cursor{Oldest: now.AddDate(-10, 0, 0), Newest: now})
+	back := backwardTask(0, d.reach, d.cursor, now)
+	if got := advance(d, back, quotes.CandleSeries{FirstTrade: back.from.AddDate(-5, 0, 0), Candles: make([]quotes.Candle, 1)}, true, now); got.Complete {
+		t.Error("completed with history still behind the window")
 	}
-
-	// Still more history behind this window.
-	got := advance(daily, back, quotes.CandleSeries{FirstTrade: back.from.AddDate(-5, 0, 0), Candles: make([]quotes.Candle, 1)}, now)
-	if got.Complete || !got.Oldest.Equal(back.from) || !got.Newest.Equal(now) {
-		t.Errorf("mid-history backfill = %+v, want oldest moved and not complete", got)
+	if got := advance(d, back, quotes.CandleSeries{FirstTrade: back.from.AddDate(2, 0, 0)}, true, now); !got.Complete {
+		t.Error("a window reaching the first trade date did not complete")
 	}
-	// This window reaches the listing.
-	got = advance(daily, back, quotes.CandleSeries{FirstTrade: back.from.AddDate(2, 0, 0)}, now)
-	if !got.Complete {
-		t.Error("a window reaching the first trade date did not complete the backfill")
+	if got := advance(d, back, quotes.CandleSeries{}, true, now); !got.Complete {
+		t.Error("an empty window with no first trade date did not complete")
 	}
-	// No first trade date and an empty window: nothing further back.
-	got = advance(daily, back, quotes.CandleSeries{}, now)
-	if !got.Complete {
-		t.Error("an empty window with no first trade date did not complete the backfill")
+	if got := advance(d, back, quotes.CandleSeries{}, false, now); got.Complete {
+		t.Error("a window skipped because it was held completed the walk — skipping says nothing about where history begins")
 	}
-	// A seed that comes back empty is a new listing, not the end of history.
-	seeded := advance(tgt(t, "IPO", quotes.Daily, archive.Coverage{}), seedTask(0, daily.policy, now), quotes.CandleSeries{}, now)
-	if seeded.Complete {
-		t.Error("an empty first fetch completed a backfill that has not been tried")
-	}
-	// An intraday seed reaches the horizon in one go.
-	five := tgt(t, "AAPL", quotes.FiveMinute, archive.Coverage{})
-	got = advance(five, seedTask(0, five.policy, now), quotes.CandleSeries{}, now)
-	if !got.Complete || !got.Newest.Equal(now) {
-		t.Errorf("5m seed = %+v, want complete — there is nothing past the horizon to ask for", got)
+	if got := advance(tgt("IPO", quotes.Daily, archive.Cursor{}), seedTask(0, d.reach, now), quotes.CandleSeries{}, true, now); got.Complete {
+		t.Error("an empty first fetch completed a walk that hasn't started")
 	}
 }
 
-func TestAdvanceClearsAndFailBacksOff(t *testing.T) {
-	x := tgt(t, "X", quotes.Daily, archive.Coverage{})
+func TestFailBacksOffAndAdvanceClears(t *testing.T) {
+	x := tgt("X", quotes.Daily, archive.Cursor{})
 	var waits []time.Duration
 	for i := 0; i < 10; i++ {
-		x.coverage = fail(x, errors.New("boom"), now)
-		waits = append(waits, x.coverage.NextAttempt.Sub(now))
+		x.cursor = fail(x, errors.New("boom"), now)
+		waits = append(waits, x.cursor.NextAttempt.Sub(now))
 	}
 	if waits[0] != time.Hour || waits[1] != 2*time.Hour || waits[9] != maxBackoff {
-		t.Errorf("backoff = %v, want 1h doubling to a %s cap", waits, maxBackoff)
+		t.Errorf("backoff = %v, want 1h doubling to %s", waits, maxBackoff)
 	}
-	if x.coverage.Failures != 10 || x.coverage.LastError != "boom" {
-		t.Errorf("failure record = %+v", x.coverage)
-	}
-	ok := advance(x, seedTask(0, x.policy, now), quotes.CandleSeries{}, now)
+	ok := advance(x, seedTask(0, x.reach, now), quotes.CandleSeries{}, true, now)
 	if ok.Failures != 0 || !ok.NextAttempt.IsZero() || ok.LastError != "" {
-		t.Errorf("a success left %+v, want the failure record cleared", ok)
+		t.Errorf("a success left %+v", ok)
 	}
 }
 
 func TestSettledDropsTheBarInProgress(t *testing.T) {
-	bars := []quotes.Candle{{Time: now.Add(-10 * time.Minute)}, {Time: now.Add(-5 * time.Minute)}, {Time: now.Add(-2 * time.Minute)}}
-	if got := settled(quotes.FiveMinute, bars, now); len(got) != 2 {
-		t.Errorf("kept %d five-minute bars, want 2 — the one still open is keyed by its last trade", len(got))
+	bars := []quotes.Candle{{Time: now.Add(-3 * time.Minute)}, {Time: now.Add(-time.Minute)}, {Time: now.Add(-20 * time.Second)}}
+	if got := settled(quotes.OneMinute, bars, now); len(got) != 2 {
+		t.Errorf("kept %d minute bars, want 2 — the open one is keyed by its last trade", len(got))
 	}
 	if got := settled(quotes.Daily, bars, now); len(got) != 3 {
-		t.Errorf("kept %d daily bars, want all 3 — a daily bar is keyed by date and overwrites itself", len(got))
+		t.Errorf("kept %d daily bars, want all 3", len(got))
 	}
 }
 
-func TestPoliciesRefuseUnknownIntervals(t *testing.T) {
-	if _, err := Policies(nil); err == nil {
-		t.Error("an empty interval list was accepted")
+func TestMissingNarrowsToTheDaysNotHeld(t *testing.T) {
+	d := func(n int) int64 { return now.Truncate(day).AddDate(0, 0, n).Unix() }
+	from, to := time.Unix(d(-10), 0).UTC(), time.Unix(d(0), 0).UTC()
+	trading := []int64{d(-9), d(-8), d(-7), d(-3), d(-2)}
+
+	f, tt, any := missing(from, to, trading, map[int64]bool{d(-9): true, d(-2): true})
+	if !any || f.Unix() != d(-8) || tt.Unix() != d(-2) {
+		t.Errorf("window = %s–%s, want day −8 up to the start of day −2 (days −8…−3 are missing)", f, tt)
 	}
-	if _, err := Policies([]quotes.Interval{"1m"}); err == nil {
-		t.Error("an interval with no policy was accepted")
+	if _, _, any := missing(from, to, trading, map[int64]bool{d(-9): true, d(-8): true, d(-7): true, d(-3): true, d(-2): true}); any {
+		t.Error("a window whose every trading day is held still asked for something")
 	}
-	ps, err := Policies([]quotes.Interval{quotes.Daily, quotes.Daily, quotes.FiveMinute})
-	if err != nil || len(ps) != 2 {
-		t.Errorf("duplicates gave %d policies (err %v), want 2", len(ps), err)
+	if f, tt, any := missing(from, to, nil, nil); !any || !f.Equal(from) || !tt.Equal(to) {
+		t.Error("with no calendar the whole window must be asked for")
+	}
+}
+
+func TestValidSources(t *testing.T) {
+	p := &fakeProvider{}
+	cases := map[string][]Source{
+		"nameless":     {{Provider: p, Spacing: time.Second}},
+		"duplicate":    {{Name: "a", Provider: p, Spacing: time.Second}, {Name: "a", Provider: p, Spacing: time.Second}},
+		"too fast":     {{Name: "a", Provider: p, Spacing: time.Millisecond}},
+		"two live":     {{Name: "a", Provider: p, Spacing: time.Second, Live: true}, {Name: "b", Provider: p, Spacing: time.Second, Live: true}},
+		"providerless": {{Name: "a", Spacing: time.Second}},
+	}
+	for name, s := range cases {
+		if err := validSources(s); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if err := validSources([]Source{Yahoo(p, time.Second), {Name: "polygon", Provider: p, Spacing: time.Second}}); err != nil {
+		t.Errorf("a live source and a gap-filler were refused: %v", err)
 	}
 }

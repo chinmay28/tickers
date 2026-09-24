@@ -162,12 +162,12 @@ func TestOtherFailuresAreNotRateLimiting(t *testing.T) {
 }
 
 func TestParseIntervalRefusesTypos(t *testing.T) {
-	for _, s := range []string{"1d", "1h", "5m"} {
+	for _, s := range []string{"1d", "1h", "5m", "1m"} {
 		if i, err := ParseInterval(s); err != nil || string(i) != s {
 			t.Errorf("ParseInterval(%q) = %q, %v", s, i, err)
 		}
 	}
-	if _, err := ParseInterval("1m"); err == nil {
+	if _, err := ParseInterval("2m"); err == nil {
 		t.Error("an interval the archive has no policy for was accepted")
 	}
 }
