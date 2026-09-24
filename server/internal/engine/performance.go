@@ -322,9 +322,14 @@ func (e *Engine) symbolHistory(ctx context.Context, h quotes.Historian, symbol s
 	if bars, ok := e.cachedHistory(symbol); ok {
 		return bars, nil
 	}
-	bars, err := h.History(ctx, symbol, since)
-	if err != nil {
-		return nil, err
+	// The archive first: when it holds a symbol's whole daily series, the
+	// sheet costs one small top-up request instead of decades of bars.
+	bars, ok := e.archiveHistory(ctx, h, symbol)
+	if !ok {
+		var err error
+		if bars, err = h.History(ctx, symbol, since); err != nil {
+			return nil, err
+		}
 	}
 	e.mu.Lock()
 	if e.historyCache == nil {

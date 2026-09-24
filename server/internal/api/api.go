@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chinmay28/tickers/server/internal/archiver"
 	"github.com/chinmay28/tickers/server/internal/engine"
 	"github.com/chinmay28/tickers/server/internal/publish"
 	"github.com/chinmay28/tickers/server/internal/quotes"
@@ -34,6 +35,9 @@ type Server struct {
 	runtime   Runtime
 	// web serves the embedded client; nil means API-only.
 	web http.Handler
+	// archive runs the market-data archive; nil means none, and its
+	// endpoints answer 501.
+	archive *archiver.Manager
 }
 
 // Runtime is the start-up configuration the Settings page shows read-only.
@@ -60,6 +64,8 @@ type Options struct {
 	Web http.Handler
 	// Runtime is reported by /api/state for the Settings page.
 	Runtime Runtime
+	// Archive backs the Data page. Nil disables it.
+	Archive *archiver.Manager
 }
 
 // New builds the API server.
@@ -80,6 +86,7 @@ func New(opts Options) *Server {
 		started:   time.Now(),
 		runtime:   opts.Runtime,
 		web:       opts.Web,
+		archive:   opts.Archive,
 	}
 }
 
@@ -136,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/publish", s.handlePublish)
 	mux.HandleFunc("GET /api/preview", s.handlePreview)
 	mux.HandleFunc("GET /api/search", s.handleSearch)
+	s.routeArchive(mux)
 
 	// Any /api path or method that didn't match above. Without this the
 	// catch-all below would answer `PUT /api/tickers` with the HTML shell,
@@ -468,7 +476,7 @@ func (s *Server) handleTickerHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	points, err := s.store.History(t.Symbol, limit)
+	points, err := s.engine.Sparkline(t.Symbol, limit)
 	if err != nil {
 		s.fail(w, err)
 		return

@@ -1,6 +1,8 @@
 package archive
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,9 +12,13 @@ import (
 
 func newTestArchive(t *testing.T) *Archive {
 	t.Helper()
-	a, err := Open(filepath.Join(t.TempDir(), "archive.sqlite"))
+	root := t.TempDir()
+	if err := Init(root); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	a, err := Open(root)
 	if err != nil {
-		t.Fatalf("open archive: %v", err)
+		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { a.Close() })
 	return a
@@ -22,268 +28,453 @@ var t0 = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
 func day(n int) time.Time { return t0.AddDate(0, 0, n) }
 
-// trackOne tracks a symbol and returns its ID.
-func trackOne(t *testing.T, a *Archive, symbol string) int64 {
+// session is a US session's open on day n: 13:30 UTC.
+func session(n int) time.Time { return day(n).Add(13*time.Hour + 30*time.Minute) }
+
+func track(t *testing.T, a *Archive, list List, symbols ...string) {
 	t.Helper()
-	if err := a.Track([]Entry{{Symbol: symbol, Kind: KindStock}}, t0); err != nil {
-		t.Fatalf("track %s: %v", symbol, err)
-	}
-	syms, err := a.ActiveSymbols()
-	if err != nil {
-		t.Fatalf("active symbols: %v", err)
-	}
-	for _, s := range syms {
-		if s.Symbol == symbol {
-			return s.ID
+	for _, s := range symbols {
+		if err := a.Add(list, Entry{Symbol: s, Kind: KindStock}, t0); err != nil {
+			t.Fatalf("add %s: %v", s, err)
 		}
 	}
-	t.Fatalf("%s is not active after tracking it", symbol)
-	return 0
+}
+
+func idOf(t *testing.T, a *Archive, symbol string) int64 {
+	t.Helper()
+	s, err := a.Lookup(symbol)
+	if err != nil {
+		t.Fatalf("lookup %s: %v", symbol, err)
+	}
+	return s.ID
 }
 
 func candle(at time.Time, price float64, volume int64) quotes.Candle {
 	return quotes.Candle{Time: at, Open: price, High: price, Low: price, Close: price, Volume: volume}
 }
 
-func TestReopeningIsANoOp(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "archive.sqlite")
+func minutes(start time.Time, n int, price float64) []quotes.Candle {
+	out := make([]quotes.Candle, n)
+	for i := range out {
+		out[i] = candle(start.Add(time.Duration(i)*time.Minute), price, 1)
+	}
+	return out
+}
+
+func record(t *testing.T, a *Archive, b Batch) {
+	t.Helper()
+	if err := a.Record(b); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+}
+
+func TestOpenRefusesAFolderThatIsNotAnArchive(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Open(root); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("opening an empty folder gave %v, want ErrUnavailable — it is what an unmounted drive looks like", err)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("a refused open wrote %d files into the folder; an empty mount point must stay empty", len(entries))
+	}
+
+	missing := filepath.Join(root, "not-mounted")
+	if err := Init(missing); err == nil {
+		t.Fatal("init created a folder that did not exist")
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Error("init left a folder behind at a path that did not exist")
+	}
+
+	if err := Init(root); err != nil {
+		t.Fatalf("init: %v", err)
+	}
 	for i := 0; i < 2; i++ {
-		a, err := Open(path)
+		a, err := Open(root)
 		if err != nil {
-			t.Fatalf("open #%d: %v — migrations must be skipped once recorded", i+1, err)
+			t.Fatalf("open #%d: %v", i+1, err)
 		}
 		a.Close()
 	}
+	if err := Init(root); err != nil {
+		t.Errorf("re-initialising an archive failed: %v", err)
+	}
 }
 
-func TestTrackUpsertsAndRetireKeepsHistory(t *testing.T) {
+func TestPingNoticesTheDriveGoing(t *testing.T) {
 	a := newTestArchive(t)
-	if err := a.Track([]Entry{
-		{Symbol: "aapl", Name: "Apple", Exchange: "NASDAQ", Kind: KindStock},
-		{Symbol: "GLD", Kind: KindETF},
-		{Symbol: "BTC-USD", Kind: KindExtra},
-	}, t0); err != nil {
-		t.Fatalf("track: %v", err)
+	if err := a.Ping(); err != nil {
+		t.Fatalf("ping: %v", err)
 	}
-	// A re-track with no name must not blank the one already known.
-	if err := a.Track([]Entry{{Symbol: "AAPL", Kind: KindStock}}, day(1)); err != nil {
-		t.Fatalf("re-track: %v", err)
+	os.Remove(filepath.Join(a.Root(), MarkerFile))
+	if err := a.Ping(); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("ping without the marker gave %v, want ErrUnavailable", err)
+	}
+}
+
+func TestListsDecideWhatIsTracked(t *testing.T) {
+	a := newTestArchive(t)
+	joined, left, err := a.SetList(Listed, []Entry{
+		{Symbol: "aapl", Name: "Apple", Exchange: "NASDAQ", Kind: KindStock},
+		{Symbol: "GLD", Name: "SPDR Gold", Kind: KindETF},
+		{Symbol: "IBM", Kind: KindStock},
+	}, t0)
+	if err != nil || joined != 3 || left != 0 {
+		t.Fatalf("first listing: joined %d left %d err %v", joined, left, err)
+	}
+	// The watchlist knows GLD too, with no name: it must not blank the name.
+	if _, _, err := a.SetList(Watchlist, []Entry{{Symbol: "GLD"}, {Symbol: "BTC-USD"}}, t0); err != nil {
+		t.Fatal(err)
+	}
+	// Next day's listing drops GLD and IBM.
+	joined, left, err = a.SetList(Listed, []Entry{{Symbol: "AAPL"}}, day(1))
+	if err != nil || joined != 0 || left != 2 {
+		t.Fatalf("second listing: joined %d left %d err %v, want 0 and 2", joined, left, err)
 	}
 
-	retired, err := a.RetireAllExcept([]string{"aapl", "BTC-USD"})
-	if err != nil || retired != 1 {
-		t.Fatalf("retired %d (err %v), want GLD alone", retired, err)
+	gld, _ := a.Lookup("gld")
+	if !gld.Active || gld.Name != "SPDR Gold" || !gld.Priority {
+		t.Errorf("GLD = %+v, want still active (it is on the watchlist), named, and priority", gld)
+	}
+	ibm, _ := a.Lookup("IBM")
+	if ibm.Active {
+		t.Errorf("IBM is on no list and still active")
+	}
+
+	// Excluding wins over every list; history is kept.
+	if err := a.SetExcluded("AAPL", true); err != nil {
+		t.Fatal(err)
 	}
 	active, _ := a.ActiveSymbols()
-	if len(active) != 2 || active[0].Symbol != "AAPL" || active[0].Name != "Apple" {
-		t.Fatalf("active = %+v, want AAPL (name kept) and BTC-USD", active)
+	var names []string
+	for _, s := range active {
+		names = append(names, s.Symbol)
 	}
-
-	// Coming back onto the list reactivates the same row, and its ID with it.
-	gldBefore := trackOne(t, a, "GLD")
-	if err := a.Track([]Entry{{Symbol: "GLD"}}, day(2)); err != nil {
-		t.Fatal(err)
+	if len(names) != 2 || names[0] != "BTC-USD" || names[1] != "GLD" {
+		t.Errorf("active = %v, want BTC-USD and GLD", names)
 	}
-	if again := trackOne(t, a, "GLD"); again != gldBefore {
-		t.Errorf("GLD's ID moved from %d to %d; its history would be orphaned", gldBefore, again)
+	if err := a.SetExcluded("NOPE", true); !errors.Is(err, ErrUnknownSymbol) {
+		t.Errorf("excluding an unknown symbol gave %v", err)
 	}
-	st, _ := a.Stats()
-	if st.Active != 3 || st.Retired != 0 {
-		t.Errorf("stats = %d active, %d retired; want 3 and 0", st.Active, st.Retired)
-	}
-}
-
-func TestTrackRefusesABlankSymbol(t *testing.T) {
-	a := newTestArchive(t)
-	if err := a.Track([]Entry{{Symbol: "  "}}, t0); err == nil {
-		t.Error("a blank symbol was tracked")
-	}
-}
-
-func TestRecordWritesBarsAndCoverageTogether(t *testing.T) {
-	a := newTestArchive(t)
-	id := trackOne(t, a, "AAPL")
-
-	cov := Coverage{SymbolID: id, Interval: quotes.Daily, Oldest: day(0), Newest: day(3)}
-	err := a.Record(Batch{Coverage: cov, Series: quotes.CandleSeries{
-		Candles:    []quotes.Candle{candle(day(0), 10, 100), candle(day(1), 11, 110), candle(day(2), 12, 120)},
-		Dividends:  []quotes.Dividend{{Time: day(1), Amount: 0.25}},
-		FirstTrade: day(-3650),
-	}})
-	if err != nil {
-		t.Fatalf("record: %v", err)
-	}
-
-	// A second fetch overlapping the first revises rather than duplicates.
-	cov.Newest = day(4)
-	if err := a.Record(Batch{Coverage: cov, Series: quotes.CandleSeries{
-		Candles: []quotes.Candle{candle(day(2), 12.5, 125), candle(day(3), 13, 130)},
-	}}); err != nil {
-		t.Fatalf("record overlap: %v", err)
-	}
-
-	got, err := a.Candles("aapl", quotes.Daily, day(0), day(10))
-	if err != nil {
-		t.Fatalf("candles: %v", err)
-	}
-	if len(got) != 4 {
-		t.Fatalf("got %d bars, want 4 — an overlapping fetch must overwrite, not duplicate", len(got))
-	}
-	if got[2].Close != 12.5 || got[2].Volume != 125 {
-		t.Errorf("day 2 = %+v, want the later fetch's revision", got[2])
-	}
-	if other, _ := a.Candles("AAPL", quotes.Hourly, day(0), day(10)); len(other) != 0 {
-		t.Errorf("hourly read returned %d daily bars", len(other))
-	}
-
-	covs, _ := a.Coverages()
-	if len(covs) != 1 || !covs[0].Oldest.Equal(day(0)) || !covs[0].Newest.Equal(day(4)) {
-		t.Errorf("coverage = %+v, want day 0 to day 4", covs)
-	}
-	syms, _ := a.ActiveSymbols()
-	if !syms[0].FirstTrade.Equal(day(-3650)) {
-		t.Errorf("first trade = %s, want it recorded from the series", syms[0].FirstTrade)
-	}
-}
-
-func TestASplitRescalesEverythingStoredBeforeItOnce(t *testing.T) {
-	a := newTestArchive(t)
-	id := trackOne(t, a, "AAPL")
-
-	// Before the split: a daily and an hourly series at the old basis.
-	if err := a.Record(Batch{
-		Coverage: Coverage{SymbolID: id, Interval: quotes.Daily, Oldest: day(0), Newest: day(2)},
-		Series:   quotes.CandleSeries{Candles: []quotes.Candle{candle(day(0), 400, 100), candle(day(1), 404, 100)}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Record(Batch{
-		Coverage: Coverage{SymbolID: id, Interval: quotes.Hourly, Oldest: day(1), Newest: day(2)},
-		Series:   quotes.CandleSeries{Candles: []quotes.Candle{candle(day(1).Add(14*time.Hour), 402, 10)}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// The daily forward fetch after a 4:1 split on day 2: Yahoo's response is
-	// already on the new basis, including the day-1 bar it overlaps.
-	split := quotes.Split{Time: day(2), Numerator: 4, Denominator: 1}
-	forward := Batch{
-		Coverage: Coverage{SymbolID: id, Interval: quotes.Daily, Oldest: day(0), Newest: day(3)},
-		Series: quotes.CandleSeries{
-			Splits:  []quotes.Split{split},
-			Candles: []quotes.Candle{candle(day(1), 101, 400), candle(day(2), 102, 400)},
-		},
-	}
-	if err := a.Record(forward); err != nil {
-		t.Fatalf("record split: %v", err)
-	}
-
-	daily, _ := a.Candles("AAPL", quotes.Daily, day(0), day(10))
-	if daily[0].Close != 100 || daily[0].Volume != 400 {
-		t.Errorf("day 0 = %+v, want 400/4 = 100 and volume ×4 — a stored bar on the old basis must be rescaled", daily[0])
-	}
-	if daily[1].Close != 101 {
-		t.Errorf("day 1 = %v, want the response's own 101 — fetched bars are already adjusted and must not be rescaled on top", daily[1].Close)
-	}
-	if daily[2].Close != 102 {
-		t.Errorf("ex-date bar = %v, want 102 untouched", daily[2].Close)
-	}
-	hourly, _ := a.Candles("AAPL", quotes.Hourly, day(0), day(10))
-	if hourly[0].Close != 100.5 || hourly[0].Volume != 40 {
-		t.Errorf("hourly bar = %+v, want 100.5 × volume 40 — a split rescales every interval", hourly[0])
-	}
-
-	// Another interval's fetch reporting the same split must not apply it again.
-	if err := a.Record(Batch{
-		Coverage: Coverage{SymbolID: id, Interval: quotes.Hourly, Oldest: day(1), Newest: day(3)},
-		Series:   quotes.CandleSeries{Splits: []quotes.Split{split}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	daily, _ = a.Candles("AAPL", quotes.Daily, day(0), day(10))
-	if daily[0].Close != 100 {
-		t.Errorf("day 0 = %v after the split was reported twice, want 100 — a known split is never re-applied", daily[0].Close)
-	}
-}
-
-func TestRecordRejectsBadCoverageAndWritesNothing(t *testing.T) {
-	a := newTestArchive(t)
-	id := trackOne(t, a, "AAPL")
-	bad := []Coverage{
-		{Interval: quotes.Daily},
-		{SymbolID: id, Interval: "2m"},
-		{SymbolID: id, Interval: quotes.Daily, Oldest: day(3), Newest: day(1)},
-	}
-	for _, c := range bad {
-		if err := a.Record(Batch{Coverage: c, Series: quotes.CandleSeries{Candles: []quotes.Candle{candle(day(1), 1, 1)}}}); err == nil {
-			t.Errorf("coverage %+v was accepted", c)
-		}
-	}
-	if got, _ := a.Candles("AAPL", quotes.Daily, day(0), day(10)); len(got) != 0 {
-		t.Errorf("a rejected batch wrote %d bars", len(got))
-	}
-}
-
-func TestFailureCoverageRoundTrips(t *testing.T) {
-	a := newTestArchive(t)
-	id := trackOne(t, a, "ZZZZ")
-	want := Coverage{SymbolID: id, Interval: quotes.FiveMinute, Failures: 2, NextAttempt: day(1), LastError: "no quote for that symbol"}
-	if err := a.SaveCoverage(want); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	covs, _ := a.Coverages()
-	if len(covs) != 1 {
-		t.Fatalf("got %d coverage rows, want 1", len(covs))
-	}
-	got := covs[0]
-	if got.Failures != 2 || !got.NextAttempt.Equal(day(1)) || got.LastError != want.LastError || !got.Oldest.IsZero() || !got.Newest.IsZero() {
-		t.Errorf("coverage = %+v, want %+v — nothing fetched must read back as zero times", got, want)
-	}
-
-	st, _ := a.Stats()
-	if len(st.Intervals) != 1 || st.Intervals[0].Started != 0 || st.Intervals[0].Failing != 1 {
-		t.Errorf("stats = %+v, want 5m with nothing started and one failing — a symbol that has never succeeded is the one to show", st.Intervals)
-	}
-}
-
-func TestStatsSummariseEachInterval(t *testing.T) {
-	a := newTestArchive(t)
-	aapl, msft := trackOne(t, a, "AAPL"), trackOne(t, a, "MSFT")
-	must := func(c Coverage) {
-		t.Helper()
-		if err := a.SaveCoverage(c); err != nil {
-			t.Fatal(err)
-		}
-	}
-	must(Coverage{SymbolID: aapl, Interval: quotes.Daily, Oldest: day(-1000), Newest: day(5), Complete: true})
-	must(Coverage{SymbolID: msft, Interval: quotes.Daily, Oldest: day(-10), Newest: day(3), Failures: 1})
-	must(Coverage{SymbolID: aapl, Interval: quotes.FiveMinute, Oldest: day(-59), Newest: day(5)})
 
 	st, err := a.Stats()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("stats: %v", err)
 	}
-	if len(st.Intervals) != 2 || st.Intervals[0].Interval != quotes.Daily {
-		t.Fatalf("intervals = %+v, want 1d then 5m", st.Intervals)
-	}
-	d := st.Intervals[0]
-	if d.Started != 2 || d.Complete != 1 || d.Failing != 1 {
-		t.Errorf("1d counts = %+v", d)
-	}
-	if !d.Oldest.Equal(day(-1000)) || !d.Newest.Equal(day(5)) || !d.Laggard.Equal(day(3)) {
-		t.Errorf("1d span = %s…%s laggard %s", d.Oldest, d.Newest, d.Laggard)
+	if st.Active != 2 || st.Retired != 1 || st.Excluded != 1 || st.Priority != 2 || st.Lists[Watchlist] != 2 {
+		t.Errorf("stats = %+v", st)
 	}
 }
 
-func TestUniverseSyncTimeRoundTrips(t *testing.T) {
+func TestQuerySymbolsSearchesFiltersAndPages(t *testing.T) {
 	a := newTestArchive(t)
-	if got, err := a.UniverseSyncedAt(); err != nil || !got.IsZero() {
-		t.Fatalf("a fresh archive reports a sync at %s (err %v)", got, err)
-	}
-	if err := a.MarkUniverseSynced(day(2)); err != nil {
+	a.SetList(Listed, []Entry{
+		{Symbol: "AAPL", Name: "Apple Inc.", Kind: KindStock},
+		{Symbol: "AMZN", Name: "Amazon.com", Kind: KindStock},
+		{Symbol: "SPY", Name: "SPDR S&P 500", Kind: KindETF},
+		{Symbol: "APPLX", Name: "100% Pineapple", Kind: KindStock},
+	}, t0)
+	track(t, a, User, "ZZZZ")
+
+	page, err := a.QuerySymbols(SymbolQuery{Text: "ap"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := a.UniverseSyncedAt(); !got.Equal(day(2)) {
-		t.Errorf("synced at %s, want %s", got, day(2))
+	if page.Total != 2 {
+		t.Errorf("'ap' matched %d, want AAPL and APPLX by symbol prefix (Pineapple's name matches too, once)", page.Total)
+	}
+	page, _ = a.QuerySymbols(SymbolQuery{Text: "100%"})
+	if page.Total != 1 {
+		t.Errorf("a literal %% matched %d symbols, want 1 — LIKE wildcards in the query must be escaped", page.Total)
+	}
+	page, _ = a.QuerySymbols(SymbolQuery{Kind: KindETF})
+	if page.Total != 1 || page.Symbols[0].Symbol != "SPY" {
+		t.Errorf("ETF filter = %+v", page)
+	}
+	page, _ = a.QuerySymbols(SymbolQuery{Limit: 2})
+	if page.Total != 5 || len(page.Symbols) != 2 || page.Symbols[0].Symbol != "ZZZZ" {
+		t.Errorf("first page = %d of %d starting %v, want a hand-added symbol first", len(page.Symbols), page.Total, page.Symbols)
+	}
+	page, _ = a.QuerySymbols(SymbolQuery{Offset: 4, Limit: 2})
+	if len(page.Symbols) != 1 {
+		t.Errorf("last page has %d, want 1", len(page.Symbols))
+	}
+	if _, err := a.QuerySymbols(SymbolQuery{Filter: "bogus"}); err == nil {
+		t.Error("an unknown filter was accepted")
+	}
+}
+
+func TestRecordPartitionsByYearAndKeepsTheLedger(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+
+	// Minute bars either side of new year land in two files.
+	eve := time.Date(2025, 12, 31, 20, 55, 0, 0, time.UTC)
+	cur := &Cursor{Source: "yahoo", Oldest: eve, Newest: eve.Add(24 * time.Hour)}
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo", Cursor: cur,
+		Series: quotes.CandleSeries{Candles: append(minutes(eve, 5, 10), minutes(eve.Add(24*time.Hour-40*time.Minute), 3, 11)...)}})
+
+	for _, key := range []string{"1m/2025", "1m/2026"} {
+		if _, err := os.Stat(a.partitionPath(key)); err != nil {
+			t.Errorf("partition %s was not written: %v", key, err)
+		}
+	}
+	got, err := a.Candles("AAPL", quotes.OneMinute, eve, eve.Add(48*time.Hour))
+	if err != nil || len(got) != 8 {
+		t.Fatalf("read back %d bars across the year boundary (err %v), want 8", len(got), err)
+	}
+	held, _ := a.HeldDays(id, quotes.OneMinute, eve.Add(-48*time.Hour), eve.Add(48*time.Hour))
+	if len(held) != 2 {
+		t.Errorf("ledger holds %d days, want 2", len(held))
+	}
+	st, _ := a.Stats()
+	if len(st.Intervals) != 1 || st.Intervals[0].Bars != 8 || st.Intervals[0].Started != 1 {
+		t.Errorf("stats = %+v, want 8 one-minute bars on one started series", st.Intervals)
+	}
+	cursors, _ := a.SymbolCursors(id)
+	if len(cursors) != 1 || cursors[0].Source != "yahoo" || !cursors[0].Newest.Equal(cur.Newest) {
+		t.Errorf("cursors = %+v", cursors)
+	}
+}
+
+func TestAnotherSourceFillsGapsButOnlyReplacesWhenAsked(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+	open := session(0)
+
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: minutes(open, 3, 10)}})
+	// Yahoo revises its own last bar.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: []quotes.Candle{candle(open.Add(2*time.Minute), 10.5, 2)}}})
+	// A paid feed covers the same three minutes and two more.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "polygon",
+		Series: quotes.CandleSeries{Candles: minutes(open, 5, 20)}})
+
+	got, _ := a.Candles("AAPL", quotes.OneMinute, open, open.Add(time.Hour))
+	want := []float64{10, 10, 10.5, 20, 20}
+	for i, c := range got {
+		if c.Close != want[i] {
+			t.Fatalf("closes = %v, want %v — a source revises its own bars and fills only others' gaps", closes(got), want)
+		}
+	}
+
+	// Asked to, the paid feed replaces.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "polygon", Replace: true,
+		Series: quotes.CandleSeries{Candles: minutes(open, 5, 20)}})
+	got, _ = a.Candles("AAPL", quotes.OneMinute, open, open.Add(time.Hour))
+	for _, c := range got {
+		if c.Close != 20 {
+			t.Fatalf("closes after a replace = %v, want all 20", closes(got))
+		}
+	}
+	cov, _ := a.SymbolCoverage("AAPL")
+	if tl := cov.Timelines[quotes.OneMinute]; len(tl) != 1 || tl[0].Bars != 5 || len(tl[0].Sources) != 1 || tl[0].Sources[0] != "polygon" {
+		t.Errorf("timeline = %+v, want one month of 5 bars all from polygon", tl)
+	}
+}
+
+func closes(cs []quotes.Candle) []float64 {
+	out := make([]float64, len(cs))
+	for i, c := range cs {
+		out[i] = c.Close
+	}
+	return out
+}
+
+func TestASplitRescalesEveryPartitionOnce(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+
+	// Stored before a 4:1 split on day 2: daily bars, and minute bars in two
+	// yearly files.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.Daily, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: []quotes.Candle{candle(day(0), 400, 100), candle(day(1), 404, 100)},
+			Dividends: []quotes.Dividend{{Time: day(1), Amount: 0.8}}}})
+	lastYear := time.Date(2025, 6, 2, 13, 30, 0, 0, time.UTC)
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: append(minutes(lastYear, 1, 300), minutes(session(1), 1, 402)...)}})
+
+	split := quotes.Split{Time: day(2), Numerator: 4, Denominator: 1}
+	// The first response to report it: already on the new basis, overlapping
+	// day 1.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.Daily, Source: "yahoo", Series: quotes.CandleSeries{
+		Splits:  []quotes.Split{split},
+		Candles: []quotes.Candle{candle(day(1), 101, 400), candle(day(2), 102, 400)},
+	}})
+
+	daily, _ := a.Candles("AAPL", quotes.Daily, day(0), day(10))
+	if daily[0].Close != 100 || daily[0].Volume != 400 {
+		t.Errorf("day 0 = %+v, want 400/4 and volume ×4", daily[0])
+	}
+	if daily[1].Close != 101 || daily[2].Close != 102 {
+		t.Errorf("days 1–2 = %v, %v, want the response's own adjusted bars untouched", daily[1].Close, daily[2].Close)
+	}
+	mins, _ := a.Candles("AAPL", quotes.OneMinute, lastYear.Add(-time.Hour), day(10))
+	if mins[0].Close != 75 || mins[1].Close != 100.5 {
+		t.Errorf("minute bars = %v, want 75 and 100.5 — every interval and every yearly file is rescaled", closes(mins))
+	}
+
+	// Reported again by another interval: never re-applied.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo", Series: quotes.CandleSeries{Splits: []quotes.Split{split}}})
+	daily, _ = a.Candles("AAPL", quotes.Daily, day(0), day(10))
+	if daily[0].Close != 100 {
+		t.Errorf("day 0 = %v after a second report, want 100", daily[0].Close)
+	}
+	if divs, _ := a.Dividends("AAPL", day(-10), day(10)); len(divs) != 1 || divs[0].Amount != 0.2 {
+		t.Errorf("dividends = %+v, want 0.8/4 — a payout is per share, and a split changes the share", divs)
+	}
+	splits, _ := a.Splits("AAPL")
+	if len(splits) != 1 {
+		t.Errorf("recorded %d splits, want 1", len(splits))
+	}
+}
+
+func TestAnInterruptedSplitResumesWithoutDoubling(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+	lastYear := time.Date(2025, 6, 2, 13, 30, 0, 0, time.UTC)
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: append(minutes(lastYear, 1, 400), minutes(session(1), 1, 400)...)}})
+
+	// Simulate a crash after the split was marked pending and one file was
+	// rescaled, but not the other.
+	split := quotes.Split{Time: day(2), Numerator: 2, Denominator: 1}
+	a.catalog.Exec(`INSERT INTO splits (symbol_id, ts, numerator, denominator, state) VALUES (?, ?, 2, 1, 'pending')`, id, split.Time.Unix())
+	db, _ := a.partition("1m/2025", false)
+	db.Exec(`UPDATE bars SET close = close * 0.5, open = open * 0.5, high = high * 0.5, low = low * 0.5 WHERE symbol_id = ?`, id)
+	db.Exec(`INSERT INTO applied_splits (symbol_id, ts) VALUES (?, ?)`, id, split.Time.Unix())
+	root := a.Root()
+	a.Close()
+
+	b, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer b.Close()
+	mins, _ := b.Candles("AAPL", quotes.OneMinute, lastYear.Add(-time.Hour), day(10))
+	if mins[0].Close != 200 || mins[1].Close != 200 {
+		t.Errorf("after resuming, closes = %v, want both 200 — the done file untouched, the other finished", closes(mins))
+	}
+	var state string
+	b.catalog.QueryRow(`SELECT state FROM splits WHERE symbol_id = ?`, id).Scan(&state)
+	if state != "applied" {
+		t.Errorf("split state = %q after resuming, want applied", state)
+	}
+}
+
+func TestBarsBuildsMissingDaysFromAFinerInterval(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+
+	// Day 0 has native five-minute bars; day 1 only one-minute bars.
+	record(t, a, Batch{SymbolID: id, Interval: quotes.FiveMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: []quotes.Candle{candle(session(0), 50, 5)}}})
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: append(minutes(session(0), 5, 1), minutes(session(1), 10, 7)...)}})
+
+	got, err := a.Bars("AAPL", quotes.FiveMinute, day(0), day(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d five-minute bars, want day 0's native one and two built for day 1: %+v", len(got), got)
+	}
+	if got[0].Close != 50 {
+		t.Errorf("day 0 = %v, want the native bar, not one built over it", got[0].Close)
+	}
+	if !got[1].Time.Equal(session(1)) || got[1].Volume != 5 || !got[2].Time.Equal(session(1).Add(5*time.Minute)) {
+		t.Errorf("built bars = %+v, want two five-minute buckets from the open", got[1:])
+	}
+}
+
+func TestResampleAnchorsToTheSessionOpen(t *testing.T) {
+	var in []quotes.Candle
+	for i := 0; i < 120; i++ {
+		in = append(in, quotes.Candle{Time: session(0).Add(time.Duration(i) * time.Minute),
+			Open: float64(i), High: float64(i) + 1, Low: float64(i) - 1, Close: float64(i) + 0.5, Volume: 1})
+	}
+	got := Resample(in, quotes.Hourly)
+	if len(got) != 2 {
+		t.Fatalf("got %d hourly bars, want 2", len(got))
+	}
+	h := got[0]
+	if !h.Time.Equal(session(0)) || h.Open != 0 || h.High != 60 || h.Low != -1 || h.Close != 59.5 || h.Volume != 60 {
+		t.Errorf("first hour = %+v, want 9:30–10:30 with open 0, high 60, low −1, close 59.5, volume 60", h)
+	}
+}
+
+func TestTradingDaysComeFromTheDailySeries(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+	record(t, a, Batch{SymbolID: id, Interval: quotes.Daily, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: []quotes.Candle{candle(day(0), 1, 1), candle(day(3), 1, 1)}}})
+	got, err := a.TradingDays(id, day(0), day(5))
+	if err != nil || len(got) != 2 || got[1] != day(3).Unix() {
+		t.Errorf("trading days = %v (err %v), want day 0 and day 3", got, err)
+	}
+}
+
+func TestRecordRejectsBadInputAndWritesNothing(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+	one := quotes.CandleSeries{Candles: []quotes.Candle{candle(day(1), 1, 1)}}
+	bad := []Batch{
+		{Interval: quotes.Daily, Source: "yahoo", Series: one},
+		{SymbolID: id, Interval: "2m", Source: "yahoo", Series: one},
+		{SymbolID: id, Interval: quotes.Daily, Series: one},
+		{SymbolID: id, Interval: quotes.Daily, Source: "yahoo", Series: one, Cursor: &Cursor{Oldest: day(3), Newest: day(1)}},
+	}
+	for _, b := range bad {
+		if err := a.Record(b); err == nil {
+			t.Errorf("batch %+v was accepted", b)
+		}
+	}
+	if got, _ := a.Candles("AAPL", quotes.Daily, day(0), day(10)); len(got) != 0 {
+		t.Errorf("rejected batches wrote %d bars", len(got))
+	}
+}
+
+func TestFailedCursorRoundTripsAndCountsAsFailing(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "ZZZZ")
+	id := idOf(t, a, "ZZZZ")
+	want := Cursor{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo", Failures: 2, NextAttempt: day(1), LastError: "no such symbol"}
+	if err := a.SaveCursor(want); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := a.Cursors()
+	if len(got) != 1 || got[0].Failures != 2 || !got[0].NextAttempt.Equal(day(1)) || !got[0].Newest.IsZero() {
+		t.Errorf("cursor = %+v", got)
+	}
+	st, _ := a.Stats()
+	if len(st.Intervals) != 1 || st.Intervals[0].Failing != 1 || st.Intervals[0].Started != 0 {
+		t.Errorf("stats = %+v, want one failing series and none started", st.Intervals)
+	}
+	page, _ := a.QuerySymbols(SymbolQuery{Filter: FilterFailing})
+	if page.Total != 1 {
+		t.Errorf("failing filter found %d", page.Total)
+	}
+	if err := a.ResetCursors(id, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.Cursors(); len(got) != 0 {
+		t.Errorf("reset left %d cursors", len(got))
+	}
+}
+
+func TestSizeAndDisk(t *testing.T) {
+	a := newTestArchive(t)
+	if n, err := a.Size(); err != nil || n == 0 {
+		t.Errorf("size = %d (err %v), want the catalog's bytes", n, err)
+	}
+	if free, total, err := Disk(a.Root()); err == nil && (total == 0 || free > total) {
+		t.Errorf("disk free %d of %d", free, total)
 	}
 }

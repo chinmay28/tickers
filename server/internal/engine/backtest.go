@@ -633,7 +633,11 @@ func (e *Engine) symbolDividends(ctx context.Context, d quotes.Distributor, symb
 	}
 	e.mu.Unlock()
 
-	payouts, err := d.Dividends(ctx, symbol, historyStart())
+	payouts, ok := e.archivedDividends(symbol)
+	var err error
+	if !ok {
+		payouts, err = d.Dividends(ctx, symbol, historyStart())
+	}
 	if err != nil {
 		// Best-effort throughout: a symbol whose payouts can't be read costs
 		// its portfolio a yield column, not a backtest.
