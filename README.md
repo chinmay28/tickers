@@ -47,6 +47,9 @@ tickers/
         ├── quotes/             #   quote providers (Yahoo Finance)
         ├── publish/            #   downstream publishing + the legacy payload
         ├── engine/             #   the scheduled refresh + publish cycle
+        ├── archive/            #   the market-data archive (its own SQLite file)
+        ├── collector/          #   fills the archive, paced under Yahoo's limits
+        ├── universe/           #   every symbol listed on a US exchange
         ├── api/                #   the REST layer
         └── web/assets/         #   the web client, embedded at build time
 ```
@@ -480,6 +483,79 @@ tickers publish --db /var/lib/tickers/tickers.sqlite   # fetch, publish, exit
 
 Useful from cron on a host that would rather not run a daemon. It exits
 non-zero if every symbol failed.
+
+## The market-data archive
+
+Tickers can also build a long-term archive of OHLCV bars for the whole listed
+US market, plus a few extras, for analysis: candles, moving averages,
+backtests. It is **off unless you give it a file**, and it is a separate SQLite
+file from the watchlist's database.
+
+```bash
+tickers serve --db ./data/tickers.sqlite --archive ./data/archive.sqlite   # alongside the app
+tickers collect --archive ./data/archive.sqlite                            # or on its own
+tickers coverage --archive ./data/archive.sqlite                           # how far it has got
+```
+
+**What it collects.** Every stock and ETF listed on Nasdaq, NYSE, NYSE
+American, NYSE Arca, Cboe BZX and IEX. The list is read daily from Nasdaq
+Trader's symbol directory, which puts it at roughly ten thousand symbols. The
+extras are `BTC-USD`, `ETH-USD`, `^GSPC`, `^DJI`, `^IXIC`, `^RUT` and `^VIX` by
+default. Each symbol is collected at three widths:
+
+| Width | How far back | Kept up to date |
+|---|---|---|
+| `1d` | to the listing date, a decade per request | daily |
+| `1h` | two years (all Yahoo keeps) | weekly |
+| `5m` | 59 days (all Yahoo keeps) | daily |
+
+Intraday history cannot be backfilled past what Yahoo keeps. The archive
+starts from what is available today and grows forward from there. Daily
+history goes all the way back.
+
+**How fast.** One request every two seconds (`--archive-spacing`), about 1,800
+an hour. That is a steady trickle under Yahoo's unpublished limits. A 429 pauses
+the collector for a minute, doubling to an hour, until Yahoo accepts requests
+again. Keeping ten thousand symbols current takes about half of each day's
+requests; the backfill uses the other half. Expect the first full pass to take
+**a few days**:
+
+1. every series is caught up to now before anything older is fetched;
+2. first fetches follow, in `--archive-intervals` order (daily first by default);
+3. then daily history is dug out breadth-first, so every symbol gets its second
+   decade before any symbol gets its third.
+
+**What is stored.** Prices are as Yahoo prints them: split-adjusted, not
+dividend-adjusted. Splits and dividends are stored alongside so an adjusted
+series can be derived. When a new split appears, the bars already stored are
+rescaled to match. Symbols that are delisted are retired, not deleted, so their
+history stays available.
+
+**How big.** About 60 bytes a bar. The first pass is around 6 GB. After that,
+growth is around 13 GB a year, almost all of it five-minute bars. Put the
+archive on an SSD rather than an SD card. `--archive-intervals 1d,1h` cuts the
+growth to about 1 GB a year.
+
+| Flag | Env fallback | Default | Meaning |
+|---|---|---|---|
+| `--archive` | `TICKERS_ARCHIVE` | off for `serve`, `./data/archive.sqlite` for `collect` | archive file path |
+| `--archive-intervals` | `TICKERS_ARCHIVE_INTERVALS` | `1d,5m,1h` | widths to collect |
+| `--archive-extras` | `TICKERS_ARCHIVE_EXTRAS` | crypto and indices, above | symbols besides the exchange lists |
+| `--archive-listed` | `TICKERS_ARCHIVE_LISTED` | `true` | collect every listed US symbol |
+| `--archive-spacing` | `TICKERS_ARCHIVE_SPACING` | `2s` | gap between requests (floor `250ms`) |
+| `--universe-url` | `TICKERS_UNIVERSE_URL` | Nasdaq Trader | where the symbol lists are read |
+
+The archive is plain SQLite. Read it from anything:
+
+```sql
+SELECT datetime(b.ts, 'unixepoch') AS day, open, high, low, close, volume
+  FROM bars b JOIN symbols s ON s.id = b.symbol_id
+ WHERE s.symbol = 'AAPL' AND b.interval = '1d'
+ ORDER BY b.ts;
+```
+
+Daily bars are keyed by date (midnight UTC). Intraday bars are keyed by the
+instant the bar opened.
 
 ## Versioning
 

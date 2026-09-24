@@ -86,6 +86,12 @@ returns everything the client renders in one round trip.
 
 **`internal/expr`** is the formula language behind composites (see below).
 
+**`internal/archive` / `internal/collector` / `internal/universe`** are the
+market-data archive: a *second* SQLite file (`--archive`), filled by a paced
+loop over every listed US symbol. Same split as above: `archive` validates and
+persists, `collector` decides. Its pure parts (`next`, `advance`, `pacer`) are
+tested without a clock or a network.
+
 ### Things that require reading several files to discover
 
 - **A composite is a ticker with a non-empty `expression`, and nothing else.** It
@@ -140,6 +146,13 @@ returns everything the client renders in one round trip.
   **stored setting > flag > env > built-in default**, so the GUI wins and
   clearing a field reveals the flag again.
 - **`origin` is provenance only.** Nothing reads it at runtime.
+- **The archive's bars are split-adjusted as of fetch time,** because that is
+  all Yahoo serves. `archive.Record` rescales stored bars when a response first
+  reports a split, *before* writing that response's bars. Reorder those steps
+  and the fresh bars get adjusted twice.
+- **Archive coverage records the window asked for, not the bars returned,**
+  so weekends count as covered. A backfill stops at the provider's first
+  trade date or its horizon, never because a stretch was quiet.
 
 ### The web client
 
