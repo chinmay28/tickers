@@ -83,3 +83,25 @@ func TestTheArchiveSwitchDefaultsOnAndTurnsOff(t *testing.T) {
 		t.Error("turning the archive off did not stick — an unset value must not read back as the default once set")
 	}
 }
+
+func TestExtendedHoursAreOffUntilSwitchedOnAndTheYieldCurveIsAnExtra(t *testing.T) {
+	s := newTestStore(t)
+	cfg, _ := s.ArchiveConfig()
+	if cfg.Extended {
+		t.Error("extended hours are on by default; they roughly double minute-bar storage")
+	}
+	have := map[string]bool{}
+	for _, x := range cfg.Extras {
+		have[x] = true
+	}
+	for _, want := range []string{"^IRX", "^FVX", "^TNX", "^TYX"} {
+		if !have[want] {
+			t.Errorf("%s is not a default extra — the backtest's risk-free rate is ^IRX", want)
+		}
+	}
+	on := true
+	s.UpdateArchiveConfig(ArchivePatch{Extended: &on})
+	if cfg, _ := s.ArchiveConfig(); !cfg.Extended {
+		t.Error("switching extended hours on did not stick")
+	}
+}

@@ -22,6 +22,16 @@ type candleResponse struct {
 			Meta struct {
 				GMTOffset      int64  `json:"gmtoffset"`
 				FirstTradeDate *int64 `json:"firstTradeDate"`
+				// The exchange's zone and today's regular session, which is
+				// what tags an extended-hours bar pre or post. Only read when
+				// the extended session was asked for.
+				ExchangeTimezoneName string `json:"exchangeTimezoneName"`
+				CurrentTradingPeriod struct {
+					Regular struct {
+						Start int64 `json:"start"`
+						End   int64 `json:"end"`
+					} `json:"regular"`
+				} `json:"currentTradingPeriod"`
 			} `json:"meta"`
 			Timestamp  []int64 `json:"timestamp"`
 			Indicators struct {
@@ -59,6 +69,17 @@ type candleResponse struct {
 // response whose prices already reflect it, or it cannot tell which of its
 // stored rows are on the old basis. See archive.Record.
 func (y *Yahoo) Candles(ctx context.Context, symbol string, interval Interval, from, to time.Time) (CandleSeries, error) {
+	return y.candles(ctx, symbol, interval, from, to, false)
+}
+
+// ExtendedCandles implements ExtendedArchivist: the same request with
+// `includePrePost=true`, each bar tagged by where its start falls against the
+// exchange's regular session.
+func (y *Yahoo) ExtendedCandles(ctx context.Context, symbol string, interval Interval, from, to time.Time) (CandleSeries, error) {
+	return y.candles(ctx, symbol, interval, from, to, interval.Intraday())
+}
+
+func (y *Yahoo) candles(ctx context.Context, symbol string, interval Interval, from, to time.Time, extended bool) (CandleSeries, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
 		return CandleSeries{}, errors.New("a symbol is required")
@@ -70,8 +91,8 @@ func (y *Yahoo) Candles(ctx context.Context, symbol string, interval Interval, f
 		return CandleSeries{}, fmt.Errorf("empty window %s–%s", from.Format(time.RFC3339), to.Format(time.RFC3339))
 	}
 	settings, _ := y.current()
-	endpoint := fmt.Sprintf("%s/v8/finance/chart/%s?period1=%d&period2=%d&interval=%s&includePrePost=false&events=div%%2Csplits",
-		settings.BaseURL, url.PathEscape(symbol), from.Unix(), to.Unix(), interval)
+	endpoint := fmt.Sprintf("%s/v8/finance/chart/%s?period1=%d&period2=%d&interval=%s&includePrePost=%t&events=div%%2Csplits",
+		settings.BaseURL, url.PathEscape(symbol), from.Unix(), to.Unix(), interval, extended)
 
 	body, err := y.get(ctx, endpoint)
 	if err != nil {
@@ -95,6 +116,12 @@ func (y *Yahoo) Candles(ctx context.Context, symbol string, interval Interval, f
 		out.FirstTrade = exchangeDay(*res.Meta.FirstTradeDate, offset)
 	}
 
+	session := func(time.Time) Session { return Regular }
+	if extended {
+		session = sessionClock(res.Meta.ExchangeTimezoneName,
+			res.Meta.CurrentTradingPeriod.Regular.Start, res.Meta.CurrentTradingPeriod.Regular.End)
+	}
+
 	if len(res.Indicators.Quote) > 0 {
 		q := res.Indicators.Quote[0]
 		out.Candles = make([]Candle, 0, len(res.Timestamp))
@@ -115,6 +142,7 @@ func (y *Yahoo) Candles(ctx context.Context, symbol string, interval Interval, f
 			}
 			if interval.Intraday() {
 				candle.Time = time.Unix(ts, 0).UTC()
+				candle.Session = session(candle.Time)
 			} else {
 				candle.Time = exchangeDay(ts, offset)
 			}
@@ -143,6 +171,39 @@ func (y *Yahoo) Candles(ctx context.Context, symbol string, interval Interval, f
 	}
 	sort.Slice(out.Dividends, func(i, j int) bool { return out.Dividends[i].Time.Before(out.Dividends[j].Time) })
 	return out, nil
+}
+
+// sessionClock tags a bar by its start's time of day on the exchange's own
+// clock, against the regular session Yahoo reports for today.
+//
+// Today's session stands in for every day's. That is right for every
+// ordinary day and wrong for a half day's afternoon, whose after-hours bars
+// read as regular; a trading calendar would fix it, and is not worth its
+// weight for a label. The zone, not today's offset, is what places a bar from
+// the other side of daylight saving at the right hour.
+func sessionClock(zone string, start, end int64) func(time.Time) Session {
+	loc, err := time.LoadLocation(zone)
+	if zone == "" || err != nil || start == 0 || end <= start {
+		return func(time.Time) Session { return Regular }
+	}
+	clock := func(t time.Time) int {
+		l := t.In(loc)
+		return l.Hour()*3600 + l.Minute()*60 + l.Second()
+	}
+	open, close := clock(time.Unix(start, 0)), clock(time.Unix(end, 0))
+	if close <= open {
+		// A session that wraps midnight or covers the whole day: crypto.
+		return func(time.Time) Session { return Regular }
+	}
+	return func(t time.Time) Session {
+		switch c := clock(t); {
+		case c < open:
+			return PreMarket
+		case c >= close:
+			return AfterHours
+		}
+		return Regular
+	}
 }
 
 // exchangeDay is the exchange's calendar date for an instant, as midnight UTC.

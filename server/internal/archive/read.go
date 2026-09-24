@@ -2,6 +2,7 @@ package archive
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,22 +11,81 @@ import (
 	"github.com/chinmay28/tickers/server/internal/quotes"
 )
 
-// Candles returns a symbol's stored bars at exactly this interval in
-// [from, to), oldest first.
+// Query is one read of a symbol's bars.
+type Query struct {
+	Symbol   string
+	Interval quotes.Interval
+	From, To time.Time
+	// Extended includes the bars before the open and after the close, each
+	// tagged with its Session. Off — every reader in the app — returns the
+	// regular session alone, whatever the archive has collected.
+	Extended bool
+}
+
+// Candles returns a symbol's stored regular-session bars at exactly this
+// interval in [from, to), oldest first.
 func (a *Archive) Candles(symbol string, interval quotes.Interval, from, to time.Time) ([]quotes.Candle, error) {
-	s, err := a.Lookup(symbol)
+	return a.Stored(Query{Symbol: symbol, Interval: interval, From: from, To: to})
+}
+
+// Stored returns the bars stored at exactly the query's interval.
+//
+// A symbol that was renamed reads as one series: bars kept under a former
+// symbol before the rename are included, and on a moment both hold, the
+// current symbol's bar wins.
+func (a *Archive) Stored(q Query) ([]quotes.Candle, error) {
+	s, err := a.Lookup(q.Symbol)
 	if err == ErrUnknownSymbol {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return a.candles(s.ID, interval, from, to)
+	return a.stored(s.ID, q)
 }
 
-func (a *Archive) candles(id int64, interval quotes.Interval, from, to time.Time) ([]quotes.Candle, error) {
+func (a *Archive) stored(id int64, q Query) ([]quotes.Candle, error) {
+	out, err := a.candles(id, q.Interval, q.From, q.To, q.Extended)
+	if err != nil {
+		return nil, err
+	}
+	aliases, err := a.aliasIDs(id)
+	if err != nil || len(aliases) == 0 {
+		return out, err
+	}
+	have := make(map[int64]bool, len(out))
+	for _, c := range out {
+		have[c.Time.Unix()] = true
+	}
+	for _, al := range aliases {
+		to := q.To
+		if al.until.Before(to) {
+			to = al.until
+		}
+		if !q.From.Before(to) {
+			continue
+		}
+		former, err := a.candles(al.id, q.Interval, q.From, to, q.Extended)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range former {
+			if !have[c.Time.Unix()] {
+				out = append(out, c)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out, nil
+}
+
+func (a *Archive) candles(id int64, interval quotes.Interval, from, to time.Time, extended bool) ([]quotes.Candle, error) {
 	if interval.Step() == 0 {
 		return nil, fmt.Errorf("unknown interval %q", interval)
+	}
+	session := ` AND session = 0`
+	if extended {
+		session = ``
 	}
 	var out []quotes.Candle
 	for _, key := range partitionKeys(interval, from, to) {
@@ -36,15 +96,15 @@ func (a *Archive) candles(id int64, interval quotes.Interval, from, to time.Time
 		if db == nil {
 			continue
 		}
-		rows, err := db.Query(`SELECT ts, open, high, low, close, volume FROM bars
-			WHERE symbol_id = ? AND ts >= ? AND ts < ? ORDER BY ts`, id, from.Unix(), to.Unix())
+		rows, err := db.Query(`SELECT ts, open, high, low, close, volume, coalesce(vwap, 0), coalesce(trades, 0), session FROM bars
+			WHERE symbol_id = ? AND ts >= ? AND ts < ?`+session+` ORDER BY ts`, id, from.Unix(), to.Unix())
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var c quotes.Candle
 			var ts int64
-			if err := rows.Scan(&ts, &c.Open, &c.High, &c.Low, &c.Close, &c.Volume); err != nil {
+			if err := rows.Scan(&ts, &c.Open, &c.High, &c.Low, &c.Close, &c.Volume, &c.VWAP, &c.Trades, &c.Session); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -59,22 +119,28 @@ func (a *Archive) candles(id int64, interval quotes.Interval, from, to time.Time
 	return out, nil
 }
 
-// Bars returns the best series the archive can give at an interval: its own
+// Bars returns the best regular-session series the archive can give at an
+// interval; see Best.
+func (a *Archive) Bars(symbol string, interval quotes.Interval, from, to time.Time) ([]quotes.Candle, error) {
+	return a.Best(Query{Symbol: symbol, Interval: interval, From: from, To: to})
+}
+
+// Best returns the best series the archive can give at an interval: its own
 // bars where it has them, and bars built from a finer interval where it
 // doesn't. Five-minute bars for a day only the one-minute series reached are
 // the one-minute bars, resampled. Daily bars are never built from intraday
 // ones — a daily bar is the exchange's official session, which intraday bars
 // only approximate.
-func (a *Archive) Bars(symbol string, interval quotes.Interval, from, to time.Time) ([]quotes.Candle, error) {
-	s, err := a.Lookup(symbol)
+func (a *Archive) Best(q Query) ([]quotes.Candle, error) {
+	s, err := a.Lookup(q.Symbol)
 	if err == ErrUnknownSymbol {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	out, err := a.candles(s.ID, interval, from, to)
-	if err != nil || !interval.Intraday() {
+	out, err := a.stored(s.ID, q)
+	if err != nil || !q.Interval.Intraday() {
 		return out, err
 	}
 	have := map[int64]bool{}
@@ -82,10 +148,12 @@ func (a *Archive) Bars(symbol string, interval quotes.Interval, from, to time.Ti
 		have[dayOf(c.Time)] = true
 	}
 	for _, finer := range quotes.Intervals {
-		if !finer.Intraday() || finer.Step() >= interval.Step() {
+		if !finer.Intraday() || finer.Step() >= q.Interval.Step() {
 			continue
 		}
-		fine, err := a.candles(s.ID, finer, from, to)
+		fq := q
+		fq.Interval = finer
+		fine, err := a.stored(s.ID, fq)
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +163,7 @@ func (a *Archive) Bars(symbol string, interval quotes.Interval, from, to time.Ti
 				missing = append(missing, c)
 			}
 		}
-		built := Resample(missing, interval)
+		built := Resample(missing, q.Interval)
 		for _, c := range built {
 			have[dayOf(c.Time)] = true
 		}
@@ -107,12 +175,17 @@ func (a *Archive) Bars(symbol string, interval quotes.Interval, from, to time.Ti
 
 // Resample builds coarser intraday bars from finer ones.
 //
-// Buckets are anchored to each day's first bar rather than to the clock. A
-// US session opens at 9:30, so an hourly bar runs 9:30–10:30 — which is how
-// every provider prints one — and anchoring to the clock would make it
-// 9:00–10:00 with half an hour missing. Anchoring to the open also follows
-// the session through daylight saving without a timezone database, and gives
-// a crypto series, whose day starts at midnight, clock-aligned buckets.
+// Buckets are anchored to the first bar of each day's session rather than to
+// the clock. A US session opens at 9:30, so an hourly bar runs 9:30–10:30 —
+// which is how every provider prints one — and anchoring to the clock would
+// make it 9:00–10:00 with half an hour missing. Anchoring per session keeps a
+// pre-market hour from swallowing the open. It also follows the session
+// through daylight saving without a timezone database, and gives a crypto
+// series, whose day starts at midnight, clock-aligned buckets.
+//
+// A built bar's VWAP is its parts' VWAPs weighted by their volume, and only
+// when every part had one: a VWAP over half the bucket's trades would be a
+// number that looked right and wasn't.
 func Resample(candles []quotes.Candle, to quotes.Interval) []quotes.Candle {
 	step := int64(to.Step() / time.Second)
 	if step == 0 || len(candles) == 0 {
@@ -122,16 +195,24 @@ func Resample(candles []quotes.Candle, to quotes.Interval) []quotes.Candle {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
 
 	var out []quotes.Candle
+	var notional []float64 // Σ vwap×volume per built bar; NaN once a part lacks one
 	var day, anchor, bucket int64 = -1, 0, -1
+	session := quotes.Session(255)
 	for _, c := range sorted {
 		ts := c.Time.Unix()
-		if d := dayOf(c.Time); d != day {
-			day, anchor = d, ts
+		if d := dayOf(c.Time); d != day || c.Session != session {
+			day, anchor, session = d, ts, c.Session
 		}
 		b := anchor + (ts-anchor)/step*step
+		part := c.VWAP * float64(c.Volume)
+		if c.VWAP == 0 {
+			part = math.NaN()
+		}
 		if b != bucket || len(out) == 0 {
 			bucket = b
-			out = append(out, quotes.Candle{Time: time.Unix(b, 0).UTC(), Open: c.Open, High: c.High, Low: c.Low, Close: c.Close, Volume: c.Volume})
+			out = append(out, quotes.Candle{Time: time.Unix(b, 0).UTC(), Open: c.Open, High: c.High, Low: c.Low, Close: c.Close,
+				Volume: c.Volume, Trades: c.Trades, Session: c.Session})
+			notional = append(notional, part)
 			continue
 		}
 		cur := &out[len(out)-1]
@@ -139,6 +220,13 @@ func Resample(candles []quotes.Candle, to quotes.Interval) []quotes.Candle {
 		cur.Low = min(cur.Low, c.Low)
 		cur.Close = c.Close
 		cur.Volume += c.Volume
+		cur.Trades += c.Trades
+		notional[len(notional)-1] += part
+	}
+	for i := range out {
+		if n := notional[i]; !math.IsNaN(n) && out[i].Volume > 0 {
+			out[i].VWAP = n / float64(out[i].Volume)
+		}
 	}
 	return out
 }
@@ -380,6 +468,7 @@ type Span struct {
 // per interval.
 type Coverage struct {
 	Symbol    Symbol                     `json:"symbol"`
+	Aliases   []Alias                    `json:"aliases"`
 	Cursors   []Cursor                   `json:"cursors"`
 	Timelines map[quotes.Interval][]Span `json:"timelines"`
 	Splits    int                        `json:"splits"`
@@ -398,6 +487,9 @@ func (a *Archive) SymbolCoverage(symbol string) (Coverage, error) {
 	}
 	if cov.Cursors == nil {
 		cov.Cursors = []Cursor{}
+	}
+	if cov.Aliases, err = a.Aliases(s.ID); err != nil {
+		return cov, err
 	}
 	names, err := a.sourceNames()
 	if err != nil {

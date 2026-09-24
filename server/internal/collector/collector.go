@@ -54,6 +54,10 @@ type Plan struct {
 	// MinFree pauses collection when the archive's disk has less than this
 	// many bytes free. Zero never pauses.
 	MinFree uint64
+	// Extended collects the bars before the open and after the close too,
+	// from every source that can give them (quotes.ExtendedArchivist). They
+	// are stored tagged with their session and read only when asked for.
+	Extended bool
 	// PriorityEvery is how stale the live source lets a priority symbol's
 	// intraday series get — shorter than everyone else's daily pass, so the
 	// watchlist's sparklines are drawn from bars at most this old. Zero
@@ -120,6 +124,12 @@ type Collector struct {
 	diskLow      bool
 	reportedAt   time.Time
 	counts       counters
+	// extended is this step's Plan.Extended.
+	extended bool
+	// renames are newly listed symbols waiting to be asked about former
+	// names. In memory: a restart forgets a few, which costs a join the next
+	// rename check would have made; persisting them would cost a table.
+	renames []string
 
 	mu     sync.Mutex
 	status Status
@@ -213,8 +223,12 @@ func (c *Collector) Step(ctx context.Context) (bool, error) {
 	c.publishSchedule(now)
 	ready := func(source int) bool { return c.pacerFor(c.sources[source]).delay(now) == 0 }
 
+	c.extended = plan.Extended
 	if job := c.runnableJob(ready); job != nil {
 		return true, c.jobStep(ctx, job)
+	}
+	if si, symbol, ok := c.renameCheck(ready); ok {
+		return true, c.checkRename(ctx, si, symbol)
 	}
 	if tk, ok := next(c.targets, now, ready); ok {
 		return true, c.fetch(ctx, tk)
@@ -382,9 +396,24 @@ func (c *Collector) syncLists(ctx context.Context, plan Plan, now time.Time) err
 		c.nextUniverse = now.Add(universeRetry)
 		return nil
 	}
+	before, err := c.archive.Members(archive.Listed)
+	if err != nil {
+		return err
+	}
 	joined, left, err := c.archive.SetList(archive.Listed, list, now)
 	if err != nil {
 		return err
+	}
+	// A symbol new to the lists may be an old company under a new name —
+	// META the day FB disappeared. The very first read is every symbol, and
+	// nothing collected yet sits under a former name, so only later reads
+	// are worth asking about.
+	if len(before) > 0 && joined > 0 {
+		for _, e := range list {
+			if !before[archive.NormalizeSymbol(e.Symbol)] {
+				c.queueRenameCheck(archive.NormalizeSymbol(e.Symbol))
+			}
+		}
 	}
 	if joined > 0 || left > 0 {
 		c.log.Info("exchange lists read", "listed", len(list), "new", joined, "retired", left)
@@ -516,7 +545,7 @@ func (c *Collector) fetch(ctx context.Context, tk task) error {
 		from, to = f, tt
 	}
 
-	series, err := src.Provider.Candles(ctx, t.symbol, t.interval, from, to)
+	series, err := c.candles(ctx, src, t.symbol, t.interval, from, to)
 	now := c.now()
 	if ctx.Err() != nil {
 		// Cancelled mid-request: nothing was learned about the symbol.

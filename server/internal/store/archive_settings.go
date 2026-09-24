@@ -19,6 +19,7 @@ const (
 	SettingArchivePaused    = "archive_paused"
 	SettingArchiveIntervals = "archive_intervals"
 	SettingArchiveListed    = "archive_listed"
+	SettingArchiveExtended  = "archive_extended"
 	SettingArchiveExtras    = "archive_extras"
 	SettingArchiveSpacingMS = "archive_spacing_ms"
 	SettingArchiveMinFreeGB = "archive_min_free_gb"
@@ -34,10 +35,16 @@ const (
 var ArchiveIntervals = []string{"1d", "1h", "5m", "1m"}
 
 // DefaultArchiveExtras are collected besides the exchange lists: the two
-// largest cryptocurrencies and the indices every analysis wants a benchmark
-// from. None of them is listed on a US exchange, which is why they need
-// naming.
-var DefaultArchiveExtras = []string{"BTC-USD", "ETH-USD", "^GSPC", "^DJI", "^IXIC", "^RUT", "^VIX"}
+// largest cryptocurrencies, the indices every analysis wants a benchmark
+// from, and the Treasury yield curve — 13-week, 5-, 10- and 30-year — which
+// is what a Sharpe ratio's risk-free rate and any rates-aware strategy are
+// measured against. None of them is listed on a US exchange, which is why
+// they need naming.
+var DefaultArchiveExtras = []string{
+	"BTC-USD", "ETH-USD",
+	"^GSPC", "^DJI", "^IXIC", "^RUT", "^VIX",
+	"^IRX", "^FVX", "^TNX", "^TYX",
+}
 
 // Bounds on the archive's tunables.
 const (
@@ -71,6 +78,11 @@ type ArchiveConfig struct {
 	Intervals []string `json:"intervals"`
 	// Listed collects every symbol listed on a US exchange.
 	Listed bool `json:"listed"`
+	// Extended collects pre-market and after-hours bars too. Off by
+	// default: it roughly doubles what minute bars cost for a liquid stock,
+	// and nothing in the app reads them — they are for analysis that wants
+	// them, and are stored tagged so nothing else ever sees them.
+	Extended bool `json:"extended"`
 	// Extras are collected besides the exchange lists.
 	Extras []string `json:"extras"`
 	// SpacingMS is the gap between two requests to Yahoo.
@@ -142,6 +154,11 @@ func (s *Store) ArchiveConfig() (ArchiveConfig, error) {
 		return cfg, err
 	} else if ok {
 		cfg.Listed = v == "true"
+	}
+	if v, ok, err = read(SettingArchiveExtended); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Extended = v == "true"
 	}
 	if v, ok, err = read(SettingArchiveExtras); err != nil {
 		return cfg, err
@@ -228,6 +245,7 @@ type ArchivePatch struct {
 	Paused           *bool     `json:"paused"`
 	Intervals        *[]string `json:"intervals"`
 	Listed           *bool     `json:"listed"`
+	Extended         *bool     `json:"extended"`
 	Extras           *[]string `json:"extras"`
 	SpacingMS        *int      `json:"spacingMs"`
 	MinFreeGB        *int      `json:"minFreeGb"`
@@ -263,6 +281,10 @@ func (s *Store) UpdateArchiveConfig(p ArchivePatch) (ArchiveConfig, error) {
 	if p.Listed != nil {
 		cfg.Listed = *p.Listed
 		kv[SettingArchiveListed] = strconv.FormatBool(cfg.Listed)
+	}
+	if p.Extended != nil {
+		cfg.Extended = *p.Extended
+		kv[SettingArchiveExtended] = strconv.FormatBool(cfg.Extended)
 	}
 	if p.Extras != nil {
 		extras := ParsePinnedSymbols(strings.Join(*p.Extras, ","))

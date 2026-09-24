@@ -1779,6 +1779,19 @@ thead .sectors__col {
   stroke: var(--down);
   fill: var(--down);
 }
+/* Volume sits under the candles in a quiet tint of the same colours: it is
+   read against the move above it, not on its own. */
+.vol {
+  fill: color-mix(in srgb, var(--down) 45%, transparent);
+}
+.vol--up {
+  fill: color-mix(in srgb, var(--up) 45%, transparent);
+}
+/* Pre-market and after-hours bars, when asked for: present but in the
+   background, so the regular session's shape is still the one that reads. */
+.candle--ext {
+  opacity: 0.35;
+}
 .candle-line {
   fill: none;
   stroke: var(--primary);

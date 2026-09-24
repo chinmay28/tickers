@@ -153,3 +153,59 @@ func TestPolygonFailures(t *testing.T) {
 		t.Error("a request went out with no key")
 	}
 }
+
+func TestPolygonKeepsVWAPAndTradesAndTagsExtendedBars(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/range/1/minute/"):
+			fmt.Fprintf(w, `{"results":[
+			  {"o":1,"h":1,"l":1,"c":1,"v":10,"vw":1.01,"n":3,"t":%d},
+			  {"o":2,"h":2,"l":2,"c":2,"v":20,"vw":2.02,"n":7,"t":%d},
+			  {"o":3,"h":3,"l":3,"c":3,"v":30,"vw":3.03,"n":9,"t":%d}]}`,
+				ms(t, "2024-06-03 07:15"), ms(t, "2024-06-03 10:00"), ms(t, "2024-06-03 17:30"))
+		case r.URL.Path == "/v3/reference/splits":
+			fmt.Fprint(w, `{"results":[]}`)
+		}
+	}))
+	defer srv.Close()
+	p := NewPolygon(srv.URL, "k", 0)
+	from := time.Date(2024, 6, 3, 0, 0, 0, 0, time.UTC)
+
+	got, err := p.ExtendedCandles(context.Background(), "AAPL", OneMinute, from, from.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Candles) != 3 || got.Candles[0].Session != PreMarket || got.Candles[1].Session != Regular || got.Candles[2].Session != AfterHours {
+		t.Fatalf("extended = %+v, want pre, regular, post", got.Candles)
+	}
+	if c := got.Candles[1]; c.VWAP != 2.02 || c.Trades != 7 {
+		t.Errorf("regular bar = %+v, want Polygon's VWAP 2.02 and 7 trades kept", c)
+	}
+	plain, _ := p.Candles(context.Background(), "AAPL", OneMinute, from, from.Add(24*time.Hour))
+	if len(plain.Candles) != 1 || plain.Candles[0].Session != Regular {
+		t.Errorf("Candles = %+v, want the regular bar alone", plain.Candles)
+	}
+}
+
+func TestPolygonTickerHistoryInYahoosSpelling(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/vX/reference/tickers/META/events" || r.URL.Query().Get("types") != "ticker_change" {
+			t.Errorf("asked %s", r.URL)
+		}
+		fmt.Fprint(w, `{"results":{"name":"Meta Platforms","events":[
+		  {"ticker_change":{"ticker":"META"},"type":"ticker_change","date":"2022-06-09"},
+		  {"ticker_change":{"ticker":"FB"},"type":"ticker_change","date":"2012-05-18"}]},"status":"OK"}`)
+	}))
+	defer srv.Close()
+	got, err := NewPolygon(srv.URL, "k", 0).TickerHistory(context.Background(), "meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Symbol != "FB" || got[1].Symbol != "META" || got[1].From.Format(time.DateOnly) != "2022-06-09" {
+		t.Errorf("history = %+v, want FB from 2012 then META from 2022-06-09, oldest first", got)
+	}
+	crypto, err := NewPolygon(srv.URL, "k", 0).TickerHistory(context.Background(), "BTC-USD")
+	if err != nil || len(crypto) != 1 || crypto[0].Symbol != "BTC-USD" {
+		t.Errorf("a crypto pair's history = %+v, %v; want itself, with no request", crypto, err)
+	}
+}

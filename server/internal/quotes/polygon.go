@@ -131,12 +131,14 @@ type polygonAggs struct {
 	Error   string `json:"error"`
 	Message string `json:"message"`
 	Results []struct {
-		O float64 `json:"o"`
-		H float64 `json:"h"`
-		L float64 `json:"l"`
-		C float64 `json:"c"`
-		V float64 `json:"v"`
-		T int64   `json:"t"`
+		O  float64 `json:"o"`
+		H  float64 `json:"h"`
+		L  float64 `json:"l"`
+		C  float64 `json:"c"`
+		V  float64 `json:"v"`
+		VW float64 `json:"vw"`
+		N  int64   `json:"n"`
+		T  int64   `json:"t"`
 	} `json:"results"`
 	NextURL string `json:"next_url"`
 }
@@ -148,6 +150,16 @@ const maxPolygonPages = 20
 
 // Candles implements Archivist.
 func (p *Polygon) Candles(ctx context.Context, symbol string, interval Interval, from, to time.Time) (CandleSeries, error) {
+	return p.candles(ctx, symbol, interval, from, to, false)
+}
+
+// ExtendedCandles implements ExtendedArchivist. Polygon serves 4:00–20:00
+// New York time whatever is asked; this keeps what Candles drops, tagged.
+func (p *Polygon) ExtendedCandles(ctx context.Context, symbol string, interval Interval, from, to time.Time) (CandleSeries, error) {
+	return p.candles(ctx, symbol, interval, from, to, true)
+}
+
+func (p *Polygon) candles(ctx context.Context, symbol string, interval Interval, from, to time.Time, extended bool) (CandleSeries, error) {
 	if p.key == "" {
 		return CandleSeries{}, errors.New("polygon: no API key configured")
 	}
@@ -177,8 +189,12 @@ func (p *Polygon) Candles(ctx context.Context, symbol string, interval Interval,
 		}
 		for _, r := range resp.Results {
 			at := time.UnixMilli(r.T).UTC()
+			session := Regular
 			if interval.Intraday() {
-				if equity && !regularSession(at) {
+				if equity {
+					session = nySession(at)
+				}
+				if session != Regular && !extended {
 					continue
 				}
 			} else {
@@ -186,7 +202,10 @@ func (p *Polygon) Candles(ctx context.Context, symbol string, interval Interval,
 				// is the same calendar date in UTC.
 				at = time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, time.UTC)
 			}
-			out.Candles = append(out.Candles, Candle{Time: at, Open: r.O, High: r.H, Low: r.L, Close: r.C, Volume: int64(r.V)})
+			out.Candles = append(out.Candles, Candle{
+				Time: at, Open: r.O, High: r.H, Low: r.L, Close: r.C, Volume: int64(r.V),
+				VWAP: r.VW, Trades: r.N, Session: session,
+			})
 		}
 		endpoint = resp.NextURL
 	}
@@ -216,18 +235,23 @@ var newYork = func() *time.Location {
 	return loc
 }()
 
-// regularSession reports whether a bar starting at t lies inside 9:30–16:00
-// New York time.
+// nySession places a bar starting at t against 9:30–16:00 New York time.
 //
 // That is only meaningful for bars that start on the session's grid, which is
 // why the collector never asks Polygon for hourly bars: Polygon's hours start
-// on the clock, so its 9:00 bar is half pre-market. Hourly bars are built from
-// minute bars instead, anchored to the open.
-func regularSession(t time.Time) bool {
+// on the clock, so its 9:00 bar is half pre-market. Hourly bars for the years
+// it reaches are built from its minute bars instead, anchored to the open.
+func nySession(t time.Time) Session {
 	local := t.In(newYork)
 	open := time.Date(local.Year(), local.Month(), local.Day(), 9, 30, 0, 0, newYork)
 	close := time.Date(local.Year(), local.Month(), local.Day(), 16, 0, 0, 0, newYork)
-	return !local.Before(open) && local.Before(close)
+	switch {
+	case local.Before(open):
+		return PreMarket
+	case !local.Before(close):
+		return AfterHours
+	}
+	return Regular
 }
 
 type polygonSplitResponse struct {
@@ -269,6 +293,57 @@ func (p *Polygon) splitsFor(ctx context.Context, ticker string) ([]Split, error)
 	p.mu.Lock()
 	p.splits[ticker] = polygonSplits{at: time.Now(), splits: out}
 	p.mu.Unlock()
+	return out, nil
+}
+
+type polygonEvents struct {
+	Results struct {
+		Events []struct {
+			Type         string `json:"type"`
+			Date         string `json:"date"`
+			TickerChange struct {
+				Ticker string `json:"ticker"`
+			} `json:"ticker_change"`
+		} `json:"events"`
+	} `json:"results"`
+}
+
+// TickerHistory implements Renamer, from Polygon's ticker events: every
+// symbol the company behind a ticker has traded under, with the date each
+// took effect.
+func (p *Polygon) TickerHistory(ctx context.Context, symbol string) ([]TickerPeriod, error) {
+	if p.key == "" {
+		return nil, errors.New("polygon: no API key configured")
+	}
+	ticker, err := PolygonSymbol(symbol)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(ticker, ":") {
+		// Crypto pairs and indices are never renamed.
+		return []TickerPeriod{{Symbol: strings.ToUpper(symbol)}}, nil
+	}
+	var resp polygonEvents
+	endpoint := fmt.Sprintf("%s/vX/reference/tickers/%s/events?types=ticker_change", p.base, url.PathEscape(ticker))
+	if err := p.get(ctx, endpoint, &resp); err != nil {
+		return nil, fmt.Errorf("%s: %w", symbol, err)
+	}
+	var out []TickerPeriod
+	for _, e := range resp.Results.Events {
+		if e.Type != "ticker_change" || e.TickerChange.Ticker == "" {
+			continue
+		}
+		from, err := time.Parse(time.DateOnly, e.Date)
+		if err != nil {
+			continue
+		}
+		// Back into Yahoo's spelling, which is the archive's: BRK.B → BRK-B.
+		out = append(out, TickerPeriod{Symbol: strings.ReplaceAll(strings.ToUpper(e.TickerChange.Ticker), ".", "-"), From: from})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].From.Before(out[j].From) })
+	if len(out) == 0 {
+		out = []TickerPeriod{{Symbol: strings.ToUpper(symbol)}}
+	}
 	return out, nil
 }
 

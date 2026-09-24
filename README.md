@@ -591,10 +591,28 @@ The order is:
   source's progress, and actions: put it first, stop collecting it, walk it
   again, or fetch a range from a chosen source.
 
-**What is stored.** Prices are as the source prints them: split-adjusted, not
-dividend-adjusted. Splits and dividends are stored alongside them, and a new
-split rescales the bars already stored. Delisted symbols stop being fetched,
-but their history is kept.
+**What is stored.** Every bar has an open, high, low, close and volume. Prices
+are as the source prints them: split-adjusted, not dividend-adjusted.
+
+- **VWAP and trade count.** Each bar also carries the source's own
+  volume-weighted average price and trade count where it gives them. Polygon
+  does and Yahoo doesn't, so they are there for the stretches a Polygon key
+  filled in.
+- **Extended hours are opt-in.** *Pre-market and after-hours bars too*, in
+  Settings, collects 4:00–9:30 and 16:00–20:00 New York time as well. Each bar
+  is tagged with its session. Charts, returns and sparklines stay regular hours
+  unless asked; the symbol page's chart has an *Extended hours* toggle.
+- **Splits and dividends** are stored alongside the bars, and a new split
+  rescales the bars already stored (prices, VWAP and volume). The Treasury
+  yield curve (`^IRX`, `^FVX`, `^TNX`, `^TYX`) is collected with the default
+  extras, for risk-free rates.
+- **Delisted symbols** stop being fetched, but their history is kept.
+- **Renames are joined, with a Polygon key.** Each day's newly listed symbols
+  are checked for a former name. When FB becomes META, reading META includes
+  the bars collected as FB before the rename.
+
+Every standard indicator derives from what's stored: moving averages, RSI,
+MACD, Bollinger Bands, ATR, On-Balance Volume, VWAP, and more.
 
 **How big.** About 60 bytes a bar. One-minute bars for the whole market are
 around 60 GB a year; daily history for the whole market is a few GB once.

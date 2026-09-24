@@ -3,6 +3,7 @@ package quotes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -169,5 +170,66 @@ func TestParseIntervalRefusesTypos(t *testing.T) {
 	}
 	if _, err := ParseInterval("2m"); err == nil {
 		t.Error("an interval the archive has no policy for was accepted")
+	}
+}
+
+func TestExtendedCandlesTagTheSessionOnTheExchangesClock(t *testing.T) {
+	// 8:00, 9:30, 15:59 and 16:00 New York time on 2 September 2020 (EDT),
+	// with today's session reported in winter (EST) — the zone, not today's
+	// offset, has to place the summer bars.
+	ny, _ := time.LoadLocation("America/New_York")
+	at := func(h, m int) int64 { return time.Date(2020, 9, 2, h, m, 0, 0, ny).Unix() }
+	start, end := time.Date(2026, 1, 5, 9, 30, 0, 0, ny).Unix(), time.Date(2026, 1, 5, 16, 0, 0, 0, ny).Unix()
+	var query url.Values
+	y := newTestYahoo(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		fmt.Fprintf(w, `{"chart":{"result":[{"meta":{"gmtoffset":-18000,"exchangeTimezoneName":"America/New_York",
+		  "currentTradingPeriod":{"regular":{"start":%d,"end":%d}}},
+		  "timestamp":[%d,%d,%d,%d],
+		  "indicators":{"quote":[{"open":[1,2,3,4],"high":[1,2,3,4],"low":[1,2,3,4],"close":[1,2,3,4],"volume":[1,1,1,1]}]}}],"error":null}}`,
+			start, end, at(8, 0), at(9, 30), at(15, 59), at(16, 0))
+	})
+	from := time.Date(2020, 9, 2, 0, 0, 0, 0, time.UTC)
+	got, err := y.ExtendedCandles(context.Background(), "AAPL", OneMinute, from, from.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query.Get("includePrePost") != "true" {
+		t.Errorf("includePrePost = %q, want true", query.Get("includePrePost"))
+	}
+	want := []Session{PreMarket, Regular, Regular, AfterHours}
+	for i, c := range got.Candles {
+		if c.Session != want[i] {
+			t.Fatalf("sessions = %v, want pre, regular, regular, post", sessions(got.Candles))
+		}
+	}
+
+	plain, _ := y.Candles(context.Background(), "AAPL", OneMinute, from, from.Add(24*time.Hour))
+	if query.Get("includePrePost") != "false" {
+		t.Error("Candles asked for the extended session")
+	}
+	for _, c := range plain.Candles {
+		if c.Session != Regular {
+			t.Errorf("Candles tagged a bar %v; everything it returns is regular", c.Session)
+		}
+	}
+}
+
+func sessions(cs []Candle) []Session {
+	out := make([]Session, len(cs))
+	for i, c := range cs {
+		out[i] = c.Session
+	}
+	return out
+}
+
+func TestSessionClockTreatsAroundTheClockAsRegular(t *testing.T) {
+	day := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	clock := sessionClock("UTC", day.Unix(), day.Add(24*time.Hour-time.Second).Unix())
+	if s := clock(day.Add(3 * time.Hour)); s != Regular {
+		t.Errorf("a 3am crypto bar is %v, want regular", s)
+	}
+	if s := sessionClock("", 1, 2)(day); s != Regular {
+		t.Errorf("with no zone a bar is %v, want regular", s)
 	}
 }

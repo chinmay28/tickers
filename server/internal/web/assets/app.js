@@ -2560,7 +2560,7 @@ state.archive = {
   offset: 0,
   page: null,
   detail: null,
-  chart: { interval: '1d', range: '6m' },
+  chart: { interval: '1d', range: '6m', extended: false },
   bars: null,
   barsKey: '',
   folder: null,
@@ -2600,10 +2600,12 @@ async function loadBars(symbol) {
   const days = (CHART_RANGES[a.chart.interval] ?? CHART_RANGES['1d']).find(([k]) => k === a.chart.range)?.[1] ?? 182;
   const to = new Date();
   const from = new Date(to.getTime() - days * 86_400_000);
-  const key = `${symbol}|${a.chart.interval}|${a.chart.range}|${to.toISOString().slice(0, 13)}`;
+  const extended = a.chart.extended && a.chart.interval !== '1d';
+  const key = `${symbol}|${a.chart.interval}|${a.chart.range}|${extended}|${to.toISOString().slice(0, 13)}`;
   if (key === a.barsKey && a.bars) return;
   try {
     const q = new URLSearchParams({ interval: a.chart.interval, from: isoDay(from), to: isoDay(to) });
+    if (extended) q.set('session', 'extended');
     a.bars = await api(`/archive/symbols/${encodeURIComponent(symbol)}/bars?${q}`);
   } catch (err) {
     a.bars = { error: err.message };
@@ -2912,6 +2914,8 @@ function archiveSettings(v) {
             <span class="field__label">Symbols</span>
             <label class="checkbox"><input type="checkbox" name="listed" ${s.listed ? 'checked' : ''} /> Every stock and ETF listed on a US exchange</label>
             <span class="field__hint">Read daily from Nasdaq's symbol directory — about ten thousand symbols. Off, the archive collects only the app's own symbols, the extras and what you add.</span>
+            <label class="checkbox"><input type="checkbox" name="extended" ${s.extended ? 'checked' : ''} /> Pre-market and after-hours bars too</label>
+            <span class="field__hint">Stored tagged by session, and shown only where asked for — charts, returns and sparklines stay regular hours. Roughly doubles what minute bars take for a liquid stock, and applies from now on: days already held are not fetched again for it.</span>
           </div>
           <div class="field">
             <label class="field__label" for="archive-extras">Extras</label>
@@ -2979,6 +2983,8 @@ function renderArchiveSymbol() {
       <div>
         <h1>${esc(s.symbol)}</h1>
         <p>${esc(s.name || '')}${s.exchange ? ` · ${esc(s.exchange)}` : ''} ${symbolChips(s)}</p>
+        ${(d.aliases ?? []).length ? `<p class="field__hint">Formerly ${d.aliases.map((al) =>
+          `<a href="#/data/${encodeURIComponent(al.former)}">${esc(al.former)}</a> until ${when(al.until)}`).join(', ')} — read here as one series.</p>` : ''}
       </div>
       ${back}
     </div>
@@ -2992,6 +2998,9 @@ function renderArchiveSymbol() {
           <span class="field__hint">·</span>
           ${(CHART_RANGES[a.chart.interval] ?? []).map(([k]) => `<button class="btn btn--sm ${a.chart.range === k ? 'btn--outline btn--active' : 'btn--ghost'}"
              type="button" data-action="archive-range" data-range="${k}">${esc(k)}</button>`).join('')}
+          ${a.chart.interval !== '1d' ? `<span class="field__hint">·</span>
+            <button class="btn btn--sm ${a.chart.extended ? 'btn--outline btn--active' : 'btn--ghost'}" type="button"
+              data-action="archive-extended" aria-pressed="${a.chart.extended}">Extended hours</button>` : ''}
         </div>
         ${candleChart(a.bars)}
       </div>
@@ -3088,41 +3097,60 @@ function candleChart(res) {
   if (res.error) return `<div class="banner banner--warn">${esc(res.error)}</div>`;
   const bars = res.bars ?? [];
   if (!bars.length) return '<div class="empty"><strong>No bars held for this window.</strong>Try a longer one, or another interval.</div>';
-  const W = 720, H = 260, pad = { l: 8, r: 58, t: 10, b: 22 };
-  let lo = Infinity, hi = -Infinity;
-  for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); }
+  // Prices above, volume below, on one x axis: a move and the volume behind
+  // it are read together or not at all.
+  const W = 720, H = 300, pad = { l: 8, r: 58, t: 10, b: 22 }, volH = 56, gap = 8;
+  const priceBottom = H - pad.b - volH - gap;
+  let lo = Infinity, hi = -Infinity, vmax = 0;
+  for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); vmax = Math.max(vmax, b.v); }
   if (hi === lo) { hi += 1; lo -= 1; }
   const x = (i) => pad.l + ((i + 0.5) / bars.length) * (W - pad.l - pad.r);
-  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (priceBottom - pad.t);
+  const vy = (v) => H - pad.b - (vmax ? (v / vmax) * volH : 0);
   const step = (W - pad.l - pad.r) / bars.length;
+  const body = Math.max(1, step * 0.65);
   let marks;
   if (bars.length <= 400) {
-    const body = Math.max(1, step * 0.65);
     marks = bars.map((b, i) => {
-      const up = b.c >= b.o;
+      const cls = `${b.c >= b.o ? 'candle--up' : 'candle--down'}${b.s ? ' candle--ext' : ''}`;
       const top = y(Math.max(b.o, b.c)), bottom = y(Math.min(b.o, b.c));
-      return `<g class="${up ? 'candle--up' : 'candle--down'}"><line x1="${x(i)}" x2="${x(i)}" y1="${y(b.h)}" y2="${y(b.l)}" />
+      return `<g class="${cls}"><line x1="${x(i)}" x2="${x(i)}" y1="${y(b.h)}" y2="${y(b.l)}" />
         <rect x="${x(i) - body / 2}" y="${top}" width="${body}" height="${Math.max(1, bottom - top)}" /></g>`;
     }).join('');
   } else {
     marks = `<polyline class="candle-line" points="${bars.map((b, i) => `${x(i).toFixed(1)},${y(b.c).toFixed(1)}`).join(' ')}" />`;
   }
+  const volume = bars.map((b, i) => `<rect class="vol${b.c >= b.o ? ' vol--up' : ''}${b.s ? ' candle--ext' : ''}"
+    x="${x(i) - body / 2}" y="${vy(b.v)}" width="${body}" height="${Math.max(0, H - pad.b - vy(b.v))}" />`).join('');
   const label = (t) => {
     const d = new Date(t * 1000);
     return state.archive.chart.interval === '1d' ? d.toLocaleDateString() : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
   const last = bars[bars.length - 1];
+  const withVWAP = bars.filter((b) => b.vw).length;
+  const ext = bars.filter((b) => b.s).length;
+  const notes = [`${count(bars.length)} bars`];
+  if (ext) notes.push(`${count(ext)} outside the regular session, faded`);
+  if (last.vw) notes.push(`last VWAP ${last.vw.toPrecision(6)} over ${count(last.n)} trades`);
+  else if (withVWAP) notes.push(`${count(withVWAP)} with the source's own VWAP`);
   return `
     <svg class="candles" viewBox="0 0 ${W} ${H}" role="img" aria-label="${count(bars.length)} bars from ${esc(label(bars[0].t))} to ${esc(label(last.t))}, closing at ${last.c}">
       <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(hi)}" y2="${y(hi)}" />
       <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(lo)}" y2="${y(lo)}" />
       ${marks}
+      ${volume}
       <text class="candles__tick" x="${W - pad.r + 4}" y="${y(hi) + 4}">${hi.toPrecision(5)}</text>
       <text class="candles__tick" x="${W - pad.r + 4}" y="${y(lo) + 4}">${lo.toPrecision(5)}</text>
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${H - pad.b - volH + 8}">${esc(compact(vmax))}</text>
       <text class="candles__tick" x="${pad.l}" y="${H - 6}">${esc(label(bars[0].t))}</text>
       <text class="candles__tick" x="${W - pad.r}" y="${H - 6}" text-anchor="end">${esc(label(last.t))}</text>
     </svg>
-    <p class="field__hint">${count(bars.length)} bars. Prices are split-adjusted; dividends are not taken out.</p>`;
+    <p class="field__hint">${esc(notes.join(' · '))}. Prices are split-adjusted; dividends are not taken out. Volume is below.</p>`;
+}
+
+/** A large count, short: 12.3M rather than 12,345,678. */
+function compact(n) {
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 }
 
 /* The Data page's forms and buttons. Separate listeners from the rest of the
@@ -3179,6 +3207,7 @@ $('#view').addEventListener('submit', (event) => {
       enabled: form.elements.enabled.checked,
       paused: form.elements.paused.checked,
       listed: form.elements.listed.checked,
+      extended: form.elements.extended.checked,
       intervals: ARCHIVE_INTERVALS.filter((i) => form.elements[`interval_${i.key}`].checked).map((i) => i.key),
       extras: symbolList(values.extras),
       spacingMs: Number(values.spacingMs),
@@ -3223,6 +3252,11 @@ $('#view').addEventListener('click', (event) => {
       break;
     case 'archive-chart':
       a.chart = { interval: button.dataset.interval, range: CHART_RANGES[button.dataset.interval][0][0] };
+      a.bars = null;
+      act(async () => {});
+      break;
+    case 'archive-extended':
+      a.chart = { ...a.chart, extended: !a.chart.extended };
       a.bars = null;
       act(async () => {});
       break;
