@@ -177,3 +177,26 @@ func TestInspectExplainsWhatIsWrong(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestUnpluggingAnOpenArchiveIsNoticedWhileIdle(t *testing.T) {
+	m, _ := newManager(t, "")
+	dir := t.TempDir()
+	if err := m.Use(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, m, "open", isState(StateOpen))
+	// The drive goes, and its marker with it. The collector is paused, so
+	// nothing it writes would fail.
+	os.Remove(filepath.Join(dir, archive.MarkerFile))
+	m.Nudge()
+	st := waitFor(t, m, "unavailable", isState(StateUnavailable))
+	if !strings.Contains(st.Error, "unplugged") && !strings.Contains(st.Error, "not an archive") {
+		t.Errorf("error = %q, want it to say the drive went", st.Error)
+	}
+	if err := m.Read(func(*archive.Archive) error { return nil }); !errors.Is(err, ErrNotOpen) {
+		t.Errorf("a read after unplugging gave %v, want ErrNotOpen so callers fall back", err)
+	}
+	archive.Init(dir)
+	m.Nudge()
+	waitFor(t, m, "open again", isState(StateOpen))
+}

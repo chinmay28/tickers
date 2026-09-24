@@ -136,7 +136,17 @@ func (m *Manager) Run(ctx context.Context) {
 }
 
 func (m *Manager) runArchive(ctx context.Context, a *archive.Archive, path string) {
-	coll, err := collector.New(a, m.planner(path), m.log)
+	plan := m.planner(path)
+	// Every step checks the drive is still there. An idle collector writes
+	// nothing, so without this an unplugged drive would go unnoticed — and
+	// reported as open — until the next write failed, which could be a day.
+	checked := func(ctx context.Context) (collector.Plan, error) {
+		if err := a.Ping(); err != nil {
+			return collector.Plan{}, err
+		}
+		return plan(ctx)
+	}
+	coll, err := collector.New(a, checked, m.log)
 	if err != nil {
 		a.Close()
 		m.set(StateUnavailable, path, err.Error())
@@ -461,7 +471,7 @@ func Inspect(path string) Folder {
 		os.Remove(probe.Name())
 		f.Writable = true
 	} else {
-		f.Problem = "the server cannot write there (check the folder's owner — the service runs as its own user)"
+		f.Problem = "the server cannot write there — check the folder is owned by the service's user, and that the systemd unit allows writing to it (DEPLOYMENT.md, ReadWritePaths)"
 	}
 	f.DiskFree, f.DiskTotal, _ = archive.Disk(f.Path)
 	f.SameDiskAsRoot = sameDevice(f.Path, "/")

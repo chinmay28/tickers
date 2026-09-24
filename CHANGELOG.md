@@ -7,28 +7,41 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
-### A market-data archive
+### A market-data archive, and a Data page to run it
 
-**Tickers can now archive OHLCV bars for the whole listed US market.** Give
-`serve` an `--archive` file (or run `tickers collect`). It reads every stock
-and ETF from the exchanges' daily symbol directory, adds bitcoin, ether and
-the major indices, and collects each one at three widths:
+**Tickers can now keep its own history of the market.** Choose a folder on the
+new **Data** page, on an external drive for a Pi. From then on it collects
+OHLCV bars for every stock and ETF listed on a US exchange, plus bitcoin,
+ether, the major indices, and everything on your watchlist, which goes first.
 
-- **1d** back to the listing date;
-- **1h** for the two years Yahoo keeps;
-- **5m** for the 59 days Yahoo keeps.
-
-Every series is kept current from then on. It never exceeds one request every
-two seconds, backs off on a 429, and completes the first pass in a few days.
-`tickers coverage` shows how far it has got.
-
-- It is a separate SQLite file. The watchlist, the published payload,
-  `/api/health` and the pre-upgrade snapshots don't touch it.
-- Bars are stored as Yahoo prints them. Splits and dividends are stored beside
-  them, and a new split rescales the bars already stored.
-- Delisted symbols are retired, not deleted.
-- Off unless configured. Budget around 6 GB for the first pass and 13 GB a
-  year after it. `--archive-intervals 1d,1h` brings that to about 1 GB a year.
+- **One-minute bars, kept current daily.** Every 15 minutes for the
+  watchlist's own symbols.
+- **Daily bars** back to each listing date.
+- **Five-minute and hourly bars** for the stretch Yahoo still has (60 days and
+  two years), once. After that they are built from the minute bars.
+- **A paid source fills in behind Yahoo.** Paste a Polygon.io (Massive) key
+  and it backfills the years Yahoo never kept, a gap at a time. Days already
+  held are skipped without a request.
+- **Every bar records where it came from.** A source never overwrites
+  another's bars unless you ask on the symbol's page.
+- **The Data page shows how far it has got:** per interval, per symbol, month
+  by month. It has a candle chart for any symbol, a browser over all ten
+  thousand, and lets you add missing tickers, stop collecting ones you don't
+  want, put a symbol first, or fetch a range from a chosen source.
+- **Everything is changed from the page without a restart:** pause, intervals,
+  pacing, the free-space floor, the folder itself (including moving it to
+  another drive).
+- **An unplugged drive pauses collection.** Nothing is written to the empty
+  mount point, and collection resumes when the drive is back. The watchlist,
+  the published payload, `/api/health` and the pre-upgrade snapshots never
+  depend on the archive.
+- **The app reads it.** The performance sheet and backtests read local history
+  once a symbol's archive is complete, and sparklines draw its minute bars.
+  Otherwise they read from Yahoo exactly as before.
+- **Budget around 60 GB a year** for minute bars across the whole market. On a
+  Pi, the service needs permission to write to the drive; see DEPLOYMENT.md.
+- `tickers collect` runs the collector without the web server, and `tickers
+  coverage` prints a summary.
 
 ### A calendar version
 

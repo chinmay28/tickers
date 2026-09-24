@@ -374,6 +374,7 @@ async function refreshView(opts) {
   if (route() === 'funds' && routeArg() && state.fund?.symbol !== routeArg().toUpperCase()) {
     loadFund(routeArg());
   }
+  if (route() === 'data') await loadArchive();
   if (route() === 'settings') {
     try {
       // The window is "the newest N", not "page number N". It grows when the
@@ -532,7 +533,7 @@ function restoreFocus(snap) {
  * Router
  * ------------------------------------------------------------------ */
 
-const ROUTES = ['watchlist', 'portfolios', 'funds', 'settings'];
+const ROUTES = ['watchlist', 'portfolios', 'funds', 'data', 'settings'];
 
 /** Routes that used to exist and now land somewhere else.
  *
@@ -631,6 +632,9 @@ function render({ force = false } = {}) {
       break;
     case 'funds':
       view.innerHTML = renderFunds(data);
+      break;
+    case 'data':
+      view.innerHTML = renderData();
       break;
     case 'settings':
       view.innerHTML = renderSettings(data);
@@ -2512,6 +2516,706 @@ function logoReport(data) {
   </span>`;
 }
 
+/* ------------------------------------------------------------------ *
+ * Data — the market-data archive
+ *
+ * Its own endpoints rather than a slice of /api/state: the state poll runs on
+ * every open tab, and nothing about the watchlist should pay for counting the
+ * archive. The page reads /api/archive when it is the route, on the same
+ * ten-second poll, and pages through symbols on the server — the archive holds
+ * ten thousand of them, which is not a list to send whole.
+ * ------------------------------------------------------------------ */
+
+const ARCHIVE_PAGE = 50;
+
+/** The widths the collector knows, finest last, with what each is for. */
+const ARCHIVE_INTERVALS = [
+  { key: '1d', label: 'Daily', hint: 'back to each listing' },
+  { key: '1h', label: 'Hourly', hint: 'two years, once' },
+  { key: '5m', label: '5-minute', hint: '60 days, once' },
+  { key: '1m', label: '1-minute', hint: 'kept current daily' },
+];
+
+/** The chart's windows, per interval: long enough to show a shape, short
+ *  enough to stay under the server's bar limit. */
+const CHART_RANGES = {
+  '1d': [['6m', 182], ['2y', 730], ['10y', 3652]],
+  '1h': [['1m', 31], ['6m', 182]],
+  '5m': [['1w', 7], ['1m', 31]],
+  '1m': [['1d', 1], ['1w', 7]],
+};
+
+/** What the Data page has loaded. `folder` is the last folder inspected by
+ *  the location form; `chart` is the detail page's chart controls. */
+state.archive = {
+  view: null,
+  disabled: false,
+  error: '',
+  query: { q: '', filter: 'active', kind: '' },
+  offset: 0,
+  page: null,
+  detail: null,
+  chart: { interval: '1d', range: '6m' },
+  bars: null,
+  barsKey: '',
+  folder: null,
+};
+
+async function loadArchive() {
+  const a = state.archive;
+  try {
+    a.view = await api('/archive');
+    a.disabled = false;
+    a.error = '';
+  } catch (err) {
+    a.view = null;
+    a.disabled = err.status === 501;
+    a.error = err.message;
+    return;
+  }
+  if (a.view.state !== 'open') return;
+  const symbol = routeArg().toUpperCase();
+  try {
+    if (symbol) {
+      a.detail = await api(`/archive/symbols/${encodeURIComponent(symbol)}`);
+      await loadBars(symbol);
+    } else {
+      const q = new URLSearchParams({ ...a.query, offset: a.offset, limit: ARCHIVE_PAGE });
+      a.page = await api(`/archive/symbols?${q}`);
+    }
+  } catch (err) {
+    if (symbol) a.detail = { error: err.message };
+    else a.page = { error: err.message };
+  }
+}
+
+/** The chart's bars, fetched only when what they are for has changed. */
+async function loadBars(symbol) {
+  const a = state.archive;
+  const days = (CHART_RANGES[a.chart.interval] ?? CHART_RANGES['1d']).find(([k]) => k === a.chart.range)?.[1] ?? 182;
+  const to = new Date();
+  const from = new Date(to.getTime() - days * 86_400_000);
+  const key = `${symbol}|${a.chart.interval}|${a.chart.range}|${to.toISOString().slice(0, 13)}`;
+  if (key === a.barsKey && a.bars) return;
+  try {
+    const q = new URLSearchParams({ interval: a.chart.interval, from: isoDay(from), to: isoDay(to) });
+    a.bars = await api(`/archive/symbols/${encodeURIComponent(symbol)}/bars?${q}`);
+  } catch (err) {
+    a.bars = { error: err.message };
+  }
+  a.barsKey = key;
+}
+
+function isoDay(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+/** A Go zero time, or nothing, reads as a dash. */
+function when(iso, { time = false } = {}) {
+  if (!iso || iso.startsWith('0001-')) return '—';
+  const d = new Date(iso);
+  return time
+    ? d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function bytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i < 2 ? 0 : 1)} ${units[i]}`;
+}
+
+function count(n) {
+  return Number(n ?? 0).toLocaleString();
+}
+
+function renderData() {
+  const a = state.archive;
+  if (a.disabled) {
+    return `<div class="empty"><strong>No archive on this server</strong>It was started without one. See DEPLOYMENT.md.</div>`;
+  }
+  if (!a.view) {
+    return `<div class="empty"><strong>${a.error ? 'Could not load the archive' : 'Loading…'}</strong>${esc(a.error)}</div>`;
+  }
+  if (routeArg()) return renderArchiveSymbol();
+
+  const v = a.view;
+  return `
+    <div class="page-head">
+      <div>
+        <h1>Data</h1>
+        <p>A local archive of market history, collected continuously and backfilled as far as each source goes. The performance sheet, backtests and sparklines read from it wherever it holds a symbol.</p>
+      </div>
+    </div>
+    ${archiveBanner(v)}
+    ${v.state === 'open' || v.state === 'moving' ? archiveOverview(v) : ''}
+    ${archiveLocation(v)}
+    ${v.state === 'open' ? archiveSymbols() : ''}
+    ${archiveSettings(v)}`;
+}
+
+function archiveBanner(v) {
+  if (v.state === 'off') {
+    return `<div class="banner">No archive yet. Choose a folder below — an external drive is the right place for it: expect around 60 GB a year with one-minute bars for the whole market.</div>`;
+  }
+  if (v.state === 'unavailable') {
+    return `<div class="banner banner--warn" role="status">
+      <strong>The archive at <code>${esc(v.path)}</code> is unavailable.</strong>
+      ${esc(v.error)}<br />Collection is paused and the app is reading from the quote source instead. Plug the drive back in and it resumes within half a minute.
+    </div>`;
+  }
+  const c = v.collector;
+  if (v.move?.state === 'failed') {
+    return `<div class="banner banner--warn">The move to <code>${esc(v.move.to)}</code> failed: ${esc(v.move.error)}. The archive stayed where it was.</div>`;
+  }
+  if (c?.state === 'paused' && c.reason) {
+    return `<div class="banner banner--warn" role="status">Collection is paused: ${esc(c.reason)}.</div>`;
+  }
+  return '';
+}
+
+function archiveOverview(v) {
+  const s = v.stats ?? {};
+  const c = v.collector ?? {};
+  const h = c.lastHour ?? {};
+  const used = v.diskTotal ? 1 - v.diskFree / v.diskTotal : 0;
+  const move = v.move?.state === 'copying'
+    ? `<div class="field"><span class="field__label">Moving to ${esc(v.move.to)}</span>
+         <progress class="progress" max="${v.move.total || 1}" value="${v.move.copied}"></progress>
+         <span class="field__hint">${bytes(v.move.copied)} of ${bytes(v.move.total)}. Collection resumes in the new folder when it is done.</span></div>`
+    : '';
+  const intervals = (s.intervals ?? []).map((i) => `
+      <tr>
+        <th scope="row">${esc(ARCHIVE_INTERVALS.find((x) => x.key === i.interval)?.label ?? i.interval)}</th>
+        <td class="num">${count(i.bars)}</td>
+        <td class="num">${count(i.started)}</td>
+        <td class="num">${count(i.complete)}</td>
+        <td class="num">${i.failing ? `<span class="chip chip--error">${count(i.failing)}</span>` : '0'}</td>
+        <td>${when(i.oldest)}</td>
+        <td>${when(i.newest, { time: true })}</td>
+        <td>${when(i.stalest, { time: true })}</td>
+      </tr>`).join('');
+  return `
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">Collected so far</h2>
+        <span class="card__meta">${esc(collectorLine(c))}</span></div>
+      <div class="card__body">
+        <div class="stat-row">
+          <div class="stat"><div class="stat__label">Symbols</div><div class="stat__value">${count(s.active)}</div>
+            <div class="field__hint">${count(s.priority)} first in line · ${count(s.retired)} retired · ${count(s.excluded)} excluded</div></div>
+          <div class="stat"><div class="stat__label">On disk</div><div class="stat__value">${bytes(v.size)}</div>
+            <div class="field__hint">${v.diskTotal ? `${bytes(v.diskFree)} free of ${bytes(v.diskTotal)}` : ''}</div>
+            ${v.diskTotal ? `<div class="meter"><span style="width:${(used * 100).toFixed(1)}%"></span></div>` : ''}</div>
+          <div class="stat"><div class="stat__label">Last hour</div><div class="stat__value">${count(h.requests)} requests</div>
+            <div class="field__hint">${count(h.bars)} bars · ${count(h.skipped)} skipped as held · ${count(h.failures)} failed</div></div>
+          <div class="stat"><div class="stat__label">Schedule</div><div class="stat__value">${count(c.backfilling)} backfilling</div>
+            <div class="field__hint">${count(c.behind)} due forward · ${count(c.series)} series</div></div>
+        </div>
+        ${move}
+        ${intervals ? `
+        <div class="table-scroll"><table class="table">
+          <thead><tr><th>Interval</th><th class="num">Bars</th><th class="num">Series</th><th class="num">Complete</th>
+            <th class="num">Failing</th><th>Deepest</th><th>Newest</th><th>Stalest</th></tr></thead>
+          <tbody>${intervals}</tbody></table></div>
+        <p class="field__hint">Complete means a source has walked a series back as far as it goes — the listing, or the edge of what it keeps. Stalest is the least current series' newest bar: how far behind the daily pass is.</p>`
+        : '<p class="field__hint">Nothing collected yet — the first requests go out within a few seconds of the archive opening.</p>'}
+        ${(c.jobs ?? []).length ? jobsTable(c.jobs) : ''}
+      </div>
+    </section>`;
+}
+
+function collectorLine(c) {
+  if (!c?.state) return '';
+  const what = {
+    collecting: 'Collecting',
+    idle: 'Up to date',
+    waiting: 'Waiting on a source',
+    paused: 'Paused',
+    stopped: 'Stopped',
+    starting: 'Starting',
+  }[c.state] ?? c.state;
+  return c.current && c.state === 'collecting' ? `${what} — ${c.current}` : what;
+}
+
+function jobsTable(jobs) {
+  return `
+    <h3 class="card__subtitle">Requested fetches</h3>
+    <div class="table-scroll"><table class="table">
+      <thead><tr><th>Symbol</th><th>Interval</th><th>Source</th><th>Window</th><th>Progress</th><th>State</th></tr></thead>
+      <tbody>${[...jobs].reverse().map((j) => `
+        <tr><th scope="row"><a href="#/data/${encodeURIComponent(j.symbol)}">${esc(j.symbol)}</a></th>
+          <td>${esc(j.interval)}</td><td>${esc(j.source)}${j.replace ? ' (replacing)' : ''}</td>
+          <td>${when(j.from)} – ${when(j.to)}</td>
+          <td>${count(j.requests)} requests, ${count(j.bars)} bars</td>
+          <td><span class="chip ${j.state === 'failed' ? 'chip--error' : j.state === 'done' ? 'chip--ok' : ''}">${esc(j.state)}</span>
+            ${j.error ? `<span class="field__hint">${esc(j.error)}</span>` : ''}</td></tr>`).join('')}
+      </tbody></table></div>`;
+}
+
+function archiveLocation(v) {
+  const f = state.archive.folder;
+  const report = f ? folderReport(f) : '';
+  const current = v.path
+    ? `<p>The archive is ${v.state === 'open' ? 'in' : 'configured at'} <code>${esc(v.path)}</code>${
+        v.fromFlag ? ' — from the server\'s <code>--archive</code> flag, until you choose one here' : ''}.</p>`
+    : '<p>No folder is chosen.</p>';
+  return `
+    <form class="card" id="archive-folder" autocomplete="off">
+      <div class="card__head"><h2 class="card__title">Location</h2></div>
+      <div class="card__body">
+        ${current}
+        <div class="form-grid">
+          <div class="field">
+            <label class="field__label" for="archive-path">Folder</label>
+            <input class="input input--mono" id="archive-path" name="path" required
+                   placeholder="/mnt/usb/tickers-archive" value="${esc(f?.path ?? '')}" />
+            <span class="field__hint">An absolute path on the server. The folder has to exist already — mount the drive and create it first — so that an unplugged drive's empty mount point is never mistaken for a place to write.</span>
+          </div>
+        </div>
+        ${report}
+        <div class="form-actions">
+          <button class="btn btn--outline" type="submit" value="inspect">Check folder</button>
+          <button class="btn btn--primary" type="submit" value="use">${f?.isArchive ? 'Use this archive' : 'Start a new archive here'}</button>
+          ${v.state === 'open' ? '<button class="btn btn--ghost" type="submit" value="move">Move the archive here</button>' : ''}
+          ${v.path && !v.fromFlag ? '<button class="btn btn--ghost" type="submit" value="detach" formnovalidate>Forget this folder</button>' : ''}
+        </div>
+        <p class="field__hint"><strong>Use</strong> switches to the folder and leaves the old one as it was. <strong>Move</strong> copies everything into an empty folder, then switches; the old copy stays until you delete it.</p>
+      </div>
+    </form>`;
+}
+
+function folderReport(f) {
+  if (f.problem) return `<div class="banner banner--warn">${esc(f.problem)}</div>`;
+  const notes = [];
+  notes.push(f.isArchive ? 'This folder already holds an archive.' : f.empty ? 'The folder is empty.' : 'The folder has other files in it; an archive can start here, but a move needs an empty folder.');
+  notes.push(`${bytes(f.diskFree)} free of ${bytes(f.diskTotal)}.`);
+  const warn = f.sameDiskAsRoot
+    ? `<div class="banner banner--warn">This folder is on the same disk as the system itself — on a Pi, that is the SD card. If you meant an external drive, check it is mounted.</div>`
+    : '';
+  return `${warn}<p class="field__hint">${esc(notes.join(' '))}</p>`;
+}
+
+function archiveSymbols() {
+  const a = state.archive;
+  const p = a.page;
+  const q = a.query;
+  const filters = [
+    ['active', 'Collected'], ['priority', 'First in line'], ['user', 'Added by hand'],
+    ['failing', 'Failing'], ['retired', 'Retired'], ['excluded', 'Excluded'], ['', 'Everything'],
+  ];
+  const rows = (p?.symbols ?? []).map((s) => `
+      <tr>
+        <th scope="row"><a class="archive-sym" href="#/data/${encodeURIComponent(s.symbol)}">${esc(s.symbol)}</a></th>
+        <td class="wrap">${esc(s.name)}</td>
+        <td class="wide-only">${esc(s.exchange)}</td>
+        <td>${symbolChips(s)}</td>
+      </tr>`).join('');
+  const shown = p?.symbols?.length ?? 0;
+  return `
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">Symbols</h2>
+        <span class="card__meta">${p?.total != null ? `${count(p.total)} match` : ''}</span></div>
+      <div class="card__body">
+        <form class="archive-search" id="archive-search" autocomplete="off">
+          <input class="input input--mono" name="q" placeholder="Symbol or name" value="${esc(q.q)}" aria-label="Search symbols" />
+          <select class="select" name="filter" aria-label="Show">
+            ${filters.map(([k, l]) => `<option value="${k}" ${q.filter === k ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+          <select class="select" name="kind" aria-label="Kind">
+            ${[['', 'Any kind'], ['stock', 'Stocks'], ['etf', 'ETFs'], ['other', 'Other']].map(([k, l]) => `<option value="${k}" ${q.kind === k ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+          <button class="btn btn--outline" type="submit">Search</button>
+        </form>
+        ${p?.error ? `<div class="banner banner--warn">${esc(p.error)}</div>` : ''}
+        ${rows ? `<div class="table-scroll"><table class="table">
+          <thead><tr><th>Symbol</th><th>Name</th><th class="wide-only">Exchange</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>` : '<p class="field__hint">No symbols match.</p>'}
+        <div class="form-actions">
+          <button class="btn btn--sm btn--ghost" type="button" data-action="archive-page" data-offset="${Math.max(0, a.offset - ARCHIVE_PAGE)}" ${a.offset ? '' : 'disabled'}>Previous</button>
+          <span class="field__hint">${shown ? `${count(a.offset + 1)}–${count(a.offset + shown)}` : ''}</span>
+          <button class="btn btn--sm btn--ghost" type="button" data-action="archive-page" data-offset="${a.offset + ARCHIVE_PAGE}" ${p && a.offset + shown < p.total ? '' : 'disabled'}>Next</button>
+        </div>
+
+        <h3 class="card__subtitle">Add a symbol</h3>
+        <form class="archive-search" id="archive-add" autocomplete="off">
+          <input class="input input--mono" name="symbol" placeholder="GC=F, ^TNX, BRK-A" required aria-label="Symbol to add" />
+          <button class="btn btn--primary" type="submit">Add</button>
+        </form>
+        <p class="field__hint">Anything Yahoo prices, spelled the way Yahoo spells it — futures, foreign listings, indices. A symbol added here goes first in line and is never retired by the exchange lists changing. Everything on the watchlist, every composite's legs and every portfolio's holdings are added for you.</p>
+      </div>
+    </section>`;
+}
+
+function symbolChips(s) {
+  const chips = [];
+  if (s.excluded) chips.push('<span class="chip chip--off">excluded</span>');
+  else if (!s.active) chips.push('<span class="chip chip--off">retired</span>');
+  if (s.priority && s.active) chips.push('<span class="chip chip--pinned">first</span>');
+  for (const list of s.lists ?? []) {
+    if (list !== 'listed') chips.push(`<span class="chip">${esc({ extra: 'extra', watchlist: 'app', user: 'added' }[list] ?? list)}</span>`);
+  }
+  if (s.kind === 'etf') chips.push('<span class="chip">etf</span>');
+  return chips.join(' ');
+}
+
+function archiveSettings(v) {
+  const s = v.settings;
+  const on = new Set(s.intervals);
+  return `
+    <form class="card" id="archive-form" autocomplete="off">
+      <div class="card__head"><h2 class="card__title">Collection</h2></div>
+      <div class="card__body">
+        <div class="form-grid">
+          <div class="field">
+            <span class="field__label">Collector</span>
+            <label class="checkbox"><input type="checkbox" name="paused" ${s.paused ? 'checked' : ''} /> Paused</label>
+            <span class="field__hint">Stops every request without forgetting anything; resuming picks up where it stopped.</span>
+          </div>
+          <div class="field">
+            <span class="field__label">Intervals</span>
+            ${ARCHIVE_INTERVALS.map((i) => `
+              <label class="checkbox"><input type="checkbox" name="interval_${i.key}" ${on.has(i.key) ? 'checked' : ''} />
+                ${esc(i.label)} <span class="field__hint">— ${esc(i.hint)}</span></label>`).join('')}
+            <span class="field__hint">Coarser intraday bars are built from finer ones when read, so one-minute bars are the ones kept current. Unticking an interval stops collecting it; what is stored stays.</span>
+          </div>
+          <div class="field">
+            <span class="field__label">Symbols</span>
+            <label class="checkbox"><input type="checkbox" name="listed" ${s.listed ? 'checked' : ''} /> Every stock and ETF listed on a US exchange</label>
+            <span class="field__hint">Read daily from Nasdaq's symbol directory — about ten thousand symbols. Off, the archive collects only the app's own symbols, the extras and what you add.</span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="archive-extras">Extras</label>
+            <input class="input input--mono" id="archive-extras" name="extras" value="${esc((s.extras ?? []).join(', '))}" />
+            <span class="field__hint">Collected alongside the lists: crypto, indices, anything no US exchange lists.</span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="archive-spacing">Yahoo request spacing (ms)</label>
+            <input class="input" id="archive-spacing" name="spacingMs" type="number" min="250" step="250" value="${esc(s.spacingMs)}" />
+            <span class="field__hint">2000 is 1,800 requests an hour — a steady trickle under Yahoo's unpublished limit. A 429 pauses on its own; lower this only if yours never sees one.</span>
+          </div>
+          <div class="field">
+            <label class="field__label" for="archive-free">Pause below (GB free)</label>
+            <input class="input" id="archive-free" name="minFreeGb" type="number" min="0" step="1" value="${esc(s.minFreeGb)}" />
+            <span class="field__hint">Collection pauses before the drive fills, and nothing is ever deleted to make room. 0 never pauses.</span>
+          </div>
+        </div>
+
+        <h3 class="card__subtitle">Polygon</h3>
+        <p class="field__hint" style="margin:0 0 0.7rem">A second source for history Yahoo doesn't keep: minute bars going back years. It only fills gaps — days already held are skipped without a request — and its bars never overwrite Yahoo's unless you ask on a symbol's page. The free tier reaches two years at five requests a minute; a paid plan, further and faster.</p>
+        <div class="form-grid">
+          <div class="field">
+            <label class="field__label" for="polygon-key">API key</label>
+            <input class="input input--mono" id="polygon-key" name="polygonKey" type="password" autocomplete="off" spellcheck="false"
+                   placeholder="${s.polygonKeySet ? 'stored — type to replace' : 'none — Polygon is off'}" />
+            ${s.polygonKeySet ? '<label class="checkbox"><input type="checkbox" name="forgetPolygonKey" /> Forget the stored key</label>' : ''}
+          </div>
+          <div class="field">
+            <label class="field__label" for="polygon-years">History on your plan (years)</label>
+            <input class="input" id="polygon-years" name="polygonYears" type="number" min="1" max="30" value="${esc(s.polygonYears)}" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="polygon-rate">Requests a minute on your plan</label>
+            <input class="input" id="polygon-rate" name="polygonPerMinute" type="number" min="1" value="${esc(s.polygonPerMinute)}" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="polygon-url">API URL</label>
+            <input class="input input--mono" id="polygon-url" name="polygonBaseUrl" value="${esc(s.polygonBaseUrl)}" placeholder="https://api.polygon.io" />
+          </div>
+        </div>
+        <div class="form-actions"><button class="btn btn--primary" type="submit">Save</button></div>
+      </div>
+    </form>`;
+}
+
+/* A symbol's own page: what the archive holds for it, month by month, and
+ * the controls that act on one symbol. */
+function renderArchiveSymbol() {
+  const a = state.archive;
+  const symbol = routeArg().toUpperCase();
+  const d = a.detail;
+  const back = '<a class="btn btn--sm btn--ghost" href="#/data">← All symbols</a>';
+  if (a.view.state !== 'open') {
+    return `<div class="page-head"><div><h1>${esc(symbol)}</h1></div>${back}</div>${archiveBanner(a.view)}`;
+  }
+  if (!d || d.error) {
+    return `<div class="page-head"><div><h1>${esc(symbol)}</h1></div>${back}</div>
+      <div class="empty"><strong>${d?.error ? esc(d.error) : 'Loading…'}</strong></div>`;
+  }
+  const s = d.symbol;
+  const sources = a.view.sources ?? ['yahoo'];
+  const today = isoDay(new Date());
+  return `
+    <div class="page-head">
+      <div>
+        <h1>${esc(s.symbol)}</h1>
+        <p>${esc(s.name || '')}${s.exchange ? ` · ${esc(s.exchange)}` : ''} ${symbolChips(s)}</p>
+      </div>
+      ${back}
+    </div>
+
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">Chart</h2></div>
+      <div class="card__body">
+        <div class="presets">
+          ${ARCHIVE_INTERVALS.map((i) => `<button class="btn btn--sm ${a.chart.interval === i.key ? 'btn--outline btn--active' : 'btn--ghost'}"
+             type="button" data-action="archive-chart" data-interval="${i.key}">${esc(i.label)}</button>`).join('')}
+          <span class="field__hint">·</span>
+          ${(CHART_RANGES[a.chart.interval] ?? []).map(([k]) => `<button class="btn btn--sm ${a.chart.range === k ? 'btn--outline btn--active' : 'btn--ghost'}"
+             type="button" data-action="archive-range" data-range="${k}">${esc(k)}</button>`).join('')}
+        </div>
+        ${candleChart(a.bars)}
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">Coverage</h2>
+        <span class="card__meta">${count(d.splits)} splits · ${count(d.dividends)} dividends</span></div>
+      <div class="card__body">
+        ${ARCHIVE_INTERVALS.map((i) => coverageGrid(i, d.timelines?.[i.key] ?? [])).join('')}
+        <p class="field__hint">One square a month, darker the more trading days it holds. Hover for the bars and where they came from.</p>
+        ${cursorTable(d.cursors)}
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">Actions</h2></div>
+      <div class="card__body">
+        <div class="form-actions">
+          <button class="btn btn--outline" type="button" data-action="archive-flag" data-symbol="${esc(s.symbol)}" data-flag="priority" data-value="${!s.marked}">
+            ${s.marked ? 'Stop putting it first' : 'Put it first in line'}</button>
+          <button class="btn ${s.excluded ? 'btn--primary' : 'btn--danger'}" type="button" data-action="archive-flag" data-symbol="${esc(s.symbol)}" data-flag="excluded" data-value="${!s.excluded}">
+            ${s.excluded ? 'Collect it again' : 'Stop collecting it'}</button>
+          ${(s.lists ?? []).includes('user') ? `<button class="btn btn--ghost" type="button" data-action="archive-flag" data-symbol="${esc(s.symbol)}" data-flag="added" data-value="false">Remove from my additions</button>` : ''}
+          <button class="btn btn--ghost" type="button" data-action="archive-reset" data-symbol="${esc(s.symbol)}">Walk it again</button>
+        </div>
+        <p class="field__hint">Nothing here deletes bars. Stopping keeps its history; walking it again has every source re-check the whole series — skipping what is held — which is how a newly added source looks at a symbol that was already finished.</p>
+
+        <h3 class="card__subtitle">Fetch a range now</h3>
+        <form class="form-grid" id="archive-fetch" data-symbol="${esc(s.symbol)}" autocomplete="off">
+          <div class="field"><label class="field__label" for="fetch-interval">Interval</label>
+            <select class="select" id="fetch-interval" name="interval">${ARCHIVE_INTERVALS.map((i) => `<option value="${i.key}">${esc(i.label)}</option>`).join('')}</select></div>
+          <div class="field"><label class="field__label" for="fetch-source">Source</label>
+            <select class="select" id="fetch-source" name="source">${sources.map((x) => `<option>${esc(x)}</option>`).join('')}</select></div>
+          <div class="field"><label class="field__label" for="fetch-from">From</label>
+            <input class="input" id="fetch-from" name="from" type="date" required max="${today}" /></div>
+          <div class="field"><label class="field__label" for="fetch-to">To</label>
+            <input class="input" id="fetch-to" name="to" type="date" required max="${today}" value="${today}" /></div>
+          <div class="field"><span class="field__label">Existing bars</span>
+            <label class="checkbox"><input type="checkbox" name="replace" /> Replace what's there</label>
+            <span class="field__hint">Off fills only gaps.</span></div>
+          <div class="field field--actions"><button class="btn btn--primary" type="submit">Fetch</button></div>
+        </form>
+      </div>
+    </section>`;
+}
+
+function coverageGrid(interval, spans) {
+  if (!spans.length) {
+    return `<div class="cov"><div class="cov__label">${esc(interval.label)}</div><div class="field__hint">Nothing held.</div></div>`;
+  }
+  const byMonth = new Map(spans.map((s) => [s.month, s]));
+  const first = Number(spans[0].month.slice(0, 4));
+  const last = new Date().getFullYear();
+  const years = [];
+  for (let y = last; y >= first; y--) years.push(y);
+  // Twenty-odd trading days make a full month; a partial one fades.
+  const cells = (y) => Array.from({ length: 12 }, (_, m) => {
+    const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+    const s = byMonth.get(key);
+    if (!s) return `<span class="cov__cell" title="${key}: nothing"></span>`;
+    const level = Math.min(1, s.days / 20);
+    const paid = (s.sources ?? []).some((x) => x !== 'yahoo');
+    return `<span class="cov__cell cov__cell--on${paid ? ' cov__cell--alt' : ''}" style="--level:${level.toFixed(2)}"
+      title="${key}: ${count(s.days)} days, ${count(s.bars)} bars · ${esc((s.sources ?? []).join(', '))}"></span>`;
+  }).join('');
+  const total = spans.reduce((n, s) => n + s.bars, 0);
+  return `
+    <details class="cov" ${years.length <= 6 ? 'open' : ''}>
+      <summary class="cov__label">${esc(interval.label)} <span class="field__hint">${count(total)} bars · ${esc(spans[0].month)} to ${esc(spans[spans.length - 1].month)}</span></summary>
+      <div class="cov__grid">${years.map((y) => `<span class="cov__year">${y}</span>${cells(y)}`).join('')}</div>
+    </details>`;
+}
+
+function cursorTable(cursors) {
+  if (!cursors?.length) return '';
+  const order = Object.fromEntries(ARCHIVE_INTERVALS.map((i, n) => [i.key, n]));
+  const rows = [...cursors].sort((a, b) => order[a.interval] - order[b.interval] || a.source.localeCompare(b.source)).map((c) => `
+    <tr><th scope="row">${esc(c.interval)}</th><td>${esc(c.source)}</td>
+      <td>${when(c.oldest)}</td><td>${when(c.newest, { time: true })}</td>
+      <td>${c.complete ? '<span class="chip chip--ok">complete</span>' : '<span class="chip">walking back</span>'}</td>
+      <td class="wrap">${c.failures ? `<span class="chip chip--error">${c.failures} failed</span> ${esc(c.lastError)} — next try ${when(c.nextAttempt, { time: true })}` : ''}</td></tr>`).join('');
+  return `
+    <h3 class="card__subtitle">Sources</h3>
+    <div class="table-scroll"><table class="table">
+      <thead><tr><th>Interval</th><th>Source</th><th>Back to</th><th>Up to</th><th>Walk</th><th>Problems</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+}
+
+/** An OHLC chart. Candles while there is room for them; past a few hundred,
+ *  a close line, because a candle a pixel wide is a vertical smear. */
+function candleChart(res) {
+  if (!res) return '<div class="empty">Loading…</div>';
+  if (res.error) return `<div class="banner banner--warn">${esc(res.error)}</div>`;
+  const bars = res.bars ?? [];
+  if (!bars.length) return '<div class="empty"><strong>No bars held for this window.</strong>Try a longer one, or another interval.</div>';
+  const W = 720, H = 260, pad = { l: 8, r: 58, t: 10, b: 22 };
+  let lo = Infinity, hi = -Infinity;
+  for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); }
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const x = (i) => pad.l + ((i + 0.5) / bars.length) * (W - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const step = (W - pad.l - pad.r) / bars.length;
+  let marks;
+  if (bars.length <= 400) {
+    const body = Math.max(1, step * 0.65);
+    marks = bars.map((b, i) => {
+      const up = b.c >= b.o;
+      const top = y(Math.max(b.o, b.c)), bottom = y(Math.min(b.o, b.c));
+      return `<g class="${up ? 'candle--up' : 'candle--down'}"><line x1="${x(i)}" x2="${x(i)}" y1="${y(b.h)}" y2="${y(b.l)}" />
+        <rect x="${x(i) - body / 2}" y="${top}" width="${body}" height="${Math.max(1, bottom - top)}" /></g>`;
+    }).join('');
+  } else {
+    marks = `<polyline class="candle-line" points="${bars.map((b, i) => `${x(i).toFixed(1)},${y(b.c).toFixed(1)}`).join(' ')}" />`;
+  }
+  const label = (t) => {
+    const d = new Date(t * 1000);
+    return state.archive.chart.interval === '1d' ? d.toLocaleDateString() : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+  const last = bars[bars.length - 1];
+  return `
+    <svg class="candles" viewBox="0 0 ${W} ${H}" role="img" aria-label="${count(bars.length)} bars from ${esc(label(bars[0].t))} to ${esc(label(last.t))}, closing at ${last.c}">
+      <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(hi)}" y2="${y(hi)}" />
+      <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(lo)}" y2="${y(lo)}" />
+      ${marks}
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(hi) + 4}">${hi.toPrecision(5)}</text>
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(lo) + 4}">${lo.toPrecision(5)}</text>
+      <text class="candles__tick" x="${pad.l}" y="${H - 6}">${esc(label(bars[0].t))}</text>
+      <text class="candles__tick" x="${W - pad.r}" y="${H - 6}" text-anchor="end">${esc(label(last.t))}</text>
+    </svg>
+    <p class="field__hint">${count(bars.length)} bars. Prices are split-adjusted; dividends are not taken out.</p>`;
+}
+
+/* The Data page's forms and buttons. Separate listeners from the rest of the
+ * view's, keyed on ids and actions only this page renders. */
+$('#view').addEventListener('submit', (event) => {
+  const form = event.target;
+  const a = state.archive;
+  if (form.id === 'archive-search') {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form).entries());
+    a.query = { q: values.q ?? '', filter: values.filter ?? 'active', kind: values.kind ?? '' };
+    a.offset = 0;
+    act(async () => {});
+    return;
+  }
+  if (form.id === 'archive-add') {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const symbol = (new FormData(form).get('symbol') || '').trim().toUpperCase();
+    if (!symbol) return;
+    act(async () => {
+      await post('/archive/symbols', { symbol });
+      clearDraft('archive-add');
+      location.hash = `#/data/${encodeURIComponent(symbol)}`;
+    }, { success: `${symbol} added — it goes first in line` });
+    return;
+  }
+  if (form.id === 'archive-folder') {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const mode = event.submitter?.value || 'inspect';
+    const path = (new FormData(form).get('path') || '').trim();
+    if (mode === 'inspect') {
+      act(async () => {
+        a.folder = await api(`/archive/folder?path=${encodeURIComponent(path)}`);
+      });
+      return;
+    }
+    if (mode === 'detach' && !confirm('Stop using this folder? Its files stay where they are.')) return;
+    if (mode === 'move' && !confirm(`Copy the whole archive into ${path} and switch to it? Collection pauses while it copies.`)) return;
+    act(async () => {
+      await post('/archive/folder', { path, mode });
+      a.folder = null;
+      clearDraft('archive-folder');
+    }, { success: { use: 'Archive folder set', move: 'Moving the archive…', detach: 'Folder forgotten' }[mode] });
+    return;
+  }
+  if (form.id === 'archive-form') {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form).entries());
+    const payload = {
+      paused: form.elements.paused.checked,
+      listed: form.elements.listed.checked,
+      intervals: ARCHIVE_INTERVALS.filter((i) => form.elements[`interval_${i.key}`].checked).map((i) => i.key),
+      extras: symbolList(values.extras),
+      spacingMs: Number(values.spacingMs),
+      minFreeGb: Number(values.minFreeGb),
+      polygonYears: Number(values.polygonYears),
+      polygonPerMinute: Number(values.polygonPerMinute),
+      polygonBaseUrl: values.polygonBaseUrl ?? '',
+    };
+    // Write-only, like the logo key: an empty box leaves it alone.
+    if (form.elements.forgetPolygonKey?.checked) payload.polygonKey = '';
+    else if (values.polygonKey) payload.polygonKey = values.polygonKey;
+    act(async () => {
+      await patch('/archive/settings', payload);
+      clearDraft('archive-form');
+    }, { success: 'Collection settings saved' });
+    return;
+  }
+  if (form.id === 'archive-fetch') {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form).entries());
+    const symbol = form.dataset.symbol;
+    act(async () => {
+      await post(`/archive/symbols/${encodeURIComponent(symbol)}/fetch`, {
+        interval: values.interval, source: values.source, from: values.from, to: values.to,
+        replace: form.elements.replace.checked,
+      });
+      clearDraft('archive-fetch');
+    }, { success: 'Queued — it runs ahead of the schedule' });
+  }
+}, true);
+
+$('#view').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-action^="archive-"]');
+  if (!button) return;
+  const a = state.archive;
+  const { action, symbol } = button.dataset;
+  switch (action) {
+    case 'archive-page':
+      a.offset = Number(button.dataset.offset) || 0;
+      act(async () => {});
+      break;
+    case 'archive-chart':
+      a.chart = { interval: button.dataset.interval, range: CHART_RANGES[button.dataset.interval][0][0] };
+      a.bars = null;
+      act(async () => {});
+      break;
+    case 'archive-range':
+      a.chart = { ...a.chart, range: button.dataset.range };
+      a.bars = null;
+      act(async () => {});
+      break;
+    case 'archive-flag': {
+      const flag = button.dataset.flag;
+      const value = button.dataset.value === 'true';
+      if (flag === 'excluded' && value && !confirm(`Stop collecting ${symbol}? What is stored is kept.`)) return;
+      act(() => patch(`/archive/symbols/${encodeURIComponent(symbol)}`, { [flag]: value }), { success: 'Saved' });
+      break;
+    }
+    case 'archive-reset':
+      act(() => post(`/archive/symbols/${encodeURIComponent(symbol)}/reset`, {}), {
+        success: `Every source will walk ${symbol} again`,
+      });
+      break;
+  }
+});
+
 function renderSettings(data) {
   const s = data.settings;
   const min = data.meta.minRefreshSeconds ?? 30;
@@ -4048,4 +4752,8 @@ window.addEventListener('hashchange', () => {
 // first paint has to pick the section up too.
 state.pendingScroll = movedSection();
 refreshView();
-setInterval(loadState, POLL_MS);
+// The Data page reads its own endpoint on the same beat as the state poll.
+setInterval(async () => {
+  if (route() === 'data') await loadArchive();
+  loadState();
+}, POLL_MS);

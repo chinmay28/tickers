@@ -37,7 +37,10 @@ go run ./server/cmd/tickers serve --web-dist server/internal/web/assets
 provider at any host serving `/v8/finance/chart/{symbol}` in Yahoo's shape. A
 throwaway stub server plus `--db /tmp/x.sqlite` gives a full working instance
 with deterministic prices, which is the only way to see the UI's real states
-(changes, sparklines, error rows) end to end.
+(changes, sparklines, error rows) end to end. The archive is exercised the same
+way: the stub also has to answer `period1`/`period2` windows at `1d/1h/5m/1m`,
+`--universe-url` points the exchange lists at it too (`nasdaqlisted.txt`,
+`otherlisted.txt`), and the Data page's folder has to exist before it's chosen.
 
 CI (`.github/workflows/ci.yml`) is exactly: `gofmt -l server`, `go vet`,
 `go test -race`, `scripts/build.sh`, `bash -n scripts/*.sh`, arm64 cross-compile.
@@ -86,11 +89,13 @@ returns everything the client renders in one round trip.
 
 **`internal/expr`** is the formula language behind composites (see below).
 
-**`internal/archive` / `internal/collector` / `internal/universe`** are the
-market-data archive: a *second* SQLite file (`--archive`), filled by a paced
-loop over every listed US symbol. Same split as above: `archive` validates and
-persists, `collector` decides. Its pure parts (`next`, `advance`, `pacer`) are
-tested without a clock or a network.
+**`internal/archive` / `collector` / `archiver` / `universe`** are the
+market-data archive: a *folder* of SQLite files (catalog + one bar file per
+interval per year), chosen on the Data page, filled by a paced multi-source
+loop. Same split as above: `archive` validates and persists, `collector`
+decides, `archiver` is the glue that opens it wherever the settings say and
+survives its drive being unplugged. The collector's pure parts (`next`,
+`advance`, `missing`, `pacer`) are tested without a clock or a network.
 
 ### Things that require reading several files to discover
 
@@ -147,12 +152,22 @@ tested without a clock or a network.
   clearing a field reveals the flag again.
 - **`origin` is provenance only.** Nothing reads it at runtime.
 - **The archive's bars are split-adjusted as of fetch time,** because that is
-  all Yahoo serves. `archive.Record` rescales stored bars when a response first
-  reports a split, *before* writing that response's bars. Reorder those steps
-  and the fresh bars get adjusted twice.
-- **Archive coverage records the window asked for, not the bars returned,**
-  so weekends count as covered. A backfill stops at the provider's first
-  trade date or its horizon, never because a stretch was quiet.
+  all Yahoo serves, and `quotes.Archivist` makes every source match it.
+  `archive.Record` rescales stored bars when a response first reports a split,
+  *before* writing that response's bars. Reorder those steps and the fresh
+  bars get adjusted twice.
+- **Archive cursors record the window asked for, not the bars returned,** per
+  symbol × interval × source, so weekends count as covered. A walk stops at
+  the first trade date or the source's horizon, never because a stretch was
+  quiet.
+- **A second source only fills gaps.** The `days` ledger says which days are
+  held; a bar is overwritten only by its own source or on an explicit replace.
+- **The archive never creates its folder** and refuses one without
+  `tickers-archive.json`. That is what keeps an unplugged drive's empty mount
+  point from being filled. Don't "helpfully" MkdirAll the root.
+- **Archive settings are `store.ArchiveConfig`, not fields on `Config`,**
+  because `Config` is sent to every browser in `/api/state` and this carries a
+  key.
 
 ### The web client
 

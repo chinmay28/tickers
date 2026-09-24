@@ -1652,7 +1652,139 @@ thead .sectors__col {
  * Responsive — the header nav collapses into the bottom tab bar, and the
  * quote row drops its drag handle (touch reordering uses the ↑↓ buttons).
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * Data — the market-data archive
+ * ------------------------------------------------------------------ */
+.table td.num,
+.table th.num {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.archive-sym {
+  font-family: var(--mono);
+  font-weight: 650;
+  color: var(--primary);
+  text-decoration: none;
+}
+.archive-sym:hover {
+  text-decoration: underline;
+}
+/* The symbol browser's search and add rows: one line on a desktop, wrapping
+   field by field on a phone rather than into a grid built for another card. */
+.archive-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+.archive-search .input {
+  flex: 1 1 12rem;
+}
+.archive-search .select {
+  flex: 0 1 11rem;
+}
+
+/* How full the archive's disk is. A bar, not a pie: it sits under one
+   number in a stat tile and only has to say "nearly full" at a glance. */
+.meter {
+  height: 5px;
+  margin-top: 0.4rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.meter > span {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+}
+.progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--primary);
+}
+
+/* The coverage heatmap: a row per year, a square per month. Twelve fixed
+   columns rather than a flowing strip, so a missing March lines up under
+   every other March and a gap reads as a gap. */
+.cov {
+  margin-bottom: 0.9rem;
+}
+.cov__label {
+  font-weight: 650;
+  cursor: pointer;
+  margin-bottom: 0.4rem;
+}
+.cov__grid {
+  display: grid;
+  grid-template-columns: 3.2rem repeat(12, minmax(0, 1.4rem));
+  gap: 3px;
+  align-items: center;
+}
+.cov__year {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.cov__cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  background: var(--surface-2);
+}
+/* Opacity carries how much of the month is held; the floor keeps a single
+   day visible against the empty squares around it. */
+.cov__cell--on {
+  background: color-mix(in srgb, var(--primary) calc(25% + var(--level) * 75%), var(--surface-2));
+}
+/* A month holding bars from a source other than Yahoo — a paid backfill. */
+.cov__cell--alt {
+  background: color-mix(in srgb, var(--portfolio) calc(25% + var(--level) * 75%), var(--surface-2));
+}
+
+.candles {
+  width: 100%;
+  height: auto;
+  display: block;
+  margin: 0.6rem 0 0.2rem;
+}
+.candles line,
+.candles rect {
+  shape-rendering: crispEdges;
+}
+.candle--up line,
+.candle--up rect {
+  stroke: var(--up);
+  fill: var(--up);
+}
+.candle--down line,
+.candle--down rect {
+  stroke: var(--down);
+  fill: var(--down);
+}
+.candle-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.candles__grid {
+  stroke: var(--border);
+  stroke-dasharray: 3 4;
+}
+.candles__tick {
+  fill: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
 @media (max-width: 720px) {
+  /* Columns a phone can do without: the symbol browser's exchange, which
+     leaves the name room to be read. */
+  .wide-only {
+    display: none;
+  }
   .nav .btn--ghost {
     display: none;
   }
