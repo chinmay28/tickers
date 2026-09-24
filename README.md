@@ -47,8 +47,9 @@ tickers/
         ├── quotes/             #   quote providers (Yahoo Finance)
         ├── publish/            #   downstream publishing + the legacy payload
         ├── engine/             #   the scheduled refresh + publish cycle
-        ├── archive/            #   the market-data archive (its own SQLite file)
-        ├── collector/          #   fills the archive, paced under Yahoo's limits
+        ├── archive/            #   the market-data archive: a folder of SQLite files
+        ├── collector/          #   fills it from each source, paced to its limits
+        ├── archiver/           #   keeps it open wherever the settings say it is
         ├── universe/           #   every symbol listed on a US exchange
         ├── api/                #   the REST layer
         └── web/assets/         #   the web client, embedded at build time
@@ -462,6 +463,8 @@ The flags below are what has to be decided before the process starts.
 | `--quote-base-url` | `TICKERS_QUOTE_BASE_URL` | Yahoo's | quote API root — *overridable in the GUI* |
 | `--quote-timeout` | `TICKERS_QUOTE_TIMEOUT` | `20` | seconds per quote request — *overridable in the GUI* |
 | `--quote-user-agent` | `TICKERS_QUOTE_USER_AGENT` | a browser string | *overridable in the GUI* |
+| `--archive` | `TICKERS_ARCHIVE` | — | market-data archive folder — *overridden by the one chosen on the Data page* |
+| `--universe-url` | `TICKERS_UNIVERSE_URL` | Nasdaq Trader | where the exchange symbol lists are read |
 
 For the first five: **flag > env > default**.
 
@@ -486,76 +489,124 @@ non-zero if every symbol failed.
 
 ## The market-data archive
 
-Tickers can also build a long-term archive of OHLCV bars for the whole listed
-US market, plus a few extras, for analysis: candles, moving averages,
-backtests. It is **off unless you give it a file**, and it is a separate SQLite
-file from the watchlist's database.
+Tickers can build a long-term archive of OHLCV bars for the whole listed US
+market, plus anything else you add, for analysis: candles, moving averages,
+backtests. The archive is a folder you choose, typically on an external drive,
+separate from the watchlist's database. It is managed on the **Data** page.
+
+**Setting it up.** Mount the drive and create a folder on it. On the Data page,
+enter the folder's path, press **Check folder** to see its free space, then
+press **Start a new archive here**. Collection starts within seconds.
+
+- **The folder must already exist.** The app never creates it. An unplugged
+  drive leaves its mount point behind as an empty folder on the SD card, and
+  the app must never write there.
+- **If the drive goes missing, collection pauses.** The Data page says so, and
+  collection resumes by itself within half a minute of the drive coming back.
+- **Everything else keeps working meanwhile.** The watchlist, the performance
+  sheet and backtests fall back to Yahoo for as long as the archive is gone.
+
+**What it collects.** It collects every stock and ETF listed on Nasdaq, NYSE,
+NYSE American, NYSE Arca, Cboe BZX and IEX: roughly ten thousand symbols, read
+daily from Nasdaq Trader's symbol directory. It also collects bitcoin, ether
+and the major indices, and everything the app itself uses. The app's own
+symbols (watchlist rows, composite legs, portfolio holdings) always go first in
+line. Symbols you add on the Data page do too.
+
+| Width | From Yahoo | Kept current |
+|---|---|---|
+| `1d` | back to the listing date | daily |
+| `1m` | the 30 days Yahoo keeps | daily (every 15 minutes for the app's symbols) |
+| `5m` | the 60 days Yahoo keeps, once | built from `1m` from then on |
+| `1h` | the two years Yahoo keeps, once | built from `1m` from then on |
+
+Coarser intraday bars are built from finer ones when they are read, so minute
+bars are the only intraday series kept current. Intraday history older than
+Yahoo keeps can only come from a paid source.
+
+**Adding a paid source.** Paste a Polygon.io API key on the Data page and give
+your plan's history (in years) and its per-minute request limit. Polygon now
+also goes by Massive.
+
+- **It only fills gaps.** It walks each series backward and skips the days the
+  archive already holds, at no request cost. It then fetches only the years
+  Yahoo never had.
+- **Every bar records its source.** A source can revise its own bars, but never
+  overwrites another source's unless you ask.
+- **To trust it over Yahoo for a range:** open the symbol's page and use
+  **Fetch a range now** with *Replace what's there* ticked.
+- **Its bars match Yahoo's.** They are split-adjusted and cover the regular
+  session only (9:30–16:00 New York).
+- **The free tier is enough to try it.** Two years of history at five
+  requests a minute.
+
+**How fast.** Yahoo is asked once every two seconds, about 1,800 times an hour
+(adjustable). A 429 pauses that source, starting at a minute and doubling to an
+hour. Each source is paced separately. Keeping ten thousand symbols current
+takes about half of each day's requests, and the backfill uses the other half.
+The order is:
+
+1. anything close to losing bars off the edge of Yahoo's history;
+2. the app's own symbols;
+3. keeping every series current;
+4. first fetches;
+5. digging history out breadth-first, so every symbol gets its second decade
+   before any gets its third.
+
+**The Data page** has four parts:
+
+- **Overview:** how much is held, per width and in total, disk use and
+  collection rate.
+- **Folder:** choose one, or move the archive between folders. A move copies
+  everything, then switches.
+- **Settings:** pause or resume, choose widths, and set extras, pacing, the
+  free-space floor and Polygon.
+- **Symbols:** a searchable browser over every symbol. Each symbol has a page
+  with a candle chart, a month-by-month coverage heatmap per width, each
+  source's progress, and actions: put it first, stop collecting it, walk it
+  again, or fetch a range from a chosen source.
+
+**What is stored.** Prices are as the source prints them: split-adjusted, not
+dividend-adjusted. Splits and dividends are stored alongside them, and a new
+split rescales the bars already stored. Delisted symbols stop being fetched,
+but their history is kept.
+
+**How big.** About 60 bytes a bar. One-minute bars for the whole market are
+around 60 GB a year; daily history for the whole market is a few GB once.
+Collection pauses before the drive's free space falls below a floor (10 GB by
+default). Nothing is ever deleted to make room.
+
+**What reads it.** The performance sheet and backtests read a symbol's daily
+series from the archive, plus one small request for today, once some source has
+walked it back to its listing. Before that they read from Yahoo, as they always
+have. Sparklines use the archive's minute bars, followed by the refresh loop's
+own newest readings.
+
+From the command line:
 
 ```bash
-tickers serve --db ./data/tickers.sqlite --archive ./data/archive.sqlite   # alongside the app
-tickers collect --archive ./data/archive.sqlite                            # or on its own
-tickers coverage --archive ./data/archive.sqlite                           # how far it has got
+tickers serve   --archive /mnt/usb/tickers-archive   # a folder to use until one is chosen on the Data page
+tickers collect --db ./data/tickers.sqlite           # the collector alone, with the Data page's settings
+tickers coverage --db ./data/tickers.sqlite          # how far it has got
 ```
 
-**What it collects.** Every stock and ETF listed on Nasdaq, NYSE, NYSE
-American, NYSE Arca, Cboe BZX and IEX. The list is read daily from Nasdaq
-Trader's symbol directory, which puts it at roughly ten thousand symbols. The
-extras are `BTC-USD`, `ETH-USD`, `^GSPC`, `^DJI`, `^IXIC`, `^RUT` and `^VIX` by
-default. Each symbol is collected at three widths:
+The archive is plain SQLite:
 
-| Width | How far back | Kept up to date |
-|---|---|---|
-| `1d` | to the listing date, a decade per request | daily |
-| `1h` | two years (all Yahoo keeps) | weekly |
-| `5m` | 59 days (all Yahoo keeps) | daily |
+- `catalog.sqlite` holds the symbols (`symbols`), splits and dividends.
+- Each bar file has a `bars` table. Daily bars are in `bars/1d/all.sqlite`,
+  and intraday bars in one file per width per year, such as
+  `bars/1m/2026.sqlite`.
+- Daily bars are keyed by date (midnight UTC); intraday bars by the instant
+  they opened.
 
-Intraday history cannot be backfilled past what Yahoo keeps. The archive
-starts from what is available today and grows forward from there. Daily
-history goes all the way back.
-
-**How fast.** One request every two seconds (`--archive-spacing`), about 1,800
-an hour. That is a steady trickle under Yahoo's unpublished limits. A 429 pauses
-the collector for a minute, doubling to an hour, until Yahoo accepts requests
-again. Keeping ten thousand symbols current takes about half of each day's
-requests; the backfill uses the other half. Expect the first full pass to take
-**a few days**:
-
-1. every series is caught up to now before anything older is fetched;
-2. first fetches follow, in `--archive-intervals` order (daily first by default);
-3. then daily history is dug out breadth-first, so every symbol gets its second
-   decade before any symbol gets its third.
-
-**What is stored.** Prices are as Yahoo prints them: split-adjusted, not
-dividend-adjusted. Splits and dividends are stored alongside so an adjusted
-series can be derived. When a new split appears, the bars already stored are
-rescaled to match. Symbols that are delisted are retired, not deleted, so their
-history stays available.
-
-**How big.** About 60 bytes a bar. The first pass is around 6 GB. After that,
-growth is around 13 GB a year, almost all of it five-minute bars. Put the
-archive on an SSD rather than an SD card. `--archive-intervals 1d,1h` cuts the
-growth to about 1 GB a year.
-
-| Flag | Env fallback | Default | Meaning |
-|---|---|---|---|
-| `--archive` | `TICKERS_ARCHIVE` | off for `serve`, `./data/archive.sqlite` for `collect` | archive file path |
-| `--archive-intervals` | `TICKERS_ARCHIVE_INTERVALS` | `1d,5m,1h` | widths to collect |
-| `--archive-extras` | `TICKERS_ARCHIVE_EXTRAS` | crypto and indices, above | symbols besides the exchange lists |
-| `--archive-listed` | `TICKERS_ARCHIVE_LISTED` | `true` | collect every listed US symbol |
-| `--archive-spacing` | `TICKERS_ARCHIVE_SPACING` | `2s` | gap between requests (floor `250ms`) |
-| `--universe-url` | `TICKERS_UNIVERSE_URL` | Nasdaq Trader | where the symbol lists are read |
-
-The archive is plain SQLite. Read it from anything:
+A finished year's file never changes again, so it only needs backing up once.
 
 ```sql
+ATTACH 'catalog.sqlite' AS c;
 SELECT datetime(b.ts, 'unixepoch') AS day, open, high, low, close, volume
-  FROM bars b JOIN symbols s ON s.id = b.symbol_id
- WHERE s.symbol = 'AAPL' AND b.interval = '1d'
- ORDER BY b.ts;
+  FROM bars b JOIN c.symbols s ON s.id = b.symbol_id
+ WHERE s.symbol = 'AAPL' ORDER BY b.ts;          -- run against bars/1d/all.sqlite
 ```
-
-Daily bars are keyed by date (midnight UTC). Intraday bars are keyed by the
-instant the bar opened.
 
 ## Versioning
 

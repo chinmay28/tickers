@@ -55,9 +55,11 @@ database; `quotes`, `publish` and `universe` are the only packages that make
 outbound HTTP calls; `api` contains no domain logic at all — it decodes, chooses
 a status code, and encodes.
 
-The market-data archive is a second, independent column beside that stack:
-`collector` → {`quotes`, `universe`} → `archive`. It shares the quote provider
-and nothing else. See [The market-data archive](#the-market-data-archive).
+The market-data archive is a second column beside that stack:
+`archiver` → `collector` → {`quotes`, `universe`} → `archive`. It shares the
+quote provider with the refresh loop, reads its settings from `store`, and is
+read by `engine` for history; see below for why none of that runs the other
+way. See [The market-data archive](#the-market-data-archive).
 
 ### Why Go, and why one binary
 
@@ -917,7 +919,18 @@ The client polls `/api/state` every 10s, deliberately shorter than the server's
 30s minimum refresh interval, so a cycle's results never sit invisible for a
 whole poll.
 
-### Four routes, and one that used to be five
+### Five routes, and one that used to be a sixth
+
+The fifth is **Data**, the market-data archive's page, with a subject in its
+second segment like Funds (`#/data/AAPL`). It reads its own endpoint,
+`/api/archive`, on the same ten-second beat as the state poll, rather than
+riding in `/api/state`: every open tab polls state, and none of them should
+pay for counting the archive. Its symbol browser pages on the server, because
+ten thousand rows is not a list to send whole. Its settings form keeps the
+interval checkboxes under distinct names (`interval_1m`), because the draft
+machinery stashes by field name and a checkbox group sharing one name would
+put back only the last box.
+
 
 Publishing is a section of Settings rather than a page of its own. Destinations,
 the payload they receive and the cycles that sent it are all answers to "is this
@@ -1251,139 +1264,278 @@ Escape or a tap ends it early. It matches CountRoster's, deliberately.
 ## The market-data archive
 
 The archive collects OHLCV bars for the whole listed US market, forward from
-now and backward as far as Yahoo will go, for analysis rather than display.
-Nothing in the app reads it yet; it exists so the data is there when something
-does, because intraday history that isn't collected when Yahoo still has it is
-gone for good.
+now and backward as far as each source goes. Intraday history that isn't
+collected while Yahoo still has it is gone, unless a paid feed is added later
+to backfill it. Both halves of that sentence shape the design: collect the
+finest bars continuously, and make every bar's source a first-class fact so a
+second source can fill in behind the first.
 
-### A second file, not more tables
+Five packages, each with one job:
 
-`archive` owns its own SQLite file, with its own append-only migrations under
-the same rules as the store's. Three reasons, all about sizes differing by six
-orders of magnitude:
+```
+                 ┌────────────┐   settings, app symbols
+ api ──────────► │  archiver  │ ◄──────────── store, engine
+ engine (reads)  └─────┬──────┘
+                       │ runs
+                 ┌─────▼──────┐   lists     ┌──────────┐
+                 │ collector  │ ──────────► │ universe │
+                 └──┬─────┬───┘             └──────────┘
+          bars from │     │ writes
+         ┌──────────▼┐   ┌▼─────────┐
+         │  quotes   │   │ archive  │   a folder of SQLite files
+         │ Yahoo,    │   └──────────┘
+         │ Polygon   │
+         └───────────┘
+```
 
-- The main database is kilobytes. The pre-upgrade snapshot copies it on every
-  upgrade, and that stays instant only while the gigabytes live elsewhere.
+`archive` validates and persists, and `collector` decides what to fetch; that
+is the store/engine split again. `archiver` is glue: it opens the archive
+wherever the settings say, runs the collector over it, and notices the drive
+going away. Nothing else in the app has to cope with an archive that is open
+one minute and on an unplugged drive the next.
+
+### A folder, not a file, and not more tables
+
+The main database is kilobytes and the archive grows by tens of gigabytes a
+year, so they live apart:
+
+- The pre-upgrade snapshot copies the main database on every upgrade, and that
+  stays instant only while the gigabytes live elsewhere.
 - `/api/health` pings the main database, and the upgrade rollback trusts that
-  ping. A full disk or a corrupt page in the archive must not roll back a
-  healthy binary.
-- The archive can be deleted, moved to another disk, or rebuilt without
-  touching a watchlist.
+  ping. An unplugged archive drive must never roll back a healthy binary.
+- The archive has to be able to live on another disk.
 
-It keeps the store's split of responsibilities: `archive` validates and
-persists, `collector` decides what to ask for.
+Inside the folder:
 
-### Rows built for a hundred million of them
+- `catalog.sqlite` holds everything that isn't a bar.
+- Daily bars are in `bars/1d/all.sqlite`.
+- Intraday bars get one file per width per year (`bars/1m/2026.sqlite`). A
+  finished year is a file that never changes again: it can be backed up once,
+  moved, or dropped without touching the rest.
 
-Times are unix seconds, not the store's RFC3339 text, and bars are keyed by a
-small integer symbol ID. `bars` is `WITHOUT ROWID` on
-`(symbol_id, interval, ts)`, so the primary key *is* the table: one symbol's
-series at one width is contiguous on disk and reading it is one range scan.
-That comes to about 60 bytes a bar, index included.
+A marker file, `tickers-archive.json`, is what makes a folder an archive:
 
-A daily bar's `ts` is its exchange date at midnight UTC, not the instant Yahoo
-stamps it with. That instant moves: the in-progress bar carries the last
-trade's time, the settled one carries the session's open. A key that moves
-would store the same day twice. An intraday bar keeps its instant, and the
-in-progress one is dropped rather than stored (`settled`). The next forward
-fetch overlaps it and reads it finished.
+- `Open` refuses a folder without the marker and never creates anything.
+- `Init` requires the folder to exist already.
 
-### What is collected, and how far back
+That is the whole defence against the classic Pi failure. An unplugged drive
+leaves an empty mount point, and a program that "helpfully" creates its data
+directory fills the SD card underneath it. `Inspect` also reports when a
+chosen folder is on the root filesystem, and the Data page warns about it.
 
-One `Policy` per width, from what Yahoo's chart endpoint serves. The limits
-are undocumented, so each is set a day inside the edge. A window straddling
-the edge is refused outright rather than truncated.
+### Rows built for a billion of them
 
-| Width | Horizon | One request | Forward every |
+- **Keys.** Times are unix seconds, not the store's RFC3339 text. Symbols are
+  a small integer ID.
+- **No interval column.** The interval is implied by the file.
+- **Source.** Every bar's source is a one-byte ID.
+- **Layout.** `bars` is `WITHOUT ROWID` on `(symbol_id, ts)`, so the primary
+  key *is* the table: one symbol's year is contiguous on disk, and reading it
+  is one range scan.
+
+That comes to about 60 bytes a bar with the index.
+
+A daily bar's `ts` is its exchange date at midnight UTC, not the instant the
+provider stamps it with. That instant moves: the in-progress bar carries the
+last trade's time, the settled one the session's open. A key that moves would
+store the same day twice.
+
+An intraday bar keeps its instant. The in-progress one is dropped rather than
+stored (`settled`), and the next forward fetch overlaps it and reads it
+finished.
+
+**The day ledger.** `days` has one row per symbol, intraday width and UTC day,
+holding the bar count and a bitmask of the sources the bars came from. It is
+maintained by `Record` in the same pass that writes the bars. Three things
+would otherwise have to scan the bar files:
+
+- a gap-filling source asking which days are already held;
+- the Data page's month-by-month coverage heatmap;
+- the bar counts on the overview.
+
+### Sources, and who wins a bar
+
+A `collector.Source` is a provider, a `Reach` per width (how far back it
+serves, how much one request may ask for), and its own pacing. There are two
+roles:
+
+- **The live source (Yahoo).** It keeps every series current and walks back
+  as far as it reaches.
+- **Every other source.** It only fills gaps. It walks each series backward,
+  consults the ledger and the symbol's own trading calendar (its daily bars),
+  and narrows each window to the days not held. A window already held in full
+  costs no request (`missing`).
+
+That is how a paid feed added a year from now backfills the years Yahoo never
+kept, without re-downloading the months Yahoo did.
+
+A conflicting bar is overwritten only by its own source, revising a bar it
+printed, or on an explicit replace from the symbol's page. The first source to
+store a bar keeps it until somebody decides otherwise, and the ledger's source
+mask shows who that was.
+
+`quotes.Archivist` is the contract that makes mixing possible. A source
+returns:
+
+- prices split-adjusted as of the moment asked, which is all Yahoo serves;
+- the splits in the window;
+- for US equities, regular-session bars only (Yahoo is asked without
+  pre/post; Polygon's extended hours are dropped by the adapter).
+
+Polygon is never asked for hourly bars: its hours start on the clock, so its
+9:00 bar is half pre-market. Hourly bars for the years it reaches are built
+from its minute bars instead.
+
+**Yahoo's reach.** The limits are undocumented, so each is set a day inside
+the edge; a window straddling the edge is refused outright.
+
+| Width | Horizon | One request | Forward |
 |---|---|---|---|
 | `1d` | none | ten years | 20 hours |
-| `1h` | 729 days | all of it | a week |
-| `5m` | 59 days | all of it | 20 hours |
+| `1m` | 29 days | 7 days | 20 hours (15 minutes for priority symbols) |
+| `5m` | 59 days | all of it | off while `1m` goes forward |
+| `1h` | 729 days | all of it | off while `1m` goes forward |
 
-Coverage is recorded per symbol and width as the *window asked for*
-(`oldest`, `newest`), not the bars that came back. A weekend has no bars and
-is still covered. A backfill is `complete` once it reaches the provider's first
-trade date, the horizon, or (with no first trade date to go by) an empty
-window.
+Coarser intraday series can be built from finer ones (`Archive.Bars`,
+`Resample`), so only the finest one is kept current. `5m` and `1h` become
+one-shot backfills of the stretch minute bars can't reach, and `reachFor`
+turns their forward pass back on if minute bars are switched off.
+
+`Resample` anchors each bucket to the day's first bar rather than to the
+clock. A US hour runs 9:30–10:30 the way every provider prints one, the anchor
+follows the session through daylight saving without a timezone database, and a
+crypto day starting at midnight gets clock-aligned buckets anyway. A daily bar
+is never built from intraday ones: it is the exchange's official session,
+which intraday bars only approximate.
+
+Cursors are per symbol, width and source, and they record the *window asked
+for* (`oldest`, `newest`), not the bars returned, so a weekend counts as
+covered. A walk is `complete` once it reaches the first trade date, the
+source's horizon, or (with no first trade date and a window actually fetched)
+an empty window. A window skipped because it was held says nothing about where
+history begins.
 
 ### The order things are fetched in
 
-`next` scans every series and takes the most urgent. The loop keeps the whole
-schedule in memory, about thirty thousand structs for the full market, so this
-costs microseconds and no queries:
+`next` scans every series of every source whose pacer is ready and takes the
+most urgent. The loop keeps the schedule in memory, a few tens of thousands of
+structs for the full market, so this costs microseconds and no queries.
 
-1. **At risk.** A series within a week of its horizon is about to lose bars
-   permanently.
-2. **Forward**, stalest first. Staying current costs about half the daily
-   budget, and it always comes before digging.
-3. **First fetches**, in the configured order of widths (daily first by
-   default).
-4. **Backfill**, shallowest first. The archive is always evenly deep: every
-   symbol gets its second decade before any symbol gets its third, so if it
-   stops halfway it is complete for no symbol but useful for all of them.
+1. **At risk.** A series within a quarter-horizon (at most a week) of losing
+   bars off the edge.
+2. **Priority symbols.** Everything the app uses (watchlist rows, composite
+   legs, portfolio holdings, synced from the main database each minute),
+   anything added by hand, and anything marked. Within them, the order below.
+3. **Forward**, stalest first.
+4. **First fetches**, in the configured order of widths.
+5. **Backfill**, shallowest first. Every symbol gets its second decade before
+   any symbol gets its third, so a half-finished archive is evenly deep.
 
-A failing series backs off an hour, doubling to a week, so a symbol Yahoo has
-never heard of costs one request a week.
+Requested jobs (a range from a chosen source, optionally replacing) run ahead
+of all of it, under the same pacer. They live in memory; a restart forgets a
+queued one, which costs a click and saves a table.
 
 ### Pacing
 
-There is no published limit to stay under, so the collector stays under the
-unpublished one by being boring. `pacer` spaces requests evenly (two seconds by
-default) and never bursts. A 429 is a statement about this host, not the
-symbol, so it pauses everything, starting at a minute and doubling to an hour,
-and charges no series a failure. Ten ordinary failures in a row also pause
-everything for five minutes. That many different symbols failing at once is
-the network, not the symbols. Unknown symbols don't count toward that streak.
+Each source has its own `pacer`, so a rate-limited Yahoo never holds up
+Polygon. The pacer:
+
+- spaces requests evenly and never bursts;
+- treats a 429 as a statement about this host, not the symbol, so it pauses
+  that source (starting at a minute and doubling to an hour) and charges no
+  series a failure;
+- pauses for five minutes after ten ordinary failures in a row, because that
+  is the network, not ten symbols. Unknown symbols don't count toward the run.
+
+A failing series backs off on its own, an hour doubling to a week.
 
 ### Splits
 
-Yahoo serves every price split-adjusted *as of the moment it is asked*. There
-is no unadjusted series to request instead. So a split makes every stored bar
-before it wrong by the split's ratio.
+Every source serves prices split-adjusted as of now, so a split makes every
+stored bar before it wrong by the split's ratio. Any response holding an
+adjusted pre-split bar also holds the split, because its window spans both.
+The first response to report a split is therefore the moment to rescale, and
+the rescale has to happen *before* that response's own bars are written.
 
-The fix relies on one fact: any response containing an adjusted pre-split bar
-also contains the split, because the window spans both. Every request asks for
-`events=div,splits`. `Record` runs in one transaction: it records new splits
-first, then rescales the symbol's stored bars dated before each one (every
-width, prices and volume), then writes the response's bars. Those are already
-on the new basis and overwrite whatever they overlap. A split already on
-record is never applied again. Splits and bars are both keyed by exchange date,
-so the ex-date's own bar is not rescaled.
+The rescale spans files, so it is made crash-safe explicitly:
 
-One case this misses: a backfill request whose window ends *before* a split,
-made after Yahoo applied the split but before any request for that symbol has
-reported it. The window between those two moments is at most one forward
-interval. The collector must also be backfilling that exact symbol inside it.
-Those bars would be rescaled twice when the split is later reported.
-Refetching a symbol's daily history repairs it. Tracking a per-row basis to
-close the gap would cost bytes on every one of a hundred million rows, for an
-event that needs a split and a backfill to land on the same symbol on the same
-day.
+1. The split is recorded as `pending` in the catalog.
+2. Each bar file is rescaled in its own transaction, which also records the
+   split in that file's `applied_splits`.
+3. The symbol's dividends are rescaled and the split marked `applied`, in one
+   catalog transaction.
 
-Dividends are stored, never applied. An adjusted close can be derived from
-them at read time. Storing it would mean rewriting every earlier row each time
-a stock pays one.
+A crash anywhere resumes at the next `Open`: files already done are skipped,
+and nothing is applied twice. The collector is the one writer and finishes a
+pending split before writing anything else, so a file created after a split
+can't hold bars on the old basis.
 
-### The universe
+**The one case this misses.** A backfill whose window ends *before* a split,
+made after the source applied the split but before any response reported it,
+stores adjusted bars that are rescaled again once the split is reported. That
+needs a split and a backfill of the same symbol inside the same day.
+Re-walking the symbol repairs it. Tracking a per-row basis to close the gap
+would cost bytes on every one of a billion rows.
 
-`universe` reads Nasdaq Trader's `nasdaqlisted.txt` and `otherlisted.txt`,
-the free daily directory of every exchange-listed US security. It translates
-Nasdaq's symbology to Yahoo's: `BRK.B` becomes `BRK-B`. It skips test issues,
-preferreds, warrants, units and rights; Yahoo spells those so inconsistently
-that a guess would be a symbol that fails every day forever.
+Dividends are stored and never applied to bars. The engine derives an adjusted
+close from them when it reads (`adjustedBars`), the way Yahoo computes its own.
+Storing one would mean rewriting every earlier row each time a stock paid a
+dividend.
 
-A symbol that leaves the lists is **retired**, not deleted: fetching stops and
-its history stays. That is what makes the archive usable without survivorship
-bias going forward. Retiring is the one destructive-looking step, so it is
-guarded three ways:
+### Lists, and survivorship
 
-- a directory file without its `File Creation Time` trailer is refused as
-  truncated;
-- either file failing fails the whole read;
-- a list less than half the size of what is active is logged and not believed.
+A symbol is tracked while it is on at least one list and not excluded. The
+lists are `listed`, `extra`, `watchlist` and `user`, kept as flags because they
+overlap: GLD is on NYSE Arca's list *and* the watchlist, and leaving one list
+must not stop a symbol another list still wants. A symbol on no list is
+retired. Its history stays, which is what makes the archive usable for
+analysis without survivorship bias from here on.
 
-Extras come from flags rather than the network, so they are tracked at startup
-instead of waiting for the next daily read.
+`universe` reads Nasdaq Trader's two directory files and translates the
+symbology (`BRK.B` → `BRK-B`). It skips test issues, preferreds, warrants,
+units and rights; Yahoo's spellings for those are inconsistent enough that a
+guess would fail every day forever.
+
+Retiring is guarded three ways:
+
+- a file without its trailer is refused as truncated;
+- either file failing fails the read;
+- a list less than half the size of the one held is not believed.
+
+### Location, availability and moving
+
+The folder is a setting (`archive_path`, **stored > flag > env**), chosen on
+the Data page. The archiver retries an unavailable folder every 30 seconds,
+and at once on a nudge from the page. Readers take the archive under a read
+lock, and the loop takes it exclusively to close it, so a chart query never
+has a handle closed under it.
+
+A move works like this:
+
+1. Stop the collector. Closing the archive checkpoints every WAL.
+2. Copy every file into an empty folder, syncing each one, and copy the marker
+   last.
+3. Switch the setting to the new folder.
+
+A copy that fails half way leaves a folder with no marker, which cannot be
+opened by mistake, and the old folder, untouched, stays in use. The old copy
+is never deleted by the app.
+
+### What reads it
+
+The engine takes an `ArchiveReader` (the archiver) and tries it before the
+provider:
+
+- **Performance sheet and backtests.** They read a symbol's daily bars and
+  dividends when some source has walked its daily series to the listing and
+  kept it current. Otherwise the provider is asked as before: a half-backfilled
+  series would make "all time" mean "as far as the collector has got". The
+  archive's series is topped up with one small provider request for the last
+  few sessions, so today's move is on it.
+- **Sparklines.** They draw the archive's five-minute bars (built from minute
+  bars) over the retention window, then the refresh loop's own readings for
+  anything newer. Priority symbols' minute bars are kept 15 minutes fresh for
+  this.
 
 ## Threat model
 

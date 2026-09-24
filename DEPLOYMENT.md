@@ -194,34 +194,72 @@ at four in flight. If you are watching dozens of symbols and seeing failures,
 raise the interval (Settings → Refresh loop) before anything else — the presets
 go up to an hour.
 
-**Collecting the market-data archive.** Off by default (see the README's
-*market-data archive* section). The quick start rewrites the unit on every
-upgrade, so turn it on with a drop-in rather than by editing `ExecStart`:
+**Collecting the market-data archive.** Off until a folder is chosen on the
+Data page (see the README's *market-data archive* section). On a Pi it belongs
+on an external drive. Three one-time steps:
 
-```bash
-sudo mkdir -p /etc/systemd/system/tickers.service.d
-printf '[Service]\nEnvironment=TICKERS_ARCHIVE=/var/lib/tickers/archive.sqlite\n' |
-  sudo tee /etc/systemd/system/tickers.service.d/archive.conf
-sudo systemctl daemon-reload && sudo systemctl restart tickers
-sudo -u tickers /opt/tickers/src/server/bin/tickers coverage --archive /var/lib/tickers/archive.sqlite
-```
+1. **Mount the drive at boot, without making the boot depend on it.** Use
+   `nofail`, so a missing drive leaves the Pi booting normally rather than
+   dropping to an emergency shell:
 
-Use environment variables, not flags. A binary rolled back to one from before
-the archive existed ignores an environment variable it doesn't know, but it
-refuses to start on an unknown flag. The file lives in the data directory
-because that is the only path the unit can write.
+   ```bash
+   sudo mkdir -p /mnt/usb
+   echo 'UUID=<the drive's UUID from `lsblk -f`>  /mnt/usb  ext4  defaults,nofail,noatime  0  2' | sudo tee -a /etc/fstab
+   sudo mount -a
+   sudo install -d -o tickers -g tickers -m 750 /mnt/usb/tickers-archive
+   ```
 
-- *Disk.* Around 6 GB for the first pass, then around 13 GB a year. Check
-  `df` before turning it on, and put the data directory on an SSD.
-- *Backups.* The pre-upgrade snapshots cover `tickers.sqlite` only. Copying
-  gigabytes on every upgrade would make upgrades slow and fill the disk. Copy
-  the archive with `sqlite3 … ".backup"` if you want a copy. Daily history can
-  be refetched; intraday bars older than Yahoo keeps (59 days for 5m, two
-  years for 1h) cannot.
-- *Health.* `/api/health` does not look at the archive. A broken archive logs
-  an error and stops the collector; the watchlist keeps working.
-- *Progress.* The journal gets an `archive progress` line every 15 minutes.
-  Add `--verbose` for one line per request.
+   Use ext4 (or another Linux filesystem) rather than exFAT or NTFS. SQLite's
+   locking and the service user's ownership both need a real Unix filesystem.
+
+2. **Let the service write there.** The unit runs with `ProtectSystem=strict`,
+   which makes everything outside the data directory read-only to it. The
+   quick start rewrites the unit on every upgrade, so add the permission as a
+   drop-in, which survives upgrades:
+
+   ```bash
+   sudo mkdir -p /etc/systemd/system/tickers.service.d
+   printf '[Service]\nReadWritePaths=-/mnt/usb/tickers-archive\n' |
+     sudo tee /etc/systemd/system/tickers.service.d/archive.conf
+   sudo systemctl daemon-reload && sudo systemctl restart tickers
+   ```
+
+   The leading `-` makes the path optional. Without it, systemd refuses to
+   start the service at all while the drive is unplugged, and the watchlist
+   would go down with the archive.
+
+3. **Choose the folder.** On the Data page, enter `/mnt/usb/tickers-archive`
+   and press *Check folder*. If it says the server cannot write there, step 1's
+   ownership or step 2's drop-in is missing. If it warns that the folder is on
+   the same disk as the system, the drive isn't mounted. Then press *Start a
+   new archive here*.
+
+How it behaves once it is running:
+
+- **Unplugged drive.** The archive shows as unavailable on the Data page and
+  collection pauses. The performance sheet and backtests read from Yahoo in
+  the meantime, and `/api/health` never looks at the archive. Plug it back in
+  and collection resumes within 30 seconds. Nothing is written to the empty
+  mount point in between: an archive folder has to carry its marker file to be
+  opened, and the app never creates a folder.
+- **Disk.** One-minute bars for the whole market are around 60 GB a year.
+  Collection pauses when free space drops below the floor set on the Data page
+  (10 GB by default). Nothing is ever deleted to make room.
+- **Backups.** The pre-upgrade snapshots cover `tickers.sqlite` only. For the
+  archive, `rsync` the folder while collection is paused on the Data page. The
+  per-year intraday files stop changing once their year is over, so only the
+  current year's files and `catalog.sqlite` change between backups. Daily
+  history can be refetched; intraday bars older than a source keeps cannot.
+- **Moving to a bigger drive.** Mount it, create an empty folder the service
+  owns, add it to the drop-in's `ReadWritePaths`, and use *Move the archive
+  here* on the Data page. It copies everything, then switches. The old folder
+  is left for you to delete.
+- **Progress.** The journal gets an `archive progress` line every 15 minutes;
+  add `--verbose` for one line per request. `tickers coverage --db
+  /var/lib/tickers/tickers.sqlite` prints a summary from the shell.
+- **Before the Data page existed** the archive could only be set with
+  `--archive`. `TICKERS_ARCHIVE` in the same drop-in still works as a
+  fallback, and whatever folder is chosen on the page takes precedence over it.
 
 **Timeouts.** A slow link can need more than the default 20 seconds per
 request; Settings → Quote source → **Request timeout** accepts 5–120s. Blank
