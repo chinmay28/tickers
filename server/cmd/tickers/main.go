@@ -5,6 +5,8 @@
 //	tickers serve --db /var/lib/tickers/tickers.sqlite --port 8797
 //	tickers version
 //	tickers publish        # one cycle, then exit (the original script's job)
+//	tickers collect        # the market-data archive collector on its own
+//	tickers coverage       # how far the archive has got
 package main
 
 import (
@@ -19,14 +21,18 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/chinmay28/tickers/server/internal/api"
+	"github.com/chinmay28/tickers/server/internal/archive"
+	"github.com/chinmay28/tickers/server/internal/collector"
 	"github.com/chinmay28/tickers/server/internal/engine"
 	"github.com/chinmay28/tickers/server/internal/publish"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
+	"github.com/chinmay28/tickers/server/internal/universe"
 	"github.com/chinmay28/tickers/server/internal/version"
 	"github.com/chinmay28/tickers/server/internal/web"
 )
@@ -54,6 +60,10 @@ func run(args []string) error {
 		return serve(args[1:])
 	case "publish":
 		return publishOnce(args[1:])
+	case "collect":
+		return collect(args[1:])
+	case "coverage":
+		return coverage(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version.String())
 		return nil
@@ -72,6 +82,8 @@ func usage() {
 Usage:
   tickers serve [flags]     run the API, the web client and the refresh loop
   tickers publish [flags]   run one refresh + publish cycle, then exit
+  tickers collect [flags]   run only the market-data archive collector
+  tickers coverage [flags]  report how far the archive has got
   tickers version           print the version
   tickers help              show this message
 
@@ -117,6 +129,78 @@ func bindFlags(fs *flag.FlagSet, cfg *config) {
 	fs.BoolVar(&cfg.verbose, "verbose", envOr("TICKERS_VERBOSE", "") != "", "log every API request")
 }
 
+// DefaultArchive is where `tickers collect` keeps the archive when nothing
+// says otherwise. `serve` has no default: there, an empty path is what keeps
+// the collector off.
+const DefaultArchive = "./data/archive.sqlite"
+
+// DefaultArchiveExtras are collected alongside the exchange lists: the two
+// largest cryptocurrencies and the indices every analysis wants a benchmark
+// from. None of them is listed on a US exchange, which is why they need
+// naming.
+const DefaultArchiveExtras = "BTC-USD,ETH-USD,^GSPC,^DJI,^IXIC,^RUT,^VIX"
+
+// archiveConfig is the collector's half of the flags. It is operator
+// configuration — a file path and a request budget — rather than a setting,
+// which is why it is flags and env and not the Settings page.
+type archiveConfig struct {
+	path        string
+	intervals   string
+	extras      string
+	listed      bool
+	universeURL string
+	spacing     time.Duration
+}
+
+func bindArchiveFlags(fs *flag.FlagSet, cfg *archiveConfig, defaultPath string) {
+	fs.StringVar(&cfg.path, "archive", envOr("TICKERS_ARCHIVE", defaultPath),
+		"path to the market-data archive (empty leaves the collector off)")
+	fs.StringVar(&cfg.intervals, "archive-intervals", envOr("TICKERS_ARCHIVE_INTERVALS", "1d,5m,1h"),
+		"bar widths to collect: any of 1d, 5m, 1h")
+	fs.StringVar(&cfg.extras, "archive-extras", envOr("TICKERS_ARCHIVE_EXTRAS", DefaultArchiveExtras),
+		"comma-separated symbols to collect besides the exchange lists")
+	fs.BoolVar(&cfg.listed, "archive-listed", envOr("TICKERS_ARCHIVE_LISTED", "true") == "true",
+		"collect every symbol listed on a US exchange")
+	fs.StringVar(&cfg.universeURL, "universe-url", envOr("TICKERS_UNIVERSE_URL", universe.DefaultBaseURL),
+		"where to read the exchange symbol lists (Nasdaq Trader's symbol directory)")
+	fs.DurationVar(&cfg.spacing, "archive-spacing", envDuration("TICKERS_ARCHIVE_SPACING", collector.DefaultSpacing),
+		"gap between two archive requests to the quote provider")
+}
+
+// newCollector opens the archive and builds a collector over provider. The
+// caller closes the archive.
+func newCollector(cfg archiveConfig, provider quotes.Archivist, log *slog.Logger) (*collector.Collector, *archive.Archive, error) {
+	var intervals []quotes.Interval
+	for _, s := range strings.Split(cfg.intervals, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		i, err := quotes.ParseInterval(s)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--archive-intervals: %w", err)
+		}
+		intervals = append(intervals, i)
+	}
+	ccfg := collector.Config{
+		Intervals: intervals,
+		Extras:    collector.ParseSymbols(cfg.extras),
+		Spacing:   cfg.spacing,
+	}
+	if cfg.listed {
+		ccfg.Universe = universe.Source{BaseURL: cfg.universeURL, Client: &http.Client{Timeout: time.Minute}}
+	}
+	a, err := archive.Open(cfg.path)
+	if err != nil {
+		return nil, nil, err
+	}
+	c, err := collector.New(a, provider, ccfg, log)
+	if err != nil {
+		a.Close()
+		return nil, nil, err
+	}
+	return c, a, nil
+}
+
 // newProvider builds the quote source.
 //
 // What the flags supply here is a *fallback*, not a fixed value: the same
@@ -135,8 +219,10 @@ func newProvider(cfg config) *quotes.Yahoo {
 
 func serve(args []string) error {
 	var cfg config
+	var acfg archiveConfig
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	bindFlags(fs, &cfg)
+	bindArchiveFlags(fs, &acfg, "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -151,6 +237,18 @@ func serve(args []string) error {
 
 	provider := newProvider(cfg)
 	eng := engine.New(st, provider, publish.New(), log)
+
+	// The collector shares the provider, so a user agent fixed on the Settings
+	// page — which the engine pushes into it every cycle — fixes both.
+	var coll *collector.Collector
+	if acfg.path != "" {
+		c, a, err := newCollector(acfg, provider, log)
+		if err != nil {
+			return fmt.Errorf("archive: %w", err)
+		}
+		defer a.Close()
+		coll = c
+	}
 
 	webHandler, err := web.Handler(cfg.webDist)
 	if err != nil {
@@ -183,6 +281,20 @@ func serve(args []string) error {
 	go eng.Start(ctx)
 
 	errs := make(chan error, 1)
+	collected := make(chan struct{})
+	if coll != nil {
+		// An archive failure is logged, not fatal: the watchlist and the
+		// published payload are what this process is for, and they don't
+		// depend on the archive at all.
+		go func() {
+			defer close(collected)
+			if err := coll.Run(ctx); err != nil {
+				log.Error("archive collector stopped", "error", err)
+			}
+		}()
+	} else {
+		close(collected)
+	}
 	go func() {
 		log.Info("tickers listening",
 			"version", version.String(), "addr", server.Addr, "db", cfg.db)
@@ -198,7 +310,14 @@ func serve(args []string) error {
 		log.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
+		err := server.Shutdown(shutdownCtx)
+		// Let the collector finish the write it is in before the deferred
+		// Close pulls the archive out from under it.
+		select {
+		case <-collected:
+		case <-shutdownCtx.Done():
+		}
+		return err
 	}
 }
 
@@ -247,6 +366,82 @@ func publishOnce(args []string) error {
 	return nil
 }
 
+// collect runs the archive collector on its own, until interrupted. It is for a
+// host that wants the archive without the watchlist — or wants it in a
+// process that can be stopped, restarted and upgraded separately.
+//
+// It reads the quote-source flags but not the Settings page's overrides: there
+// is no main database here to read them from.
+func collect(args []string) error {
+	var cfg config
+	var acfg archiveConfig
+	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
+	fs.StringVar(&cfg.quoteBaseURL, "quote-base-url", envOr("TICKERS_QUOTE_BASE_URL", ""),
+		"quote API root to use instead of Yahoo's")
+	fs.StringVar(&cfg.quoteUserAgent, "quote-user-agent", envOr("TICKERS_QUOTE_USER_AGENT", ""),
+		"User-Agent sent to the quote provider (empty uses a browser default)")
+	fs.IntVar(&cfg.quoteTimeout, "quote-timeout", envInt("TICKERS_QUOTE_TIMEOUT", 0),
+		"seconds to wait for one quote request (0 uses the provider default)")
+	fs.BoolVar(&cfg.verbose, "verbose", envOr("TICKERS_VERBOSE", "") != "", "log every archive request")
+	bindArchiveFlags(fs, &acfg, DefaultArchive)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if acfg.path == "" {
+		return errors.New("--archive is required")
+	}
+	log := newLogger(cfg.verbose)
+	c, a, err := newCollector(acfg, newProvider(cfg), log)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("collecting", "version", version.String(), "archive", acfg.path)
+	return c.Run(ctx)
+}
+
+// coverage prints how far the archive has got. It only reads, so it is safe to
+// run against the archive a live collector is writing.
+func coverage(args []string) error {
+	var path string
+	fs := flag.NewFlagSet("coverage", flag.ContinueOnError)
+	fs.StringVar(&path, "archive", envOr("TICKERS_ARCHIVE", DefaultArchive), "path to the market-data archive")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("no archive at %s", path)
+	}
+	a, err := archive.Open(path)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+	st, err := a.Stats()
+	if err != nil {
+		return err
+	}
+	synced, _ := a.UniverseSyncedAt()
+	fmt.Printf("%d symbols tracked, %d retired", st.Active, st.Retired)
+	if !synced.IsZero() {
+		fmt.Printf("; exchange lists read %s", synced.Local().Format("2006-01-02 15:04"))
+	}
+	fmt.Println()
+	if len(st.Intervals) == 0 {
+		fmt.Println("nothing collected yet")
+		return nil
+	}
+	fmt.Printf("\n%-8s %9s %9s %8s  %-10s  %-16s  %-16s\n", "interval", "started", "complete", "failing", "deepest", "newest", "stalest")
+	for _, i := range st.Intervals {
+		fmt.Printf("%-8s %9d %9d %8d  %-10s  %-16s  %-16s\n", i.Interval, i.Started, i.Complete, i.Failing,
+			i.Oldest.Format("2006-01-02"), i.Newest.Local().Format("2006-01-02 15:04"), i.Laggard.Local().Format("2006-01-02 15:04"))
+	}
+	return nil
+}
+
 // runtimeInfo is the start-up configuration the Settings page shows read-only:
 // the things a browser genuinely cannot change about a process that is already
 // listening and already has a file open.
@@ -277,6 +472,15 @@ func newLogger(verbose bool) *slog.Logger {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return fallback
 }

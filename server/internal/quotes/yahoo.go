@@ -512,6 +512,11 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("quote provider returned HTTP %d: %s", e.status, e.body)
 }
 
+// Is lets a 429 match ErrRateLimited without changing what any caller prints.
+func (e *httpError) Is(target error) bool {
+	return target == ErrRateLimited && e.status == http.StatusTooManyRequests
+}
+
 // cookieSources is where to go for a session cookie.
 //
 // Against real Yahoo those are its own hosts, none of which is the API host.

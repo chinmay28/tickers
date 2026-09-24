@@ -194,6 +194,35 @@ at four in flight. If you are watching dozens of symbols and seeing failures,
 raise the interval (Settings → Refresh loop) before anything else — the presets
 go up to an hour.
 
+**Collecting the market-data archive.** Off by default (see the README's
+*market-data archive* section). The quick start rewrites the unit on every
+upgrade, so turn it on with a drop-in rather than by editing `ExecStart`:
+
+```bash
+sudo mkdir -p /etc/systemd/system/tickers.service.d
+printf '[Service]\nEnvironment=TICKERS_ARCHIVE=/var/lib/tickers/archive.sqlite\n' |
+  sudo tee /etc/systemd/system/tickers.service.d/archive.conf
+sudo systemctl daemon-reload && sudo systemctl restart tickers
+sudo -u tickers /opt/tickers/src/server/bin/tickers coverage --archive /var/lib/tickers/archive.sqlite
+```
+
+Use environment variables, not flags. A binary rolled back to one from before
+the archive existed ignores an environment variable it doesn't know, but it
+refuses to start on an unknown flag. The file lives in the data directory
+because that is the only path the unit can write.
+
+- *Disk.* Around 6 GB for the first pass, then around 13 GB a year. Check
+  `df` before turning it on, and put the data directory on an SSD.
+- *Backups.* The pre-upgrade snapshots cover `tickers.sqlite` only. Copying
+  gigabytes on every upgrade would make upgrades slow and fill the disk. Copy
+  the archive with `sqlite3 … ".backup"` if you want a copy. Daily history can
+  be refetched; intraday bars older than Yahoo keeps (59 days for 5m, two
+  years for 1h) cannot.
+- *Health.* `/api/health` does not look at the archive. A broken archive logs
+  an error and stops the collector; the watchlist keeps working.
+- *Progress.* The journal gets an `archive progress` line every 15 minutes.
+  Add `--verbose` for one line per request.
+
 **Timeouts.** A slow link can need more than the default 20 seconds per
 request; Settings → Quote source → **Request timeout** accepts 5–120s. Blank
 means the default.

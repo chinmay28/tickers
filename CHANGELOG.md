@@ -7,6 +7,29 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### A market-data archive
+
+**Tickers can now archive OHLCV bars for the whole listed US market.** Give
+`serve` an `--archive` file (or run `tickers collect`). It reads every stock
+and ETF from the exchanges' daily symbol directory, adds bitcoin, ether and
+the major indices, and collects each one at three widths:
+
+- **1d** back to the listing date;
+- **1h** for the two years Yahoo keeps;
+- **5m** for the 59 days Yahoo keeps.
+
+Every series is kept current from then on. It never exceeds one request every
+two seconds, backs off on a 429, and completes the first pass in a few days.
+`tickers coverage` shows how far it has got.
+
+- It is a separate SQLite file. The watchlist, the published payload,
+  `/api/health` and the pre-upgrade snapshots don't touch it.
+- Bars are stored as Yahoo prints them. Splits and dividends are stored beside
+  them, and a new split rescales the bars already stored.
+- Delisted symbols are retired, not deleted.
+- Off unless configured. Budget around 6 GB for the first pass and 13 GB a
+  year after it. `--archive-intervals 1d,1h` brings that to about 1 GB a year.
+
 ### A calendar version
 
 **The version is now `vYEAR.MONTH.PATCH`.** The patch number is still the
