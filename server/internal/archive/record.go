@@ -231,7 +231,7 @@ func (a *Archive) writeBars(b Batch, sid int64) (map[int64]dayCount, error) {
 	for _, c := range b.Series.Candles {
 		// A non-finite price is a parse accident upstream, not a price.
 		// Skipped singly, so one bad bar doesn't cost a whole window.
-		if !finite(c.Open, c.High, c.Low, c.Close) {
+		if !finite(c.Open, c.High, c.Low, c.Close, c.VWAP) {
 			continue
 		}
 		key := partitionKey(b.Interval, c.Time)
@@ -255,11 +255,12 @@ func (a *Archive) writeBars(b Batch, sid int64) (map[int64]dayCount, error) {
 		}
 		// A conflicting bar is overwritten only by its own source — a
 		// provider revising a bar it printed — or on an explicit replace.
-		stmt, err := tx.Prepare(`INSERT INTO bars (symbol_id, ts, open, high, low, close, volume, source_id)
-			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+		stmt, err := tx.Prepare(`INSERT INTO bars (symbol_id, ts, open, high, low, close, volume, source_id, vwap, trades, session)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?10, ?11, ?12)
 			ON CONFLICT (symbol_id, ts) DO UPDATE SET
 			  open = excluded.open, high = excluded.high, low = excluded.low, close = excluded.close,
-			  volume = excluded.volume, source_id = excluded.source_id
+			  volume = excluded.volume, source_id = excluded.source_id,
+			  vwap = excluded.vwap, trades = excluded.trades, session = excluded.session
 			WHERE bars.source_id = excluded.source_id OR ?9`)
 		if err != nil {
 			tx.Rollback()
@@ -267,7 +268,8 @@ func (a *Archive) writeBars(b Batch, sid int64) (map[int64]dayCount, error) {
 		}
 		days := map[int64]bool{}
 		for _, c := range byKey[key] {
-			if _, err := stmt.Exec(b.SymbolID, c.Time.Unix(), c.Open, c.High, c.Low, c.Close, c.Volume, sid, b.Replace); err != nil {
+			if _, err := stmt.Exec(b.SymbolID, c.Time.Unix(), c.Open, c.High, c.Low, c.Close, c.Volume, sid, b.Replace,
+				nullIfZero(c.VWAP), nullIfZero(float64(c.Trades)), int(c.Session)); err != nil {
 				stmt.Close()
 				tx.Rollback()
 				return nil, fmt.Errorf("record bar: %w", err)
@@ -414,7 +416,7 @@ func (a *Archive) rescale(id int64, at time.Time, ratio float64) error {
 			continue
 		}
 		if _, err := tx.Exec(`UPDATE bars SET open = open * ?1, high = high * ?1, low = low * ?1, close = close * ?1,
-			  volume = CAST(round(volume / ?1) AS INTEGER)
+			  vwap = vwap * ?1, volume = CAST(round(volume / ?1) AS INTEGER)
 			WHERE symbol_id = ?2 AND ts < ?3`, ratio, id, at.Unix()); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("rescale %s for a split: %w", key, err)
@@ -454,6 +456,15 @@ func (a *Archive) resumeSplits() error {
 		}
 	}
 	return rows.Err()
+}
+
+// nullIfZero stores a source's silence as NULL rather than as a zero that
+// would read as a measurement.
+func nullIfZero(v float64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func finite(values ...float64) bool {

@@ -9,6 +9,20 @@ each heading must be `## <tag> — <title>`.
 
 ### A market-data archive, and a Data page to run it
 
+**Every bar carries what its source knows, not only OHLCV.**
+
+- **VWAP and trade count.** Polygon's own volume-weighted price and trade
+  count are kept with each bar.
+- **Pre-market and after-hours bars,** as an opt-in setting. They are stored
+  tagged by session and kept out of every chart, return and sparkline unless
+  asked for; the symbol chart has an *Extended hours* toggle.
+- **A volume panel** under the symbol chart.
+- **The Treasury yield curve** (`^IRX`, `^FVX`, `^TNX`, `^TYX`) is collected
+  with the default extras.
+- **Renamed companies read as one series.** With a Polygon key, a newly listed
+  symbol is checked for a former name, and the bars collected under that name
+  are read as the new symbol's history.
+
 **On by default for quick-start installs, switchable in Settings.** The quick
 start creates `/var/lib/tickers/archive` and the service starts collecting.
 `TICKERS_ARCHIVE_DIR` puts it elsewhere and `TICKERS_ARCHIVE_DIR=none` leaves

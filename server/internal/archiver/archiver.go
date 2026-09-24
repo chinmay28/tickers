@@ -268,6 +268,7 @@ func (m *Manager) planner(path string) collector.Planner {
 		}
 		plan := collector.Plan{
 			Paused:    cfg.Paused,
+			Extended:  cfg.Extended,
 			Intervals: intervals,
 			Extras:    cfg.Extras,
 			Watchlist: m.appSymbols(),

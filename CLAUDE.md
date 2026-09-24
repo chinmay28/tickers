@@ -161,6 +161,11 @@ survives its drive being unplugged. The collector's pure parts (`next`,
   symbol × interval × source, so weekends count as covered. A walk stops at
   the first trade date or the source's horizon, never because a stretch was
   quiet.
+- **Archive reads are regular-session unless a `Query` says `Extended`.**
+  Extended bars are stored in the same files, tagged by `session`; every
+  reader in the app relies on the default. `Stored`/`Best` also merge a
+  renamed symbol's former rows (`aliases`) — go through them, not `candles`,
+  for anything user-facing.
 - **A second source only fills gaps.** The `days` ledger says which days are
   held; a bar is overwritten only by its own source or on an explicit replace.
 - **The archive never creates its folder** and refuses one without

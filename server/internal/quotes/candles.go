@@ -74,6 +74,38 @@ type Candle struct {
 	Low    float64
 	Close  float64
 	Volume int64
+	// VWAP is the bar's volume-weighted average price, and Trades how many
+	// trades made it up — both as the source computed them from every trade,
+	// which a VWAP rebuilt from OHLC can only approximate. Zero means the
+	// source didn't say: Yahoo never does, Polygon always does.
+	VWAP   float64
+	Trades int64
+	// Session says which part of the trading day the bar belongs to. Every
+	// bar is Regular unless it was asked for with ExtendedArchivist.
+	Session Session
+}
+
+// Session is a part of the trading day.
+type Session uint8
+
+const (
+	// Regular is the exchange's main session — 9:30 to 16:00 in New York —
+	// and the whole day for anything that trades around the clock.
+	Regular Session = iota
+	// PreMarket is before the regular open.
+	PreMarket
+	// AfterHours is after the regular close.
+	AfterHours
+)
+
+func (s Session) String() string {
+	switch s {
+	case PreMarket:
+		return "pre"
+	case AfterHours:
+		return "post"
+	}
+	return "regular"
 }
 
 // Split is a stock split, effective from Time. A 4:1 split has Numerator 4 and
@@ -126,6 +158,34 @@ type Archivist interface {
 	// to round — a daily bar keyed by its date can sit a few hours before
 	// from — so callers treat the window as coverage, not as a filter.
 	Candles(ctx context.Context, symbol string, interval Interval, from, to time.Time) (CandleSeries, error)
+}
+
+// ExtendedArchivist is an Archivist that can also return the bars outside
+// the regular session, each tagged with its Session.
+//
+// A separate method rather than a flag on Candles, so a source that only has
+// the regular session is still a complete Archivist, and asking for the
+// extended session is a decision the caller visibly makes: a series that is
+// regular hours some days and extended on others makes every intraday
+// indicator lie.
+type ExtendedArchivist interface {
+	ExtendedCandles(ctx context.Context, symbol string, interval Interval, from, to time.Time) (CandleSeries, error)
+}
+
+// TickerPeriod is one symbol a company traded under, from From until the
+// next period's From.
+type TickerPeriod struct {
+	Symbol string
+	From   time.Time
+}
+
+// Renamer is a source that knows the symbols a company has traded under —
+// FB until 9 June 2022, META from then — so history kept under the old one
+// can be read as part of the new one's.
+type Renamer interface {
+	// TickerHistory returns a symbol's periods, oldest first, the current
+	// symbol last. A symbol that was never renamed comes back as one period.
+	TickerHistory(ctx context.Context, symbol string) ([]TickerPeriod, error)
 }
 
 // ErrRateLimited means the provider has asked us to slow down. It is distinct

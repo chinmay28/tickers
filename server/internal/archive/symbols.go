@@ -355,3 +355,104 @@ func (a *Archive) QuerySymbols(q SymbolQuery) (SymbolPage, error) {
 	}
 	return page, rows.Err()
 }
+
+// Alias is a symbol a company used to trade under, until it was renamed.
+type Alias struct {
+	Former string    `json:"former"`
+	Until  time.Time `json:"until"`
+}
+
+// SetAliases records the symbols a symbol used to trade under, replacing any
+// recorded before. A former symbol the archive has never collected is kept
+// all the same: it is a fact about the company, and costs nothing until
+// something is stored under it.
+func (a *Archive) SetAliases(id int64, aliases []Alias) error {
+	tx, err := a.catalog.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM aliases WHERE symbol_id = ?`, id); err != nil {
+		return err
+	}
+	for _, al := range aliases {
+		former := NormalizeSymbol(al.Former)
+		if former == "" || al.Until.IsZero() {
+			return errors.New("an alias needs a former symbol and the date it ended")
+		}
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO aliases (symbol_id, former, until) VALUES (?, ?, ?)`,
+			id, former, al.Until.Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Aliases lists a symbol's former symbols, oldest first.
+func (a *Archive) Aliases(id int64) ([]Alias, error) {
+	rows, err := a.catalog.Query(`SELECT former, until FROM aliases WHERE symbol_id = ? ORDER BY until`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Alias{}
+	for rows.Next() {
+		var al Alias
+		var until int64
+		if err := rows.Scan(&al.Former, &until); err != nil {
+			return nil, err
+		}
+		al.Until = time.Unix(until, 0).UTC()
+		out = append(out, al)
+	}
+	return out, rows.Err()
+}
+
+type aliasID struct {
+	id    int64
+	until time.Time
+}
+
+// aliasIDs resolves a symbol's aliases to the rows its former symbols' bars
+// are stored under, skipping any the archive holds nothing for.
+func (a *Archive) aliasIDs(id int64) ([]aliasID, error) {
+	rows, err := a.catalog.Query(`SELECT s.id, al.until FROM aliases al JOIN symbols s ON s.symbol = al.former
+		WHERE al.symbol_id = ? AND s.id <> ?`, id, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []aliasID
+	for rows.Next() {
+		var al aliasID
+		var until int64
+		if err := rows.Scan(&al.id, &until); err != nil {
+			return nil, err
+		}
+		al.until = time.Unix(until, 0).UTC()
+		out = append(out, al)
+	}
+	return out, rows.Err()
+}
+
+// Members lists the symbols currently on a list.
+func (a *Archive) Members(list List) (map[string]bool, error) {
+	col, err := list.column()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := a.catalog.Query(`SELECT symbol FROM symbols WHERE ` + col + ` = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out[s] = true
+	}
+	return out, rows.Err()
+}

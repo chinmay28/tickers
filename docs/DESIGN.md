@@ -1484,6 +1484,48 @@ close from them when it reads (`adjustedBars`), the way Yahoo computes its own.
 Storing one would mean rewriting every earlier row each time a stock paid a
 dividend.
 
+### What a bar carries
+
+Beyond OHLCV, a bar keeps three things a source can give:
+
+- **VWAP and trade count** are the source's own, computed from every trade,
+  which a VWAP rebuilt from OHLC only approximates. They are stored as NULL
+  where the source gave none, which for Yahoo is always, so silence doesn't
+  read as a measurement. `Resample` weights a built bar's VWAP by its parts'
+  volume, and reports none if any part lacked one: a VWAP over half the
+  bucket's trades would look right and not be.
+- **Session** is regular (0), pre-market (1) or after hours (2). Extended bars
+  come only from `quotes.ExtendedArchivist`, a separate method rather than a
+  flag, so asking for them is visible at the call site. They are collected
+  only when the setting is on, and read only when a `Query` asks
+  (`Extended`). Every reader in the app leaves it off, so returns, ranges and
+  sparklines are regular hours whatever is stored. `Resample` anchors each
+  session separately, so a pre-market bucket never swallows the open.
+
+  Yahoo's bars are tagged against the regular session it reports for today, on
+  the exchange's own clock (its zone, not today's offset, so a summer bar read
+  in winter lands right). A half day's afternoon therefore reads as regular. A
+  trading calendar would fix that, and isn't worth its weight for a label.
+
+### Renames
+
+A company that changes its symbol leaves the history collected under the old
+one on the old row. Yahoo re-keys history to the new symbol, so daily bars
+refetch fine, but the minute bars collected before the rename are past
+Yahoo's horizon and exist only under the old row.
+
+`aliases` links the new symbol to the old one until the rename date. Reads
+(`Stored`, `Best`) merge the former row's bars from before that date, and the
+current symbol's bar wins on a moment both hold. It is a link, not a merge:
+nothing is rewritten, and a later company given the freed symbol keeps its own
+bars, which all fall after the date.
+
+Renames are found through `quotes.Renamer`, which Polygon implements from its
+ticker events. Only a symbol *new* to the exchange lists is asked about (META
+appears the day FB disappears), and only after the first read of the lists,
+when nothing is yet held under any former name. That is a handful of requests
+a day on Polygon's pacer. Without a Polygon key, renames are not detected.
+
 ### Lists, and survivorship
 
 A symbol is tracked while it is on at least one list and not excluded. The

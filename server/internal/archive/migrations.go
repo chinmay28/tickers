@@ -148,6 +148,23 @@ CREATE TABLE meta (
 );
 `,
 	},
+	{
+		// Renames. A company that changes its symbol — FB to META — leaves
+		// its history under the old symbol's row; an alias says that row's
+		// bars before `until` are the new symbol's too, so a read of META
+		// includes the minute bars collected while it was still FB. It is a
+		// link, not a merge: nothing is rewritten, and a later company given
+		// the freed symbol keeps its own bars, which are all after `until`.
+		ID: "002_aliases",
+		SQL: `
+CREATE TABLE aliases (
+  symbol_id INTEGER NOT NULL,
+  former    TEXT NOT NULL,
+  until     INTEGER NOT NULL,
+  PRIMARY KEY (symbol_id, former)
+) WITHOUT ROWID;
+`,
+	},
 }
 
 // partitionMigrations shape each bars/<interval>/<year>.sqlite.
@@ -180,6 +197,20 @@ CREATE TABLE applied_splits (
   ts        INTEGER NOT NULL,
   PRIMARY KEY (symbol_id, ts)
 ) WITHOUT ROWID;
+`,
+	},
+	{
+		// What a bar says besides its OHLCV. `vwap` and `trades` are the
+		// source's own, from every trade — NULL where it gave none, which
+		// for Yahoo is always, so a NULL costs a byte rather than a zero
+		// that reads as "no trades". `session` is 0 for the regular session,
+		// which every existing bar is, 1 before the open and 2 after the
+		// close; reads skip the others unless asked.
+		ID: "002_vwap_trades_session",
+		SQL: `
+ALTER TABLE bars ADD COLUMN vwap REAL;
+ALTER TABLE bars ADD COLUMN trades INTEGER;
+ALTER TABLE bars ADD COLUMN session INTEGER NOT NULL DEFAULT 0;
 `,
 	},
 }

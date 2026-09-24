@@ -164,7 +164,7 @@ func (c *Collector) jobStep(ctx context.Context, j *Job) error {
 	c.setState(StateCollecting, "")
 	c.setCurrent(fmt.Sprintf("%s %s %s–%s from %s (requested)", job.Symbol, job.Interval,
 		from.Format(time.DateOnly), to.Format(time.DateOnly), src.Name))
-	series, err := src.Provider.Candles(ctx, job.Symbol, job.Interval, from, to)
+	series, err := c.candles(ctx, src, job.Symbol, job.Interval, from, to)
 	now = c.now()
 	if ctx.Err() != nil {
 		return ctx.Err()

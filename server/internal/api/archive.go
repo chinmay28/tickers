@@ -257,10 +257,13 @@ func (s *Server) handleArchiveBars(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The regular session unless asked: that is what every other reader in
+	// the app sees, and a chart should agree with them by default.
+	extended := q.Get("session") == "extended"
 	var bars []quotes.Candle
 	err = s.readArchive(w, func(a *archive.Archive) error {
 		var err error
-		bars, err = a.Bars(r.PathValue("symbol"), interval, from, to)
+		bars, err = a.Best(archive.Query{Symbol: r.PathValue("symbol"), Interval: interval, From: from, To: to, Extended: extended})
 		return err
 	})
 	if err != nil {
@@ -270,17 +273,27 @@ func (s *Server) handleArchiveBars(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "that is more than "+strconv.Itoa(maxBars)+" bars; ask for a shorter window or a wider interval")
 		return
 	}
+	// Short keys: a year of hourly bars is a few thousand of these. VWAP and
+	// trades are left out where the source gave none, and the session where
+	// it is the regular one, so a Yahoo-only regular series costs nothing
+	// extra on the wire.
 	type bar struct {
-		T int64   `json:"t"`
-		O float64 `json:"o"`
-		H float64 `json:"h"`
-		L float64 `json:"l"`
-		C float64 `json:"c"`
-		V int64   `json:"v"`
+		T  int64   `json:"t"`
+		O  float64 `json:"o"`
+		H  float64 `json:"h"`
+		L  float64 `json:"l"`
+		C  float64 `json:"c"`
+		V  int64   `json:"v"`
+		VW float64 `json:"vw,omitempty"`
+		N  int64   `json:"n,omitempty"`
+		S  string  `json:"s,omitempty"`
 	}
 	out := make([]bar, len(bars))
 	for i, b := range bars {
-		out[i] = bar{b.Time.Unix(), b.Open, b.High, b.Low, b.Close, b.Volume}
+		out[i] = bar{T: b.Time.Unix(), O: b.Open, H: b.High, L: b.Low, C: b.Close, V: b.Volume, VW: b.VWAP, N: b.Trades}
+		if b.Session != quotes.Regular {
+			out[i].S = b.Session.String()
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"interval": interval, "bars": out})
 }

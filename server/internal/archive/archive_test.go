@@ -2,6 +2,7 @@ package archive
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -476,5 +477,103 @@ func TestSizeAndDisk(t *testing.T) {
 	}
 	if free, total, err := Disk(a.Root()); err == nil && (total == 0 || free > total) {
 		t.Errorf("disk free %d of %d", free, total)
+	}
+}
+
+func TestVWAPTradesAndSessionsRoundTrip(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+	open := session(0)
+	bars := []quotes.Candle{
+		{Time: open.Add(-2 * time.Hour), Open: 9, High: 9, Low: 9, Close: 9, Volume: 5, Session: quotes.PreMarket},
+		{Time: open, Open: 10, High: 10, Low: 10, Close: 10, Volume: 100, VWAP: 10.02, Trades: 12},
+		{Time: open.Add(time.Minute), Open: 11, High: 11, Low: 11, Close: 11, Volume: 50}, // Yahoo: no VWAP
+		{Time: open.Add(7 * time.Hour), Open: 12, High: 12, Low: 12, Close: 12, Volume: 5, Session: quotes.AfterHours},
+	}
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "polygon", Series: quotes.CandleSeries{Candles: bars}})
+
+	regular, _ := a.Candles("AAPL", quotes.OneMinute, day(0), day(1))
+	if len(regular) != 2 {
+		t.Fatalf("a plain read returned %d bars, want the 2 regular ones — every reader in the app expects the regular session", len(regular))
+	}
+	if regular[0].VWAP != 10.02 || regular[0].Trades != 12 || regular[1].VWAP != 0 || regular[1].Trades != 0 {
+		t.Errorf("regular = %+v, want the VWAP and trades stored, and none where the source gave none", regular)
+	}
+	all, _ := a.Stored(Query{Symbol: "AAPL", Interval: quotes.OneMinute, From: day(0), To: day(1), Extended: true})
+	if len(all) != 4 || all[0].Session != quotes.PreMarket || all[3].Session != quotes.AfterHours {
+		t.Errorf("extended read = %+v, want all four, tagged", all)
+	}
+}
+
+func TestResampleCarriesVWAPTradesAndKeepsSessionsApart(t *testing.T) {
+	open := session(0)
+	in := []quotes.Candle{
+		{Time: open.Add(-time.Minute), Open: 1, High: 1, Low: 1, Close: 1, Volume: 1, Session: quotes.PreMarket},
+		{Time: open, Open: 10, High: 10, Low: 10, Close: 10, Volume: 100, VWAP: 10, Trades: 4},
+		{Time: open.Add(time.Minute), Open: 12, High: 12, Low: 12, Close: 12, Volume: 300, VWAP: 12, Trades: 6},
+		{Time: open.Add(5 * time.Minute), Open: 13, High: 13, Low: 13, Close: 13, Volume: 10, Trades: 1}, // no VWAP
+	}
+	got := Resample(in, quotes.FiveMinute)
+	if len(got) != 3 {
+		t.Fatalf("got %d bars, want pre-market's own, then two regular ones", len(got))
+	}
+	if got[0].Session != quotes.PreMarket || !got[1].Time.Equal(open) {
+		t.Errorf("the pre-market minute swallowed the open: %+v", got[:2])
+	}
+	if got[1].VWAP != 11.5 || got[1].Trades != 10 || got[1].Volume != 400 {
+		t.Errorf("first regular bucket = %+v, want VWAP (10×100+12×300)/400 = 11.5 and 10 trades", got[1])
+	}
+	if got[2].VWAP != 0 {
+		t.Errorf("a bucket with a part lacking VWAP reported %v, want none rather than a partial one", got[2].VWAP)
+	}
+}
+
+func TestASplitRescalesVWAP(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "AAPL")
+	id := idOf(t, a, "AAPL")
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "polygon", Series: quotes.CandleSeries{
+		Candles: []quotes.Candle{{Time: session(0), Open: 400, High: 400, Low: 400, Close: 400, Volume: 10, VWAP: 400.4, Trades: 3}}}})
+	record(t, a, Batch{SymbolID: id, Interval: quotes.Daily, Source: "yahoo", Series: quotes.CandleSeries{
+		Splits: []quotes.Split{{Time: day(2), Numerator: 4, Denominator: 1}}}})
+	got, _ := a.Candles("AAPL", quotes.OneMinute, day(0), day(1))
+	if got[0].VWAP != 100.1 || got[0].Trades != 3 {
+		t.Errorf("after a 4:1 split = %+v, want VWAP 100.1 and the trade count untouched", got[0])
+	}
+}
+
+func TestARenamedSymbolReadsItsFormerHistory(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "FB", "META")
+	fb, meta := idOf(t, a, "FB"), idOf(t, a, "META")
+	renamed := day(2)
+	// Minute bars collected as FB before the rename, and as META after —
+	// with one moment both hold, where META's must win.
+	record(t, a, Batch{SymbolID: fb, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: append(minutes(session(0), 2, 1), minutes(session(1), 1, 1)...)}})
+	record(t, a, Batch{SymbolID: meta, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: append(minutes(session(1), 1, 2), minutes(session(3), 2, 2)...)}})
+	// A later company given FB's symbol: after the rename, never META's.
+	record(t, a, Batch{SymbolID: fb, Interval: quotes.OneMinute, Source: "yahoo",
+		Series: quotes.CandleSeries{Candles: minutes(session(5), 1, 9)}})
+
+	if err := a.SetAliases(meta, []Alias{{Former: "fb", Until: renamed}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := a.Candles("META", quotes.OneMinute, day(0), day(10))
+	want := []float64{1, 1, 2, 2, 2}
+	if fmt.Sprint(closes(got)) != fmt.Sprint(want) {
+		t.Errorf("META = %v, want FB's bars before the rename, its own after, and its own where both hold", closes(got))
+	}
+	if built, _ := a.Bars("META", quotes.FiveMinute, day(0), day(10)); len(built) == 0 || built[0].Close != 1 {
+		t.Errorf("resampled META = %+v, want the former bars in it too", built)
+	}
+	cov, _ := a.SymbolCoverage("META")
+	if len(cov.Aliases) != 1 || cov.Aliases[0].Former != "FB" {
+		t.Errorf("coverage aliases = %+v", cov.Aliases)
+	}
+	if err := a.SetAliases(meta, []Alias{{Former: "FB"}}); err == nil {
+		t.Error("an alias with no end date was accepted")
 	}
 }

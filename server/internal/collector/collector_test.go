@@ -471,3 +471,85 @@ func TestParseSymbols(t *testing.T) {
 		t.Errorf("ParseSymbols = %v", got)
 	}
 }
+
+// extendedProvider is a fakeProvider that also serves the extended session
+// and knows one rename.
+type extendedProvider struct {
+	*fakeProvider
+	extendedCalls int
+	renamed       map[string][]quotes.TickerPeriod
+	asked         []string
+}
+
+func (e *extendedProvider) ExtendedCandles(ctx context.Context, symbol string, interval quotes.Interval, from, to time.Time) (quotes.CandleSeries, error) {
+	e.extendedCalls++
+	s, err := e.fakeProvider.Candles(ctx, symbol, interval, from, to)
+	if len(s.Candles) > 0 {
+		pre := s.Candles[0]
+		pre.Time, pre.Session = pre.Time.Add(-2*time.Hour), quotes.PreMarket
+		s.Candles = append([]quotes.Candle{pre}, s.Candles...)
+	}
+	return s, err
+}
+
+func (e *extendedProvider) TickerHistory(_ context.Context, symbol string) ([]quotes.TickerPeriod, error) {
+	e.asked = append(e.asked, symbol)
+	if h, ok := e.renamed[symbol]; ok {
+		return h, nil
+	}
+	return []quotes.TickerPeriod{{Symbol: symbol}}, nil
+}
+
+func TestExtendedHoursAreAskedForOnlyWhenPlannedAndOnlyIntraday(t *testing.T) {
+	h := newHarness(t, []quotes.Interval{quotes.Daily, quotes.OneMinute})
+	h.plan.Extras = []string{"AAPL"}
+	ext := &extendedProvider{fakeProvider: h.yahoo}
+	h.plan.Sources = []Source{Yahoo(ext, 2*time.Second)}
+	h.settle(t)
+	if ext.extendedCalls != 0 {
+		t.Fatalf("made %d extended requests with the setting off", ext.extendedCalls)
+	}
+
+	h.plan.Extended = true
+	h.clock.t = h.clock.t.Add(21 * time.Hour)
+	h.settle(t)
+	if ext.extendedCalls == 0 {
+		t.Fatal("no extended request with the setting on")
+	}
+	all, _ := h.archive.Stored(archive.Query{Symbol: "AAPL", Interval: quotes.OneMinute, From: now.Add(-30 * day), To: h.clock.t, Extended: true})
+	pre := 0
+	for _, c := range all {
+		if c.Session == quotes.PreMarket {
+			pre++
+		}
+	}
+	regular, _ := h.archive.Candles("AAPL", quotes.OneMinute, now.Add(-30*day), h.clock.t)
+	if pre == 0 || len(regular)+pre != len(all) {
+		t.Errorf("stored %d bars, %d pre-market and %d regular; want extended bars stored and kept out of plain reads", len(all), pre, len(regular))
+	}
+}
+
+func TestANewListingIsCheckedForAFormerName(t *testing.T) {
+	h := newHarness(t, []quotes.Interval{quotes.Daily}, "FB", "AAPL")
+	renamer := &extendedProvider{fakeProvider: h.yahoo, renamed: map[string][]quotes.TickerPeriod{
+		"META": {{Symbol: "FB", From: now.AddDate(-10, 0, 0)}, {Symbol: "META", From: now.Add(24 * time.Hour)}},
+	}}
+	h.plan.Sources = append(h.plan.Sources, Source{Name: "polygon", Provider: renamer, Spacing: time.Second, Reach: map[quotes.Interval]Reach{}})
+	h.run(t, 1)
+	if len(renamer.asked) != 0 {
+		t.Fatalf("the first read asked about %v; nothing is held under a former name yet", renamer.asked)
+	}
+
+	// The next day FB is gone and META is listed.
+	h.lister.listings = []universe.Listing{{Symbol: "META"}, {Symbol: "AAPL"}}
+	h.clock.t = h.clock.t.Add(25 * time.Hour)
+	h.settle(t)
+	if len(renamer.asked) != 1 || renamer.asked[0] != "META" {
+		t.Fatalf("asked about %v, want META alone — only a new listing can be a rename", renamer.asked)
+	}
+	meta, _ := h.archive.Lookup("META")
+	aliases, _ := h.archive.Aliases(meta.ID)
+	if len(aliases) != 1 || aliases[0].Former != "FB" || !aliases[0].Until.Equal(now.Add(24*time.Hour)) {
+		t.Errorf("aliases = %+v, want FB until the rename", aliases)
+	}
+}
