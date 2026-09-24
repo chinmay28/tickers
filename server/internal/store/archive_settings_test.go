@@ -11,7 +11,7 @@ func TestArchiveConfigDefaultsAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Path != "" || !cfg.Listed || len(cfg.Intervals) != 4 || cfg.SpacingMS != 2000 || cfg.PolygonKeySet {
+	if !cfg.Enabled || cfg.Path != "" || !cfg.Listed || len(cfg.Intervals) != 4 || cfg.SpacingMS != 2000 || cfg.PolygonKeySet {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 
@@ -70,5 +70,16 @@ func TestArchiveConfigRefusesBadValues(t *testing.T) {
 	}
 	if cfg, _ := s.ArchiveConfig(); cfg.Path != "/mnt/usb/archive" {
 		t.Errorf("path = %q, want it cleaned", cfg.Path)
+	}
+}
+
+func TestTheArchiveSwitchDefaultsOnAndTurnsOff(t *testing.T) {
+	s := newTestStore(t)
+	off := false
+	if _, err := s.UpdateArchiveConfig(ArchivePatch{Enabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := s.ArchiveConfig(); cfg.Enabled {
+		t.Error("turning the archive off did not stick — an unset value must not read back as the default once set")
 	}
 }

@@ -9,6 +9,7 @@
 #   binary       : /opt/tickers/src/server/bin/tickers   (source mode)
 #                  /opt/tickers/bin/tickers              (release mode)
 #   database     : /var/lib/tickers/tickers.sqlite (TICKERS_DATA_DIR)
+#   archive      : /var/lib/tickers/archive        (TICKERS_ARCHIVE_DIR; "none" omits it)
 #   port         : 8797                            (PORT)
 #
 # 8797 rather than 8787 so Tickers and CountRoster can share a Raspberry Pi.
@@ -25,17 +26,24 @@ User=tickers
 Group=tickers
 WorkingDirectory=/opt/tickers/src
 ExecStart=/opt/tickers/src/server/bin/tickers serve --db /var/lib/tickers/tickers.sqlite --port 8797 --host 0.0.0.0
+# The market-data archive's starting folder. An environment variable rather
+# than a flag, so a rolled-back binary that predates the archive ignores it.
+# Settings can move the archive or switch it off; that choice wins over this.
+Environment=TICKERS_ARCHIVE=/var/lib/tickers/archive
 Restart=on-failure
 RestartSec=3
 
 # Hardening — safe on a trusted LAN, defensive if exposure ever widens.
-# The data directory is the only writable path the service needs: the binary
-# embeds the web client, so there is nothing else on disk to serve.
+# The data directory is the only writable path the service *needs*: the binary
+# embeds the web client, so there is nothing else on disk to serve. /mnt and
+# /media are writable too, so the market-data archive can be moved onto an
+# external drive from Settings; the "-" makes each optional, so an unplugged
+# drive never stops the service from starting.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/tickers
+ReadWritePaths=/var/lib/tickers -/mnt -/media
 
 [Install]
 WantedBy=multi-user.target

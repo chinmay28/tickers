@@ -14,6 +14,7 @@ import (
 // Config. Config is served to every browser in /api/state; the archive's
 // settings are only ever needed by the Data page, and carry a credential.
 const (
+	SettingArchiveEnabled   = "archive_enabled"
 	SettingArchivePath      = "archive_path"
 	SettingArchivePaused    = "archive_paused"
 	SettingArchiveIntervals = "archive_intervals"
@@ -54,6 +55,12 @@ const (
 // ArchiveConfig is how the market-data archive is collected. Every field is
 // editable on the Data page and takes effect without a restart.
 type ArchiveConfig struct {
+	// Enabled is the archive's on/off switch. Off closes the archive and
+	// stops collecting; nothing stored is touched, and the app reads from the
+	// quote source as it did before the archive existed. It defaults to on:
+	// an install with a folder configured — which the quick start sets up —
+	// collects without anyone having to find the switch.
+	Enabled bool `json:"enabled"`
 	// Path is the archive folder. Empty means "whatever the server was
 	// started with" (--archive / TICKERS_ARCHIVE), and if that is empty too,
 	// there is no archive.
@@ -89,6 +96,7 @@ type ArchiveConfig struct {
 // minute.
 func DefaultArchiveConfig() ArchiveConfig {
 	return ArchiveConfig{
+		Enabled:          true,
 		Intervals:        append([]string(nil), ArchiveIntervals...),
 		Listed:           true,
 		Extras:           append([]string(nil), DefaultArchiveExtras...),
@@ -110,6 +118,11 @@ func (s *Store) ArchiveConfig() (ArchiveConfig, error) {
 	var err error
 	var v string
 	var ok bool
+	if v, ok, err = read(SettingArchiveEnabled); err != nil {
+		return cfg, err
+	} else if ok {
+		cfg.Enabled = v == "true"
+	}
 	if cfg.Path, _, err = read(SettingArchivePath); err != nil {
 		return cfg, err
 	}
@@ -211,6 +224,7 @@ func parseIntervals(raw string) ([]string, error) {
 // alone. The path is not in it — moving the archive is an operation, not a
 // field, and goes through SetArchivePath.
 type ArchivePatch struct {
+	Enabled          *bool     `json:"enabled"`
 	Paused           *bool     `json:"paused"`
 	Intervals        *[]string `json:"intervals"`
 	Listed           *bool     `json:"listed"`
@@ -230,6 +244,10 @@ func (s *Store) UpdateArchiveConfig(p ArchivePatch) (ArchiveConfig, error) {
 		return cfg, err
 	}
 	kv := map[string]string{}
+	if p.Enabled != nil {
+		cfg.Enabled = *p.Enabled
+		kv[SettingArchiveEnabled] = strconv.FormatBool(cfg.Enabled)
+	}
 	if p.Paused != nil {
 		cfg.Paused = *p.Paused
 		kv[SettingArchivePaused] = strconv.FormatBool(cfg.Paused)

@@ -922,7 +922,9 @@ whole poll.
 ### Five routes, and one that used to be a sixth
 
 The fifth is **Data**, the market-data archive's page, with a subject in its
-second segment like Funds (`#/data/AAPL`). It reads its own endpoint,
+second segment like Funds (`#/data/AAPL`). It shows what the archive holds;
+configuring it is a section of Settings, like Publishing, and `#/archive`
+lands there the way `#/publishing` does. It reads its own endpoint,
 `/api/archive`, on the same ten-second beat as the state poll, rather than
 riding in `/api/state`: every open tab polls state, and none of them should
 pay for counting the archive. Its symbol browser pages on the server, because
@@ -1502,10 +1504,37 @@ Retiring is guarded three ways:
 - either file failing fails the read;
 - a list less than half the size of the one held is not believed.
 
+### On by default, off by a setting
+
+The archive is on unless `archive_enabled` says otherwise, and the quick start
+gives it a folder (`$DATA_DIR/archive`, passed as `TICKERS_ARCHIVE`). Every
+install it sets up collects without anyone finding a switch. Off is a setting
+rather than the absence of a folder: it closes the archive and stops the
+collector (state `disabled`), keeps the folder and its path, and switching it
+back on resumes every cursor where it stopped.
+
+The folder reaches the service as an environment variable, not a flag. The
+quick start rewrites the unit on every upgrade and rolls back to the previous
+binary on a failed health check; an older binary ignores an unknown variable
+but exits on an unknown flag.
+
+The quick start can't know a drive that will be plugged in later, so its unit
+lets the service write under `/mnt` and `/media`, each optional (`-/mnt`) so
+an absent one never fails the start. That is what makes "move it to the
+external drive" a button in Settings rather than a systemd drop-in. The wider
+write access is a deliberate trade: those are where removable storage is
+mounted, and the alternative was a manual step on every install that wanted
+the feature this is for.
+
+`tickers archive-init` exists for the quick start. The server never marks a
+folder as an archive on its own initiative — only when somebody picks the
+folder in Settings — for the same unmounted-drive reason `Open` never creates
+one.
+
 ### Location, availability and moving
 
-The folder is a setting (`archive_path`, **stored > flag > env**), chosen on
-the Data page. The archiver retries an unavailable folder every 30 seconds,
+The folder is a setting (`archive_path`, **stored > flag > env**), chosen in
+Settings. The archiver retries an unavailable folder every 30 seconds,
 and at once on a nudge from the page. Readers take the archive under a read
 lock, and the loop takes it exclusively to close it, so a chart query never
 has a handle closed under it.

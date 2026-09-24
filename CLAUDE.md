@@ -91,7 +91,8 @@ returns everything the client renders in one round trip.
 
 **`internal/archive` / `collector` / `archiver` / `universe`** are the
 market-data archive: a *folder* of SQLite files (catalog + one bar file per
-interval per year), chosen on the Data page, filled by a paced multi-source
+interval per year), on by default (the quick start creates one), configured
+in Settings and followed on the Data page, filled by a paced multi-source
 loop. Same split as above: `archive` validates and persists, `collector`
 decides, `archiver` is the glue that opens it wherever the settings say and
 survives its drive being unplugged. The collector's pure parts (`next`,

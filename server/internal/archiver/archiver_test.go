@@ -200,3 +200,31 @@ func TestUnpluggingAnOpenArchiveIsNoticedWhileIdle(t *testing.T) {
 	m.Nudge()
 	waitFor(t, m, "open again", isState(StateOpen))
 }
+
+func TestSwitchingTheArchiveOffClosesItAndOnReopensIt(t *testing.T) {
+	m, st := newManager(t, "")
+	dir := t.TempDir()
+	if err := m.Use(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, m, "open", isState(StateOpen))
+	off := false
+	if _, err := st.UpdateArchiveConfig(store.ArchivePatch{Enabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	m.Nudge()
+	status := waitFor(t, m, "disabled", isState(StateDisabled))
+	if status.Enabled || status.Path != dir {
+		t.Errorf("status = %+v, want off, still showing its folder", status)
+	}
+	if err := m.Read(func(*archive.Archive) error { return nil }); !errors.Is(err, ErrNotOpen) {
+		t.Errorf("a read while off gave %v, want ErrNotOpen", err)
+	}
+	if !archive.IsArchive(dir) {
+		t.Error("switching off touched the folder")
+	}
+	on := true
+	st.UpdateArchiveConfig(store.ArchivePatch{Enabled: &on})
+	m.Nudge()
+	waitFor(t, m, "open again", isState(StateOpen))
+}

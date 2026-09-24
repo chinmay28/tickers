@@ -9,8 +9,17 @@ each heading must be `## <tag> — <title>`.
 
 ### A market-data archive, and a Data page to run it
 
-**Tickers can now keep its own history of the market.** Choose a folder on the
-new **Data** page, on an external drive for a Pi. From then on it collects
+**On by default for quick-start installs, switchable in Settings.** The quick
+start creates `/var/lib/tickers/archive` and the service starts collecting.
+`TICKERS_ARCHIVE_DIR` puts it elsewhere and `TICKERS_ARCHIVE_DIR=none` leaves
+it out. **Settings → Market-data archive** holds the on/off switch, the folder
+(check, use or move), and everything about what is collected. Switching it off
+stops every request and deletes nothing. The unit now lets the service write
+under `/mnt` and `/media`, so moving the archive to an external drive is a
+button, not a systemd edit.
+
+**Tickers can now keep its own history of the market.** From the moment it has
+a folder it collects
 OHLCV bars for every stock and ETF listed on a US exchange, plus bitcoin,
 ether, the major indices, and everything on your watchlist, which goes first.
 
@@ -28,9 +37,9 @@ ether, the major indices, and everything on your watchlist, which goes first.
   by month. It has a candle chart for any symbol, a browser over all ten
   thousand, and lets you add missing tickers, stop collecting ones you don't
   want, put a symbol first, or fetch a range from a chosen source.
-- **Everything is changed from the page without a restart:** pause, intervals,
-  pacing, the free-space floor, the folder itself (including moving it to
-  another drive).
+- **Everything is changed from Settings without a restart:** on/off, pause,
+  intervals, pacing, the free-space floor, the folder itself (including moving
+  it to another drive).
 - **An unplugged drive pauses collection.** Nothing is written to the empty
   mount point, and collection resumes when the drive is back. The watchlist,
   the published payload, `/api/health` and the pre-upgrade snapshots never
@@ -39,7 +48,8 @@ ether, the major indices, and everything on your watchlist, which goes first.
   once a symbol's archive is complete, and sparklines draw its minute bars.
   Otherwise they read from Yahoo exactly as before.
 - **Budget around 60 GB a year** for minute bars across the whole market. On a
-  Pi, the service needs permission to write to the drive; see DEPLOYMENT.md.
+  Pi, move it off the SD card to a drive under `/mnt` or `/media`; see
+  DEPLOYMENT.md.
 - `tickers collect` runs the collector without the web server, and `tickers
   coverage` prints a summary.
 
