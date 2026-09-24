@@ -2550,6 +2550,153 @@ const CHART_RANGES = {
   '1m': [['1d', 1], ['1w', 7]],
 };
 
+/* ------------------------------------------------------------------ *
+ * Indicators on the symbol chart
+ *
+ * The server computes them — over bars read from before the window, so a
+ * 200-day average is settled at the first bar shown — and the client only
+ * draws. Which ones are on is a per-browser preference, remembered in
+ * localStorage when it can be and simply defaulted when it can't.
+ * ------------------------------------------------------------------ */
+
+/** The one-tap indicators, in the order the chips show them. */
+const INDICATOR_PRESETS = [
+  { spec: 'sma:20', label: 'SMA 20' },
+  { spec: 'sma:50', label: 'SMA 50' },
+  { spec: 'sma:200', label: 'SMA 200' },
+  { spec: 'ema:20', label: 'EMA 20' },
+  { spec: 'bb:20:2', label: 'Bollinger' },
+  { spec: 'vwap', label: 'VWAP', intraday: true },
+  { spec: 'rsi:14', label: 'RSI' },
+  { spec: 'macd:12:26:9', label: 'MACD' },
+  { spec: 'stoch:14:3', label: 'Stochastic' },
+  { spec: 'atr:14', label: 'ATR' },
+  { spec: 'obv', label: 'OBV' },
+];
+
+/** What the custom form offers, with each kind's parameters. */
+const INDICATOR_KINDS = [
+  { kind: 'sma', label: 'SMA', params: 'period', example: '100' },
+  { kind: 'ema', label: 'EMA', params: 'period', example: '50' },
+  { kind: 'bb', label: 'Bollinger', params: 'period, deviations', example: '20, 2.5' },
+  { kind: 'rsi', label: 'RSI', params: 'period', example: '7' },
+  { kind: 'macd', label: 'MACD', params: 'fast, slow, signal', example: '8, 21, 5' },
+  { kind: 'stoch', label: 'Stochastic', params: '%K, %D', example: '5, 3' },
+  { kind: 'atr', label: 'ATR', params: 'period', example: '20' },
+];
+
+const INDICATOR_DEFAULT = ['sma:50', 'sma:200', 'rsi:14'];
+const INDICATOR_KEY = 'tickers.indicators';
+
+function loadIndicators() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(INDICATOR_KEY));
+    if (Array.isArray(saved) && saved.every((s) => typeof s === 'string')) return saved.slice(0, 12);
+  } catch {
+    // Private windows and blocked storage: the defaults are fine.
+  }
+  return [...INDICATOR_DEFAULT];
+}
+
+function saveIndicators(list) {
+  try {
+    localStorage.setItem(INDICATOR_KEY, JSON.stringify(list));
+  } catch {
+    // Remembering is a convenience; not remembering is not an error.
+  }
+}
+
+/** The specs to ask for at an interval: VWAP resets each session, so on
+ *  daily bars it would be every day's own typical price — not asked for. */
+function activeIndicators(interval) {
+  return state.archive.chart.ind.filter((s) => interval !== '1d' || !s.startsWith('vwap'));
+}
+
+function indicatorControls() {
+  const chart = state.archive.chart;
+  const on = new Set(chart.ind);
+  const presets = new Set(INDICATOR_PRESETS.map((p) => p.spec));
+  const custom = chart.ind.filter((s) => !presets.has(s));
+  return `
+    <div class="presets" role="group" aria-label="Indicators">
+      ${INDICATOR_PRESETS.filter((p) => !p.intraday || chart.interval !== '1d').map((p) => `
+        <button class="btn btn--sm ${on.has(p.spec) ? 'btn--outline btn--active' : 'btn--ghost'}" type="button"
+          data-action="archive-ind" data-spec="${p.spec}" aria-pressed="${on.has(p.spec)}">${esc(p.label)}</button>`).join('')}
+      ${custom.map((s) => `
+        <button class="btn btn--sm btn--outline btn--active" type="button" data-action="archive-ind" data-spec="${esc(s)}"
+          aria-label="Remove ${esc(s)}">${esc(s)} ×</button>`).join('')}
+    </div>
+    <form class="archive-search" id="archive-ind" autocomplete="off">
+      <select class="select" name="kind" aria-label="Indicator">
+        ${INDICATOR_KINDS.map((k) => `<option value="${k.kind}">${esc(k.label)}</option>`).join('')}
+      </select>
+      <input class="input input--mono" name="params" placeholder="parameters, e.g. 100 or 12, 26, 9" aria-label="Parameters" />
+      <button class="btn btn--outline" type="submit">Add</button>
+    </form>`;
+}
+
+/** Colours for the lines drawn over the price, in order of the overlays. */
+const OVERLAY_COLORS = ['var(--warn)', 'var(--portfolio)', 'var(--composite)', 'var(--sector-7)', 'var(--sector-1)', 'var(--sector-9)'];
+
+/** One lower panel: an oscillator or a volume-type series on its own scale. */
+function lowerPane(result, x, top, height, left, right, step) {
+  let lo = Infinity, hi = -Infinity;
+  if (result.bounds) {
+    [lo, hi] = result.bounds;
+  } else {
+    for (const l of result.lines) for (const v of l.values) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    if (lo === Infinity) return '';
+    if (result.lines.some((l) => l.style === 'histogram')) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+    if (hi === lo) { hi += 1; lo -= 1; }
+  }
+  const y = (v) => top + (1 - (v - lo) / (hi - lo)) * height;
+  const guides = [];
+  if (result.key.startsWith('rsi')) guides.push(30, 70);
+  if (result.key.startsWith('stoch')) guides.push(20, 80);
+  if (lo < 0 && hi > 0) guides.push(0);
+  const colors = ['var(--primary)', 'var(--warn)'];
+  let lineN = 0;
+  const drawn = result.lines.map((l) => {
+    if (l.style === 'histogram') {
+      const w = Math.max(1, step * 0.6);
+      return l.values.map((v, i) => v == null ? '' : `<rect class="${v >= 0 ? 'vol--up' : 'vol'}" x="${x(i) - w / 2}"
+        y="${Math.min(y(v), y(0))}" width="${w}" height="${Math.abs(y(v) - y(0))}" />`).join('');
+    }
+    return polyline(l.values, x, y, colors[lineN++ % colors.length]);
+  }).join('');
+  const last = result.lines.map((l) => [...l.values].reverse().find((v) => v != null)).find((v) => v != null);
+  return `
+    <rect class="pane" x="${left}" y="${top}" width="${right - left}" height="${height}" />
+    ${guides.map((g) => `<line class="candles__grid" x1="${left}" x2="${right}" y1="${y(g)}" y2="${y(g)}" />`).join('')}
+    ${drawn}
+    <text class="candles__tick" x="${left + 4}" y="${top + 11}">${esc(result.label)}${last != null ? ` · ${esc(fmt(last))}` : ''}</text>
+    <text class="candles__tick" x="${right + 4}" y="${top + 9}">${esc(fmt(hi))}</text>
+    <text class="candles__tick" x="${right + 4}" y="${top + height}">${esc(fmt(lo))}</text>`;
+}
+
+/** A line through defined values, broken where a value is undefined — a
+ *  line drawn across an indicator's warm-up would be a made-up value. */
+function polyline(values, x, y, color, dash = false) {
+  const runs = [];
+  let run = [];
+  values.forEach((v, i) => {
+    if (v == null) {
+      if (run.length) runs.push(run);
+      run = [];
+    } else {
+      run.push(`${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+    }
+  });
+  if (run.length) runs.push(run);
+  return runs.map((r) => `<polyline class="ind-line${dash ? ' ind-line--dash' : ''}" style="stroke:${color}" points="${r.join(' ')}" />`).join('');
+}
+
+/** A number for an axis or a legend: significant, not long. */
+function fmt(v) {
+  if (Math.abs(v) >= 1e5) return compact(v);
+  return Number(v.toPrecision(5)).toString();
+}
+
 /** What the Data page has loaded. `folder` is the last folder inspected by
  *  the location form; `chart` is the detail page's chart controls. */
 state.archive = {
@@ -2560,7 +2707,7 @@ state.archive = {
   offset: 0,
   page: null,
   detail: null,
-  chart: { interval: '1d', range: '6m', extended: false },
+  chart: { interval: '1d', range: '6m', extended: false, ind: loadIndicators() },
   bars: null,
   barsKey: '',
   folder: null,
@@ -2601,11 +2748,13 @@ async function loadBars(symbol) {
   const to = new Date();
   const from = new Date(to.getTime() - days * 86_400_000);
   const extended = a.chart.extended && a.chart.interval !== '1d';
-  const key = `${symbol}|${a.chart.interval}|${a.chart.range}|${extended}|${to.toISOString().slice(0, 13)}`;
+  const ind = activeIndicators(a.chart.interval).join(',');
+  const key = `${symbol}|${a.chart.interval}|${a.chart.range}|${extended}|${ind}|${to.toISOString().slice(0, 13)}`;
   if (key === a.barsKey && a.bars) return;
   try {
     const q = new URLSearchParams({ interval: a.chart.interval, from: isoDay(from), to: isoDay(to) });
     if (extended) q.set('session', 'extended');
+    if (ind) q.set('ind', ind);
     a.bars = await api(`/archive/symbols/${encodeURIComponent(symbol)}/bars?${q}`);
   } catch (err) {
     a.bars = { error: err.message };
@@ -3003,6 +3152,7 @@ function renderArchiveSymbol() {
               data-action="archive-extended" aria-pressed="${a.chart.extended}">Extended hours</button>` : ''}
         </div>
         ${candleChart(a.bars)}
+        ${indicatorControls()}
       </div>
     </section>
 
@@ -3097,16 +3247,27 @@ function candleChart(res) {
   if (res.error) return `<div class="banner banner--warn">${esc(res.error)}</div>`;
   const bars = res.bars ?? [];
   if (!bars.length) return '<div class="empty"><strong>No bars held for this window.</strong>Try a longer one, or another interval.</div>';
-  // Prices above, volume below, on one x axis: a move and the volume behind
-  // it are read together or not at all.
-  const W = 720, H = 300, pad = { l: 8, r: 58, t: 10, b: 22 }, volH = 56, gap = 8;
-  const priceBottom = H - pad.b - volH - gap;
+  const overlays = (res.indicators ?? []).filter((r) => r.pane === 'price');
+  const lowers = (res.indicators ?? []).filter((r) => r.pane === 'lower');
+  // Prices on top, volume under them, then a panel per oscillator — all on
+  // one x axis, because a move, the volume behind it and what an indicator
+  // made of it are read together or not at all.
+  const paneH = 70, paneGap = 10, volH = 56, gap = 8;
+  const W = 720, pad = { l: 8, r: 58, t: 10, b: 22 };
+  const priceH = 210;
+  const priceBottom = pad.t + priceH;
+  const volTop = priceBottom + gap;
+  const lowersTop = volTop + volH + paneGap;
+  const H = lowersTop + lowers.length * (paneH + paneGap) - (lowers.length ? paneGap : 0) + pad.b;
   let lo = Infinity, hi = -Infinity, vmax = 0;
   for (const b of bars) { lo = Math.min(lo, b.l); hi = Math.max(hi, b.h); vmax = Math.max(vmax, b.v); }
+  // Overlays share the price axis, so a band that runs past the bars widens
+  // it rather than being cut off at the edge.
+  for (const r of overlays) for (const l of r.lines) for (const v of l.values) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
   if (hi === lo) { hi += 1; lo -= 1; }
   const x = (i) => pad.l + ((i + 0.5) / bars.length) * (W - pad.l - pad.r);
-  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (priceBottom - pad.t);
-  const vy = (v) => H - pad.b - (vmax ? (v / vmax) * volH : 0);
+  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * priceH;
+  const vy = (v) => volTop + volH - (vmax ? (v / vmax) * volH : 0);
   const step = (W - pad.l - pad.r) / bars.length;
   const body = Math.max(1, step * 0.65);
   let marks;
@@ -3121,7 +3282,17 @@ function candleChart(res) {
     marks = `<polyline class="candle-line" points="${bars.map((b, i) => `${x(i).toFixed(1)},${y(b.c).toFixed(1)}`).join(' ')}" />`;
   }
   const volume = bars.map((b, i) => `<rect class="vol${b.c >= b.o ? ' vol--up' : ''}${b.s ? ' candle--ext' : ''}"
-    x="${x(i) - body / 2}" y="${vy(b.v)}" width="${body}" height="${Math.max(0, H - pad.b - vy(b.v))}" />`).join('');
+    x="${x(i) - body / 2}" y="${vy(b.v)}" width="${body}" height="${Math.max(0, volTop + volH - vy(b.v))}" />`).join('');
+  const legend = [];
+  const overlayLines = overlays.map((r, n) => {
+    const color = OVERLAY_COLORS[n % OVERLAY_COLORS.length];
+    const main = r.lines.find((l) => l.name === 'middle') ?? r.lines[0];
+    const last = [...main.values].reverse().find((v) => v != null);
+    legend.push(`<span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--line" style="border-top-color:${color}"></span>${esc(r.label)}${last != null ? ` <span class="field__hint">${esc(fmt(last))}</span>` : ''}</span>`);
+    // Bollinger's bands dashed either side of its solid middle.
+    return r.lines.map((l) => polyline(l.values, x, y, color, r.key.startsWith('bb') && l.name !== 'middle')).join('');
+  }).join('');
+  const panes = lowers.map((r, n) => lowerPane(r, x, lowersTop + n * (paneH + paneGap), paneH, pad.l, W - pad.r, step)).join('');
   const label = (t) => {
     const d = new Date(t * 1000);
     return state.archive.chart.interval === '1d' ? d.toLocaleDateString() : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -3134,18 +3305,22 @@ function candleChart(res) {
   if (last.vw) notes.push(`last VWAP ${last.vw.toPrecision(6)} over ${count(last.n)} trades`);
   else if (withVWAP) notes.push(`${count(withVWAP)} with the source's own VWAP`);
   return `
-    <svg class="candles" viewBox="0 0 ${W} ${H}" role="img" aria-label="${count(bars.length)} bars from ${esc(label(bars[0].t))} to ${esc(label(last.t))}, closing at ${last.c}">
+    ${legend.length ? `<div class="chart-legend">${legend.join('')}</div>` : ''}
+    <svg class="candles" viewBox="0 0 ${W} ${H}" role="img" aria-label="${count(bars.length)} bars from ${esc(label(bars[0].t))} to ${esc(label(last.t))}, closing at ${last.c}${
+      (res.indicators ?? []).length ? `, with ${esc(res.indicators.map((r) => r.label).join(', '))}` : ''}">
       <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(hi)}" y2="${y(hi)}" />
       <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(lo)}" y2="${y(lo)}" />
       ${marks}
+      ${overlayLines}
       ${volume}
-      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(hi) + 4}">${hi.toPrecision(5)}</text>
-      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(lo) + 4}">${lo.toPrecision(5)}</text>
-      <text class="candles__tick" x="${W - pad.r + 4}" y="${H - pad.b - volH + 8}">${esc(compact(vmax))}</text>
+      ${panes}
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(hi) + 4}">${esc(fmt(hi))}</text>
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(lo) + 4}">${esc(fmt(lo))}</text>
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${volTop + 8}">${esc(compact(vmax))}</text>
       <text class="candles__tick" x="${pad.l}" y="${H - 6}">${esc(label(bars[0].t))}</text>
       <text class="candles__tick" x="${W - pad.r}" y="${H - 6}" text-anchor="end">${esc(label(last.t))}</text>
     </svg>
-    <p class="field__hint">${esc(notes.join(' · '))}. Prices are split-adjusted; dividends are not taken out. Volume is below.</p>`;
+    <p class="field__hint">${esc(notes.join(' · '))}. Prices are split-adjusted; dividends are not taken out. Indicators are computed on the server from the archive's bars, settled before the first bar shown.</p>`;
 }
 
 /** A large count, short: 12.3M rather than 12,345,678. */
@@ -3225,6 +3400,26 @@ $('#view').addEventListener('submit', (event) => {
     }, { success: 'Collection settings saved' });
     return;
   }
+  if (form.id === 'archive-ind') {
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(form).entries());
+    const params = (values.params || '').split(/[\s,:]+/).filter(Boolean);
+    const spec = [values.kind, ...params].join(':');
+    if (a.chart.ind.includes(spec)) return;
+    const list = [...a.chart.ind, spec].slice(0, 12);
+    // Asked for once to be told the parameters are wrong: the server's
+    // sentence ("a period must be a whole number of bars…") is the message.
+    act(async () => {
+      const probe = new URLSearchParams({ interval: '1d', from: isoDay(new Date()), to: isoDay(new Date()), ind: spec });
+      await api(`/archive/symbols/${encodeURIComponent(routeArg())}/bars?${probe}`);
+      a.chart = { ...a.chart, ind: list };
+      saveIndicators(list);
+      a.bars = null;
+      clearDraft('archive-ind');
+    });
+    return;
+  }
   if (form.id === 'archive-fetch') {
     event.stopImmediatePropagation();
     event.preventDefault();
@@ -3255,6 +3450,15 @@ $('#view').addEventListener('click', (event) => {
       a.bars = null;
       act(async () => {});
       break;
+    case 'archive-ind': {
+      const spec = button.dataset.spec;
+      const list = a.chart.ind.includes(spec) ? a.chart.ind.filter((x) => x !== spec) : [...a.chart.ind, spec].slice(0, 12);
+      a.chart = { ...a.chart, ind: list };
+      saveIndicators(list);
+      a.bars = null;
+      act(async () => {});
+      break;
+    }
     case 'archive-extended':
       a.chart = { ...a.chart, extended: !a.chart.extended };
       a.bars = null;

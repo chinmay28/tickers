@@ -10,6 +10,8 @@ import (
 	"github.com/chinmay28/tickers/server/internal/archive"
 	"github.com/chinmay28/tickers/server/internal/archiver"
 	"github.com/chinmay28/tickers/server/internal/collector"
+	"github.com/chinmay28/tickers/server/internal/engine"
+	"github.com/chinmay28/tickers/server/internal/indicators"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
 )
@@ -260,15 +262,24 @@ func (s *Server) handleArchiveBars(w http.ResponseWriter, r *http.Request) {
 	// The regular session unless asked: that is what every other reader in
 	// the app sees, and a chart should agree with them by default.
 	extended := q.Get("session") == "extended"
-	var bars []quotes.Candle
-	err = s.readArchive(w, func(a *archive.Archive) error {
-		var err error
-		bars, err = a.Best(archive.Query{Symbol: r.PathValue("symbol"), Interval: interval, From: from, To: to, Extended: extended})
-		return err
-	})
+	specs, err := indicators.ParseList(q.Get("ind"))
 	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if s.noArchive(w) {
+		return
+	}
+	chart, err := s.engine.Chart(archive.Query{Symbol: r.PathValue("symbol"), Interval: interval, From: from, To: to, Extended: extended}, specs)
+	switch {
+	case errors.Is(err, engine.ErrNoArchive), errors.Is(err, archiver.ErrNotOpen):
+		writeError(w, http.StatusConflict, "the archive isn't open — choose a folder, or plug its drive back in")
+		return
+	case err != nil:
+		s.fail(w, err)
+		return
+	}
+	bars := chart.Bars
 	if len(bars) > maxBars {
 		writeError(w, http.StatusBadRequest, "that is more than "+strconv.Itoa(maxBars)+" bars; ask for a shorter window or a wider interval")
 		return
@@ -295,7 +306,11 @@ func (s *Server) handleArchiveBars(w http.ResponseWriter, r *http.Request) {
 			out[i].S = b.Session.String()
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"interval": interval, "bars": out})
+	results := chart.Indicators
+	if results == nil {
+		results = []indicators.Result{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interval": interval, "bars": out, "indicators": results})
 }
 
 // window parses a from/to pair of YYYY-MM-DD dates, to exclusive of the day

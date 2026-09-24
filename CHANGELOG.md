@@ -9,6 +9,18 @@ each heading must be `## <tag> — <title>`.
 
 ### A market-data archive, and a Data page to run it
 
+**Technical indicators on the symbol chart.**
+
+- **On the price:** SMA, EMA, Bollinger Bands and VWAP.
+- **In panels below:** RSI, MACD, Stochastic, ATR and On-Balance Volume.
+- **Presets and custom periods:** one tap each, or any parameters you add.
+  Your choice is remembered per browser.
+
+They are computed on the server over extra lead-in history, so every line is
+settled from the first bar shown. The numbers match other charting tools
+(Wilder's RSI and ATR, SMA-seeded EMAs). Also available as `&ind=` on the bars
+endpoint.
+
 **Every bar carries what its source knows, not only OHLCV.**
 
 - **VWAP and trade count.** Polygon's own volume-weighted price and trade

@@ -89,6 +89,10 @@ returns everything the client renders in one round trip.
 
 **`internal/expr`** is the formula language behind composites (see below).
 
+**`internal/indicators`** is pure indicator arithmetic (NaN = undefined) plus
+spec parsing; `Engine.Chart` reads warm-up history before the window so every
+line is settled at the first bar shown, then trims it.
+
 **`internal/archive` / `collector` / `archiver` / `universe`** are the
 market-data archive: a *folder* of SQLite files (catalog + one bar file per
 interval per year), on by default (the quick start creates one), configured
