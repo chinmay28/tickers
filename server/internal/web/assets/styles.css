@@ -1792,6 +1792,21 @@ thead .sectors__col {
 .candle--ext {
   opacity: 0.35;
 }
+/* Indicator lines: thin enough that the candles under them still read. */
+.ind-line {
+  fill: none;
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+.ind-line--dash {
+  stroke-dasharray: 4 3;
+  opacity: 0.8;
+}
+/* An oscillator's panel: a faint well, so where one panel ends and the next
+   begins reads without a border competing with the lines. */
+.pane {
+  fill: color-mix(in srgb, var(--surface-2) 45%, transparent);
+}
 .candle-line {
   fill: none;
   stroke: var(--primary);

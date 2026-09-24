@@ -1507,6 +1507,40 @@ Beyond OHLCV, a bar keeps three things a source can give:
   in winter lands right). A half day's afternoon therefore reads as regular. A
   trading calendar would fix that, and isn't worth its weight for a label.
 
+### Indicators
+
+`internal/indicators` is pure arithmetic: columns in, one value per bar out,
+NaN where an indicator isn't defined yet. The conventions are the ones
+charting platforms use, so a number here matches the one on anyone else's
+chart:
+
+- EMAs are seeded with the SMA of their first n values.
+- RSI and ATR use Wilder's smoothing (α = 1/n).
+- Bollinger uses the population standard deviation.
+- VWAP resets each session and prefers the source's own per-bar VWAP to the
+  typical price.
+
+A `Spec` (`macd:12:26:9`) is parsed and bounded there too, so the API only
+decodes.
+
+**Warm-up.** Every indicator is computed on the server, over more history than
+is shown. `Engine.Chart` asks each spec how many bars it needs before the first
+one shown to be settled (`Warmup`): n for an SMA, three periods for anything
+exponential, which puts the seed's weight under 1%. It reads back that far,
+using a calendar-generous `lookback`, computes, and trims the lead-in. A
+200-day average is then drawn from the chart's first bar instead of starting
+two hundred bars in. Where the archive holds less, the indicator is simply
+undefined until it has its n bars. It is never computed over fewer, which
+would draw a line that looks right and isn't.
+
+The chart draws what it is sent:
+
+- price overlays share the price axis, which widens to fit a band rather than
+  clip it;
+- each oscillator gets its own panel, fixed at 0–100 for RSI and Stochastic,
+  with their conventional guide lines, and scaled to its data otherwise;
+- a line is broken, not bridged, across undefined values.
+
 ### Renames
 
 A company that changes its symbol leaves the history collected under the old

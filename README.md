@@ -611,8 +611,25 @@ are as the source prints them: split-adjusted, not dividend-adjusted.
   are checked for a former name. When FB becomes META, reading META includes
   the bars collected as FB before the rename.
 
-Every standard indicator derives from what's stored: moving averages, RSI,
-MACD, Bollinger Bands, ATR, On-Balance Volume, VWAP, and more.
+**Indicators.** A symbol's page on the Data page charts its candles, with
+volume under them, and indicators you switch on with a tap:
+
+- **Over the price:** SMA (20, 50, 200), EMA, Bollinger Bands, and VWAP on
+  intraday charts.
+- **In panels below:** RSI, MACD, Stochastic, ATR and On-Balance Volume.
+- **Custom periods:** *Add* takes any parameters, such as `SMA 100`, `MACD 8,
+  21, 5` or `Bollinger 20, 2.5`. Your choice is remembered in this browser.
+
+The server computes them from the archive's bars, and reads extra history
+before the chart's first bar, so a 200-day average is already settled at the
+left edge rather than starting 200 bars in. Where the archive doesn't reach
+that far back, the line starts later rather than being averaged over fewer
+bars. The conventions are the usual ones, so the numbers match other charting
+tools: EMAs are seeded with an SMA, RSI and ATR use Wilder's smoothing, and
+VWAP resets each session.
+
+The same numbers are available to scripts from
+`/api/archive/symbols/{symbol}/bars?interval=1d&from=…&to=…&ind=sma:200,rsi,macd:12:26:9`.
 
 **How big.** About 60 bytes a bar. One-minute bars for the whole market are
 around 60 GB a year; daily history for the whole market is a few GB once.

@@ -34,6 +34,7 @@ func newArchiveHarness(t *testing.T) (*harness, *archiver.Manager) {
 	st.UpdateArchiveConfig(store.ArchivePatch{Paused: &paused, Listed: &listed})
 	eng := engine.New(st, stubProvider{}, publish.New(), nil)
 	m := archiver.New(archiver.Options{Store: st, Yahoo: emptyArchivist{}, Symbols: eng.Symbols})
+	eng.UseArchive(m)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { m.Run(ctx); close(done) }()
@@ -120,6 +121,13 @@ func TestTheDataPageLifecycle(t *testing.T) {
 	}
 	if code, _ := h.call(t, http.MethodGet, "/api/archive/symbols/TSLA/bars?interval=1d&from=2024-01-01&to=2024-12-31", nil); code != http.StatusOK {
 		t.Errorf("bars = %d", code)
+	}
+	code, chart := h.call(t, http.MethodGet, "/api/archive/symbols/TSLA/bars?interval=1d&from=2024-01-01&to=2024-12-31&ind=sma:50,macd", nil)
+	if inds, _ := chart["indicators"].([]any); code != http.StatusOK || len(inds) != 2 {
+		t.Errorf("bars with indicators = %d %v, want both computed", code, chart["indicators"])
+	}
+	if code, body := h.call(t, http.MethodGet, "/api/archive/symbols/TSLA/bars?interval=1d&from=2024-01-01&to=2024-12-31&ind=sma:0", nil); code != http.StatusBadRequest {
+		t.Errorf("an invalid indicator = %d %v, want 400 with the reason", code, body)
 	}
 	if code, _ := h.call(t, http.MethodPost, "/api/archive/symbols/TSLA/fetch",
 		map[string]any{"interval": "3m", "source": "yahoo", "from": "2024-01-01", "to": "2024-01-31"}); code != http.StatusBadRequest {
