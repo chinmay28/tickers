@@ -374,7 +374,7 @@ async function refreshView(opts) {
   if (route() === 'funds' && routeArg() && state.fund?.symbol !== routeArg().toUpperCase()) {
     loadFund(routeArg());
   }
-  if (route() === 'data') await loadArchive();
+  if (route() === 'data' || route() === 'settings') await loadArchive();
   if (route() === 'settings') {
     try {
       // The window is "the newest N", not "page number N". It grows when the
@@ -543,7 +543,12 @@ const ROUTES = ['watchlist', 'portfolios', 'funds', 'data', 'settings'];
  *  often any of it happens. The old hash still works — it is in bookmarks and
  *  in the phone's tab bar history — and it lands on the section rather than at
  *  the top of a long page. */
-const MOVED = { publishing: { route: 'settings', section: 'publishing' } };
+const MOVED = {
+  publishing: { route: 'settings', section: 'publishing' },
+  // Not a moved page but a shortcut: the Data page's links to where the
+  // archive is configured land on that section of Settings the same way.
+  archive: { route: 'settings', section: 'archive' },
+};
 
 /** The route is the first segment, so a page can carry a subject in the second.
  *  Funds is the only one that does — `#/funds/QQQ` — and it is a path rather
@@ -2573,7 +2578,7 @@ async function loadArchive() {
     a.error = err.message;
     return;
   }
-  if (a.view.state !== 'open') return;
+  if (a.view.state !== 'open' || route() !== 'data') return;
   const symbol = routeArg().toUpperCase();
   try {
     if (symbol) {
@@ -2650,14 +2655,16 @@ function renderData() {
     </div>
     ${archiveBanner(v)}
     ${v.state === 'open' || v.state === 'moving' ? archiveOverview(v) : ''}
-    ${archiveLocation(v)}
     ${v.state === 'open' ? archiveSymbols() : ''}
-    ${archiveSettings(v)}`;
+    <p class="field__hint">Where the archive lives, what it collects and from which sources — and switching it off — are in <a href="#/archive">Settings → Market-data archive</a>.</p>`;
 }
 
 function archiveBanner(v) {
+  if (v.state === 'disabled') {
+    return `<div class="banner">The archive is switched off. Nothing is being collected, and charts and backtests read from the quote source. It can be switched back on in <a href="#/archive">Settings</a>; everything it held is still there.</div>`;
+  }
   if (v.state === 'off') {
-    return `<div class="banner">No archive yet. Choose a folder below — an external drive is the right place for it: expect around 60 GB a year with one-minute bars for the whole market.</div>`;
+    return `<div class="banner">No archive yet. Choose its folder in <a href="#/archive">Settings</a> — an external drive is the right place for it: expect around 60 GB a year with one-minute bars for the whole market.</div>`;
   }
   if (v.state === 'unavailable') {
     return `<div class="banner banner--warn" role="status">
@@ -2859,6 +2866,23 @@ function symbolChips(s) {
   return chips.join(' ');
 }
 
+/** The archive's part of the Settings page: the switch, the folder, and what
+ *  is collected from where. The Data page shows what came of it. */
+function renderArchiveSettings() {
+  const a = state.archive;
+  if (a.disabled) return '';
+  const head = `
+    <div class="page-head page-head--sub" id="section-archive">
+      <div>
+        <h2>Market-data archive</h2>
+        <p>A local history of the market — minute bars for every listed US symbol, daily bars back to each listing — kept on this server and read by the performance sheet, backtests and sparklines.</p>
+      </div>
+      <a class="btn btn--outline" href="#/data">Open Data</a>
+    </div>`;
+  if (!a.view) return `${head}<div class="empty"><strong>${a.error ? esc(a.error) : 'Loading…'}</strong></div>`;
+  return `${head}${archiveBanner(a.view)}${archiveSettings(a.view)}${archiveLocation(a.view)}`;
+}
+
 function archiveSettings(v) {
   const s = v.settings;
   const on = new Set(s.intervals);
@@ -2867,6 +2891,11 @@ function archiveSettings(v) {
       <div class="card__head"><h2 class="card__title">Collection</h2></div>
       <div class="card__body">
         <div class="form-grid">
+          <div class="field">
+            <span class="field__label">Archive</span>
+            <label class="checkbox"><input type="checkbox" name="enabled" ${s.enabled ? 'checked' : ''} /> Collect market data</label>
+            <span class="field__hint">Off closes the archive and stops every request. Nothing stored is deleted, and switching it back on carries on where it stopped.</span>
+          </div>
           <div class="field">
             <span class="field__label">Collector</span>
             <label class="checkbox"><input type="checkbox" name="paused" ${s.paused ? 'checked' : ''} /> Paused</label>
@@ -3147,6 +3176,7 @@ $('#view').addEventListener('submit', (event) => {
     event.preventDefault();
     const values = Object.fromEntries(new FormData(form).entries());
     const payload = {
+      enabled: form.elements.enabled.checked,
       paused: form.elements.paused.checked,
       listed: form.elements.listed.checked,
       intervals: ARCHIVE_INTERVALS.filter((i) => form.elements[`interval_${i.key}`].checked).map((i) => i.key),
@@ -3409,6 +3439,8 @@ function renderSettings(data) {
         </div>
       </div>
     </div>
+
+    ${renderArchiveSettings()}
 
     ${
       // Publishing last, and in this order: where snapshots go, what they look
@@ -4754,6 +4786,6 @@ state.pendingScroll = movedSection();
 refreshView();
 // The Data page reads its own endpoint on the same beat as the state poll.
 setInterval(async () => {
-  if (route() === 'data') await loadArchive();
+  if (route() === 'data' || route() === 'settings') await loadArchive();
   loadState();
 }, POLL_MS);

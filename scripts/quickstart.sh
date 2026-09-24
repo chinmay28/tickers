@@ -53,6 +53,9 @@
 #   TICKERS_USER      service system user     (default: tickers)
 #   TICKERS_PREFIX    install prefix          (default: /opt/tickers; source → $PREFIX/src)
 #   TICKERS_DATA_DIR  database + backups dir  (default: /var/lib/tickers)
+#   TICKERS_ARCHIVE_DIR  market-data archive  (default: $TICKERS_DATA_DIR/archive;
+#                     "none" installs without one — it can still be switched on
+#                     and pointed at a folder from Settings later)
 #   PORT              port to listen on       (default: 8797)
 #   HOST              bind address            (default: 0.0.0.0)
 #   INSTALL_GO        auto | never            install Go if missing/old (default: auto; build-time only)
@@ -103,6 +106,16 @@ PORT="${PORT:-8797}"
 HOST="${HOST:-0.0.0.0}"
 INSTALL_GO="${INSTALL_GO:-auto}"
 BACKUP_KEEP="${BACKUP_KEEP:-10}"
+# The market-data archive is on by default. Its folder is where it starts; the
+# Settings page can move it, switch it off, or point it at an external drive
+# afterwards, and those choices live in the database, so re-running this
+# script never undoes them.
+ARCHIVE_DIR="${TICKERS_ARCHIVE_DIR:-$DATA_DIR/archive}"
+case "$ARCHIVE_DIR" in
+  none | off | "") ARCHIVE_DIR="" ;;
+  /*) ;;
+  *) die "TICKERS_ARCHIVE_DIR must be an absolute path, or 'none' (got '$ARCHIVE_DIR')." ;;
+esac
 
 SRC_DIR="$PREFIX/src"
 DB_PATH="$DATA_DIR/tickers.sqlite"
@@ -148,6 +161,7 @@ else
 fi
 printf '  %-10s %s\n' "data"     "$DATA_DIR"
 printf '  %-10s %s\n' "database" "$DB_PATH"
+printf '  %-10s %s\n' "archive"  "${ARCHIVE_DIR:-none (switch it on in Settings)}"
 printf '  %-10s %s\n' "service"  "${SERVICE_NAME}.service (user: $SVC_USER)"
 printf '  %-10s %s\n' "listen"   "http://$HOST:$PORT"
 
@@ -430,6 +444,38 @@ step "[6/7] systemd service"
 # binary replaces the running one (keeping the old one for rollback).
 install_staged
 
+# The archive's folder. Created here if its parent exists, and marked as an
+# archive by the binary itself — the server never does either on its own,
+# because an unplugged drive's mount point looks exactly like a fresh folder.
+# A folder that can't be prepared (a drive that isn't mounted) is a warning,
+# not a failed install: the watchlist doesn't need the archive, and the
+# Settings page says what is wrong with it.
+ARCHIVE_ENV=""
+if [ -n "$ARCHIVE_DIR" ]; then
+  if [ -d "$(dirname "$ARCHIVE_DIR")" ]; then
+    install -d -o "$SVC_USER" -g "$SVC_USER" -m 750 "$ARCHIVE_DIR"
+    if as_svc "$SERVER_BIN" archive-init "$ARCHIVE_DIR" >/dev/null; then
+      ok "market-data archive ready ($ARCHIVE_DIR)"
+    else
+      warn "could not initialise the archive at $ARCHIVE_DIR; choose a folder in Settings."
+    fi
+  else
+    warn "$(dirname "$ARCHIVE_DIR") does not exist (is the drive mounted?); choose the archive's folder in Settings later."
+  fi
+  ARCHIVE_ENV="Environment=TICKERS_ARCHIVE=$ARCHIVE_DIR"
+fi
+
+# Where the service may write: the data directory, plus the places external
+# drives are mounted, so an archive folder chosen on one from the Settings page
+# is writable — and stays writable when this script rewrites the unit on the
+# next upgrade. The leading "-" makes each optional: a missing /media or an
+# unplugged drive must never stop the service from starting.
+WRITABLE="$DATA_DIR -/mnt -/media"
+case "$ARCHIVE_DIR" in
+  "" | "$DATA_DIR"/* | /mnt/* | /media/*) ;;
+  *) WRITABLE="$WRITABLE -$ARCHIVE_DIR" ;;
+esac
+
 write_unit() {
   cat > "$UNIT_PATH" <<UNIT
 [Unit]
@@ -444,6 +490,7 @@ User=$SVC_USER
 Group=$SVC_USER
 WorkingDirectory=$WORK_DIR
 ExecStart=$SERVER_BIN serve --db $DB_PATH --port $PORT --host $HOST
+$ARCHIVE_ENV
 Restart=on-failure
 RestartSec=3
 
@@ -452,7 +499,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$DATA_DIR
+ReadWritePaths=$WRITABLE
 
 [Install]
 WantedBy=multi-user.target
@@ -536,6 +583,7 @@ ${C_GREEN}Tickers $verb and running.${C_OFF}
 
   Open it:     http://$lan_ip:$PORT      (http://localhost:$PORT on this machine)
   Database:    $DB_PATH
+  Archive:     ${ARCHIVE_DIR:-none — switch it on in Settings}  (on by default; Settings → Market-data archive)
   Backups:     $BACKUP_DIR
   Binary:      $SERVER_BIN (static; embeds the web client)
   $origin_line

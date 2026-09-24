@@ -283,6 +283,22 @@ svg {
   text-align: center;
   font-size: 0.88rem;
 }
+/* Inside the page (the Data page's notices) a banner sits among cards, so it
+   borrows their shape; the offline banner under the header stays full-bleed. */
+.app__main .banner {
+  border-radius: var(--radius-sm);
+  margin-bottom: 1rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.app__main .banner--warn {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.banner a,
+.field__hint a {
+  color: var(--primary);
+}
 .banner--warn {
   background: color-mix(in srgb, var(--warn) 18%, transparent);
   color: var(--text);

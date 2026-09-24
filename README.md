@@ -129,7 +129,7 @@ never lose data:**
   deleted stay deleted, and your pinned list stays as you set it.
 
 Override defaults with env vars (`PORT`, `HOST`, `TICKERS_INSTALL`,
-`TICKERS_REF`, `TICKERS_RELEASE`, `TICKERS_DATA_DIR`, `TICKERS_PREFIX`,
+`TICKERS_REF`, `TICKERS_RELEASE`, `TICKERS_DATA_DIR`, `TICKERS_ARCHIVE_DIR`, `TICKERS_PREFIX`,
 `TICKERS_USER`, …). The generated unit is documented at
 [`deploy/tickers.service`](./deploy/tickers.service). Manage it with
 `systemctl status tickers` and `journalctl -u tickers -f`.
@@ -463,7 +463,7 @@ The flags below are what has to be decided before the process starts.
 | `--quote-base-url` | `TICKERS_QUOTE_BASE_URL` | Yahoo's | quote API root — *overridable in the GUI* |
 | `--quote-timeout` | `TICKERS_QUOTE_TIMEOUT` | `20` | seconds per quote request — *overridable in the GUI* |
 | `--quote-user-agent` | `TICKERS_QUOTE_USER_AGENT` | a browser string | *overridable in the GUI* |
-| `--archive` | `TICKERS_ARCHIVE` | — | market-data archive folder — *overridden by the one chosen on the Data page* |
+| `--archive` | `TICKERS_ARCHIVE` | — (the quick start sets it) | market-data archive folder — *overridden by the one chosen in Settings* |
 | `--universe-url` | `TICKERS_UNIVERSE_URL` | Nasdaq Trader | where the exchange symbol lists are read |
 
 For the first five: **flag > env > default**.
@@ -489,20 +489,40 @@ non-zero if every symbol failed.
 
 ## The market-data archive
 
-Tickers can build a long-term archive of OHLCV bars for the whole listed US
+Tickers keeps a long-term archive of OHLCV bars for the whole listed US
 market, plus anything else you add, for analysis: candles, moving averages,
-backtests. The archive is a folder you choose, typically on an external drive,
-separate from the watchlist's database. It is managed on the **Data** page.
+backtests. The archive is a folder, separate from the watchlist's database.
+It is configured in **Settings → Market-data archive** and followed on the
+**Data** page.
 
-**Setting it up.** Mount the drive and create a folder on it. On the Data page,
-enter the folder's path, press **Check folder** to see its free space, then
-press **Start a new archive here**. Collection starts within seconds.
+**It is on by default.** The quick start creates `/var/lib/tickers/archive`
+and collection starts with the service. `TICKERS_ARCHIVE_DIR=/some/folder`
+starts it somewhere else, and `TICKERS_ARCHIVE_DIR=none` installs without one.
+A plain `tickers serve` has no archive until a folder is chosen in Settings (or
+passed with `--archive`).
+
+**On a Pi, move it off the SD card.** Minute bars for the whole market come to
+about 60 GB a year. Mount an external drive under `/mnt` or `/media` and create
+a folder on it (DEPLOYMENT.md has the steps). Then, in Settings:
+
+1. enter the folder's path and press **Check folder**;
+2. press **Move the archive here**.
+
+The move copies everything and then switches. The quick start's service is
+allowed to write under `/mnt` and `/media`, so nothing else needs changing.
+
+**Switching it off.** Untick **Collect market data** in Settings and save. The
+archive closes and every request stops. Charts and backtests read from Yahoo
+as they did before the archive existed. Nothing stored is deleted, and ticking
+it again carries on where it stopped. **Paused** is the lighter version: the
+archive stays open and readable, but nothing new is fetched.
 
 - **The folder must already exist.** The app never creates it. An unplugged
   drive leaves its mount point behind as an empty folder on the SD card, and
   the app must never write there.
-- **If the drive goes missing, collection pauses.** The Data page says so, and
-  collection resumes by itself within half a minute of the drive coming back.
+- **If the drive goes missing, collection pauses.** Settings and the Data page
+  both say so, and collection resumes by itself within half a minute of the
+  drive coming back.
 - **Everything else keeps working meanwhile.** The watchlist, the performance
   sheet and backtests fall back to Yahoo for as long as the archive is gone.
 
@@ -524,7 +544,7 @@ Coarser intraday bars are built from finer ones when they are read, so minute
 bars are the only intraday series kept current. Intraday history older than
 Yahoo keeps can only come from a paid source.
 
-**Adding a paid source.** Paste a Polygon.io API key on the Data page and give
+**Adding a paid source.** Paste a Polygon.io API key in Settings and give
 your plan's history (in years) and its per-minute request limit. Polygon now
 also goes by Massive.
 
@@ -553,14 +573,19 @@ The order is:
 5. digging history out breadth-first, so every symbol gets its second decade
    before any gets its third.
 
-**The Data page** has four parts:
+**Settings → Market-data archive** holds everything that configures it:
+
+- **The switch.** On or off, and paused or collecting.
+- **What to collect.** Which widths, the whole listed market or not, and
+  extras.
+- **Limits.** Yahoo's request spacing, and the free-space floor.
+- **Polygon.**
+- **The folder.** Check one, use one, or move the archive into one.
+
+**The Data page** shows what came of it:
 
 - **Overview:** how much is held, per width and in total, disk use and
   collection rate.
-- **Folder:** choose one, or move the archive between folders. A move copies
-  everything, then switches.
-- **Settings:** pause or resume, choose widths, and set extras, pacing, the
-  free-space floor and Polygon.
 - **Symbols:** a searchable browser over every symbol. Each symbol has a page
   with a candle chart, a month-by-month coverage heatmap per width, each
   source's progress, and actions: put it first, stop collecting it, walk it
@@ -585,8 +610,8 @@ own newest readings.
 From the command line:
 
 ```bash
-tickers serve   --archive /mnt/usb/tickers-archive   # a folder to use until one is chosen on the Data page
-tickers collect --db ./data/tickers.sqlite           # the collector alone, with the Data page's settings
+tickers serve   --archive /mnt/usb/tickers-archive   # a folder to use until one is chosen in Settings
+tickers collect --db ./data/tickers.sqlite           # the collector alone, with the Settings page's settings
 tickers coverage --db ./data/tickers.sqlite          # how far it has got
 ```
 

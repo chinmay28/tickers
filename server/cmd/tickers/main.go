@@ -63,6 +63,8 @@ func run(args []string) error {
 		return collect(args[1:])
 	case "coverage":
 		return coverage(args[1:])
+	case "archive-init":
+		return archiveInit(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version.String())
 		return nil
@@ -83,6 +85,7 @@ Usage:
   tickers publish [flags]   run one refresh + publish cycle, then exit
   tickers collect [flags]   run only the market-data archive collector
   tickers coverage [flags]  report how far the archive has got
+  tickers archive-init DIR  make an existing, empty folder a market-data archive
   tickers version           print the version
   tickers help              show this message
 
@@ -386,6 +389,29 @@ func coverage(args []string) error {
 		fmt.Printf("%-8s %9d %9d %8d %14d  %-10s  %-16s  %-16s\n", i.Interval, i.Started, i.Complete, i.Failing, i.Bars,
 			i.Oldest.Format("2006-01-02"), i.Newest.Local().Format("2006-01-02 15:04"), i.Stalest.Local().Format("2006-01-02 15:04"))
 	}
+	return nil
+}
+
+// archiveInit marks a folder as an archive. It is what the quick start runs
+// on the folder it creates, because the server itself never makes a folder an
+// archive on its own: an unplugged drive's empty mount point looks exactly
+// like a fresh folder, and filling it would fill the SD card beneath.
+func archiveInit(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: tickers archive-init DIR")
+	}
+	dir, err := filepath.Abs(args[0])
+	if err != nil {
+		return err
+	}
+	if archive.IsArchive(dir) {
+		fmt.Printf("%s is already an archive\n", dir)
+		return nil
+	}
+	if err := archive.Init(dir); err != nil {
+		return err
+	}
+	fmt.Printf("%s is now a market-data archive\n", dir)
 	return nil
 }
 

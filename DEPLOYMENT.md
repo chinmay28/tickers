@@ -43,6 +43,7 @@ Environment variables, all optional:
 | `TICKERS_USER` | `tickers` | service account |
 | `TICKERS_PREFIX` | `/opt/tickers` | install prefix |
 | `TICKERS_DATA_DIR` | `/var/lib/tickers` | database + backups |
+| `TICKERS_ARCHIVE_DIR` | `$TICKERS_DATA_DIR/archive` | market-data archive folder; `none` for no archive |
 | `PORT` / `HOST` | `8797` / `0.0.0.0` | listen address |
 | `INSTALL_GO` | `auto` | `never` to refuse installing Go |
 | `BACKUP_KEEP` | `10` | pre-upgrade snapshots retained |
@@ -194,9 +195,17 @@ at four in flight. If you are watching dozens of symbols and seeing failures,
 raise the interval (Settings → Refresh loop) before anything else — the presets
 go up to an hour.
 
-**Collecting the market-data archive.** Off until a folder is chosen on the
-Data page (see the README's *market-data archive* section). On a Pi it belongs
-on an external drive. Three one-time steps:
+**The market-data archive.** It is on by default. The quick start creates
+`$TICKERS_DATA_DIR/archive`, marks it as an archive (`tickers archive-init`),
+and passes it to the service as `TICKERS_ARCHIVE`. An environment variable
+rather than a flag, so a binary rolled back to one from before the archive
+existed ignores it instead of refusing to start. Switching it off, pausing it,
+and everything it collects are in Settings, stored in the database, so
+re-running the quick start never undoes them.
+
+The default folder sits next to the database, which on a Pi is the SD card.
+Minute bars for the whole market are around 60 GB a year, and that much
+writing wears an SD card out. Give it a drive:
 
 1. **Mount the drive at boot, without making the boot depend on it.** Use
    `nofail`, so a missing drive leaves the Pi booting normally rather than
@@ -212,27 +221,25 @@ on an external drive. Three one-time steps:
    Use ext4 (or another Linux filesystem) rather than exFAT or NTFS. SQLite's
    locking and the service user's ownership both need a real Unix filesystem.
 
-2. **Let the service write there.** The unit runs with `ProtectSystem=strict`,
-   which makes everything outside the data directory read-only to it. The
-   quick start rewrites the unit on every upgrade, so add the permission as a
-   drop-in, which survives upgrades:
+2. **Move it.** In Settings → Market-data archive, enter
+   `/mnt/usb/tickers-archive` and press *Check folder*. It should report the
+   drive's free space. If it warns that the folder is on the same disk as the
+   system, the drive isn't mounted. Then press *Move the archive here*.
 
-   ```bash
-   sudo mkdir -p /etc/systemd/system/tickers.service.d
-   printf '[Service]\nReadWritePaths=-/mnt/usb/tickers-archive\n' |
-     sudo tee /etc/systemd/system/tickers.service.d/archive.conf
-   sudo systemctl daemon-reload && sudo systemctl restart tickers
-   ```
+The unit the quick start writes lets the service write under `/mnt` and
+`/media` as well as its data directory. Its `ProtectSystem=strict` sandbox
+would otherwise make a drive read-only to it. Each entry is optional (`-/mnt`),
+so a missing drive never stops the service from starting.
 
-   The leading `-` makes the path optional. Without it, systemd refuses to
-   start the service at all while the drive is unplugged, and the watchlist
-   would go down with the archive.
+A drive mounted anywhere else needs one of the following:
 
-3. **Choose the folder.** On the Data page, enter `/mnt/usb/tickers-archive`
-   and press *Check folder*. If it says the server cannot write there, step 1's
-   ownership or step 2's drop-in is missing. If it warns that the folder is on
-   the same disk as the system, the drive isn't mounted. Then press *Start a
-   new archive here*.
+- re-run the quick start with `TICKERS_ARCHIVE_DIR` pointing into it, which
+  adds it to the unit; or
+- add a drop-in with `ReadWritePaths=-/that/folder` under
+  `/etc/systemd/system/tickers.service.d/`.
+
+To install without an archive at all, use `TICKERS_ARCHIVE_DIR=none`. It can
+still be switched on and given a folder from Settings later.
 
 How it behaves once it is running:
 
@@ -243,23 +250,23 @@ How it behaves once it is running:
   mount point in between: an archive folder has to carry its marker file to be
   opened, and the app never creates a folder.
 - **Disk.** One-minute bars for the whole market are around 60 GB a year.
-  Collection pauses when free space drops below the floor set on the Data page
+  Collection pauses when free space drops below the floor set in Settings
   (10 GB by default). Nothing is ever deleted to make room.
 - **Backups.** The pre-upgrade snapshots cover `tickers.sqlite` only. For the
-  archive, `rsync` the folder while collection is paused on the Data page. The
+  archive, `rsync` the folder while collection is paused in Settings. The
   per-year intraday files stop changing once their year is over, so only the
   current year's files and `catalog.sqlite` change between backups. Daily
   history can be refetched; intraday bars older than a source keeps cannot.
-- **Moving to a bigger drive.** Mount it, create an empty folder the service
-  owns, add it to the drop-in's `ReadWritePaths`, and use *Move the archive
-  here* on the Data page. It copies everything, then switches. The old folder
-  is left for you to delete.
+- **Moving to a bigger drive.** Mount it under `/mnt` or `/media`, create an
+  empty folder the service owns, and use *Move the archive here* in Settings.
+  It copies everything, then switches. The old folder is left for you to
+  delete.
 - **Progress.** The journal gets an `archive progress` line every 15 minutes;
   add `--verbose` for one line per request. `tickers coverage --db
   /var/lib/tickers/tickers.sqlite` prints a summary from the shell.
-- **Before the Data page existed** the archive could only be set with
-  `--archive`. `TICKERS_ARCHIVE` in the same drop-in still works as a
-  fallback, and whatever folder is chosen on the page takes precedence over it.
+- **Switching it off** in Settings closes the archive and stops every request.
+  Nothing stored is deleted. The folder can be deleted by hand afterwards if
+  the space is wanted back.
 
 **Timeouts.** A slow link can need more than the default 20 seconds per
 request; Settings → Quote source → **Request timeout** accepts 5–120s. Blank

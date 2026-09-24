@@ -34,6 +34,8 @@ import (
 const (
 	// StateOff: no archive folder is configured.
 	StateOff = "off"
+	// StateDisabled: switched off in Settings.
+	StateDisabled = "disabled"
 	// StateUnavailable: one is configured and can't be opened — the drive is
 	// unplugged, the folder was deleted, the files are unreadable.
 	StateUnavailable = "unavailable"
@@ -112,6 +114,11 @@ func (m *Manager) Run(ctx context.Context) {
 		if err != nil {
 			m.set(StateUnavailable, "", err.Error())
 			m.wait(ctx, retryEvery)
+			continue
+		}
+		if cfg, err := m.opts.Store.ArchiveConfig(); err == nil && !cfg.Enabled {
+			m.set(StateDisabled, path, "")
+			m.wait(ctx, time.Minute)
 			continue
 		}
 		if path == "" {
@@ -239,7 +246,7 @@ func (m *Manager) resolvePath() (string, error) {
 }
 
 // errRelocated ends a collector run whose folder is no longer the configured
-// one.
+// one, or that has been switched off.
 var errRelocated = errors.New("the archive folder changed")
 
 // planner builds the collector's plan from the stored settings on every step,
@@ -250,7 +257,7 @@ func (m *Manager) planner(path string) collector.Planner {
 		if err != nil {
 			return collector.Plan{}, err
 		}
-		if now, err := m.resolvePath(); err != nil || now != path || m.moving() {
+		if now, err := m.resolvePath(); err != nil || now != path || m.moving() || !cfg.Enabled {
 			return collector.Plan{}, errRelocated
 		}
 		var intervals []quotes.Interval
@@ -343,8 +350,9 @@ func (m *Manager) Enqueue(j collector.Job) (collector.Job, error) {
 
 // Status is the archive at a glance, for the Data page.
 type Status struct {
-	State string `json:"state"`
-	Path  string `json:"path"`
+	State   string `json:"state"`
+	Enabled bool   `json:"enabled"`
+	Path    string `json:"path"`
 	// FromFlag says the folder came from the startup flag rather than the
 	// Data page.
 	FromFlag  bool              `json:"fromFlag"`
@@ -384,6 +392,10 @@ func (m *Manager) Status(fresh bool) Status {
 
 	if cfg, err := m.opts.Store.ArchiveConfig(); err == nil {
 		st.FromFlag = cfg.Path == "" && m.opts.FallbackPath != ""
+		st.Enabled = cfg.Enabled
+		if st.Path == "" {
+			st.Path, _ = m.resolvePath()
+		}
 	}
 	if st.Path != "" {
 		if free, total, err := archive.Disk(st.Path); err == nil {
@@ -494,6 +506,11 @@ func (m *Manager) Use(path string) error {
 		}
 	}
 	if err := m.opts.Store.SetArchivePath(f.Path); err != nil {
+		return err
+	}
+	// Choosing a folder is asking for an archive in it.
+	on := true
+	if _, err := m.opts.Store.UpdateArchiveConfig(store.ArchivePatch{Enabled: &on}); err != nil {
 		return err
 	}
 	m.log.Info("market-data archive folder set", "path", f.Path, "new", !f.IsArchive)
