@@ -93,6 +93,11 @@ returns everything the client renders in one round trip.
 spec parsing; `Engine.Chart` reads warm-up history before the window so every
 line is settled at the first bar shown, then trims it.
 
+**`internal/strategy`** is the rule backtester, pure like `indicators`:
+`Compile` validates a `Definition` into a `Plan`, and `Simulate` runs it over
+bars. `Engine.RunStrategy` supplies the bars (archive only), the warm-up and the
+dividend adjustment.
+
 **`internal/archive` / `collector` / `archiver` / `universe`** are the
 market-data archive: a *folder* of SQLite files (catalog + one bar file per
 interval per year), on by default (the quick start creates one), configured

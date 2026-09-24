@@ -375,6 +375,9 @@ async function refreshView(opts) {
     loadFund(routeArg());
   }
   if (route() === 'data' || route() === 'settings') await loadArchive();
+  // The list is re-read with the page so a strategy saved in another tab
+  // shows up; the editor and the last result are the page's own and stay.
+  if (route() === 'strategies') await loadStrategies();
   if (route() === 'settings') {
     try {
       // The window is "the newest N", not "page number N". It grows when the
@@ -533,7 +536,7 @@ function restoreFocus(snap) {
  * Router
  * ------------------------------------------------------------------ */
 
-const ROUTES = ['watchlist', 'portfolios', 'funds', 'data', 'settings'];
+const ROUTES = ['watchlist', 'portfolios', 'funds', 'strategies', 'data', 'settings'];
 
 /** Routes that used to exist and now land somewhere else.
  *
@@ -637,6 +640,9 @@ function render({ force = false } = {}) {
       break;
     case 'funds':
       view.innerHTML = renderFunds(data);
+      break;
+    case 'strategies':
+      view.innerHTML = renderStrategies();
       break;
     case 'data':
       view.innerHTML = renderData();
@@ -3480,6 +3486,506 @@ $('#view').addEventListener('click', (event) => {
       act(() => post(`/archive/symbols/${encodeURIComponent(symbol)}/reset`, {}), {
         success: `Every source will walk ${symbol} again`,
       });
+      break;
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Strategies
+ *
+ * Rule-based backtests over the archive's bars. The editor's state is a plain
+ * object, not the form: conditions are rows that come and go, and a row's
+ * position is not an identity the draft system could key on. Every keystroke
+ * is copied into `state.strategy.draft`, and every render draws from it — so a
+ * background redraw puts back exactly what is on screen without the form
+ * needing a key of its own (it deliberately has none, which keeps it out of
+ * the draft stash).
+ * ------------------------------------------------------------------ */
+
+const STRATEGY_OPS = [
+  ['crosses_above', 'crosses above'],
+  ['crosses_below', 'crosses below'],
+  ['>', 'is above'],
+  ['<', 'is below'],
+  ['>=', 'is at least'],
+  ['<=', 'is at most'],
+];
+
+/** What a side of a condition can be. Offered, not enforced: any indicator
+ *  spec the chart takes works here, with `.line` to pick one of several. */
+const STRATEGY_OPERANDS = [
+  ['close', 'the bar’s close'], ['open', ''], ['high', ''], ['low', ''], ['volume', ''],
+  ['sma:20', 'SMA 20'], ['sma:50', 'SMA 50'], ['sma:200', 'SMA 200'],
+  ['ema:12', 'EMA 12'], ['ema:26', 'EMA 26'],
+  ['rsi:14', 'RSI 14, 0–100'],
+  ['macd', 'MACD line'], ['macd.signal', 'MACD signal'], ['macd.histogram', 'MACD histogram'],
+  ['bb:20:2.upper', 'upper Bollinger band'], ['bb:20:2.middle', 'middle band'], ['bb:20:2.lower', 'lower band'],
+  ['stoch.k', 'Stochastic %K'], ['stoch.d', 'Stochastic %D'],
+  ['atr:14', 'ATR 14'], ['obv', 'on-balance volume'], ['vwap', 'session VWAP (intraday)'],
+  ['30', ''], ['70', ''], ['0', ''],
+];
+
+const cond = (left, op, right) => ({ left, op, right });
+
+/** Starting points. Each is a textbook rule, here to be edited rather than
+ *  believed. */
+const STRATEGY_TEMPLATES = [
+  {
+    key: 'golden', label: 'Golden cross',
+    def: {
+      entry: { match: 'all', conditions: [cond('sma:50', 'crosses_above', 'sma:200')] },
+      exit: { match: 'all', conditions: [cond('sma:50', 'crosses_below', 'sma:200')] },
+      stopLoss: 0, takeProfit: 0,
+    },
+  },
+  {
+    key: 'rsi', label: 'RSI mean reversion',
+    def: {
+      entry: { match: 'all', conditions: [cond('rsi:14', 'crosses_above', '30'), cond('close', '>', 'sma:200')] },
+      exit: { match: 'any', conditions: [cond('rsi:14', '>', '70')] },
+      stopLoss: 8, takeProfit: 0,
+    },
+  },
+  {
+    key: 'macd', label: 'MACD crossover',
+    def: {
+      entry: { match: 'all', conditions: [cond('macd', 'crosses_above', 'macd.signal')] },
+      exit: { match: 'all', conditions: [cond('macd', 'crosses_below', 'macd.signal')] },
+      stopLoss: 0, takeProfit: 0,
+    },
+  },
+  {
+    key: 'bb', label: 'Bollinger bounce',
+    def: {
+      entry: { match: 'all', conditions: [cond('close', 'crosses_above', 'bb:20:2.lower')] },
+      exit: { match: 'any', conditions: [cond('close', '>=', 'bb:20:2.upper')] },
+      stopLoss: 6, takeProfit: 0,
+    },
+  },
+];
+
+function yearsAgo(n) {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - n);
+  return isoDay(d);
+}
+
+function blankStrategy(template = STRATEGY_TEMPLATES[0], symbol = 'SPY') {
+  return {
+    id: '',
+    name: template.label,
+    def: {
+      symbol, interval: '1d', from: yearsAgo(10), to: '',
+      feePercent: 0.05, initial: 10000, dividends: true,
+      ...structuredClone(template.def),
+    },
+  };
+}
+
+state.strategy = {
+  list: null,
+  error: '',
+  draft: blankStrategy(),
+  /** The last run: the definition it ran, and what came back or why not. */
+  result: null,
+  running: false,
+};
+
+async function loadStrategies() {
+  try {
+    state.strategy.list = (await api('/strategies'))?.strategies ?? [];
+    state.strategy.error = '';
+  } catch (err) {
+    state.strategy.error = err.message;
+  }
+}
+
+function renderStrategies() {
+  const s = state.strategy;
+  const d = s.draft;
+  const saved = s.list ?? [];
+  return `
+    <div class="page-head">
+      <div>
+        <h1>Strategies</h1>
+        <p>Rules like “buy when the 50-day average crosses above the 200-day, sell when RSI goes over 70”, tested on one symbol’s history from the archive and set against simply holding it.</p>
+      </div>
+    </div>
+    ${s.error ? `<div class="banner banner--warn">${esc(s.error)}</div>` : ''}
+    <div class="presets strategy-saved" role="group" aria-label="Saved strategies">
+      ${saved.map((st) => `
+        <button class="btn btn--sm ${st.id === d.id ? 'btn--outline btn--active' : 'btn--ghost'}" type="button"
+          data-action="strategy-open" data-id="${esc(st.id)}" aria-pressed="${st.id === d.id}">${esc(st.name)}
+          <span class="field__hint">${esc(st.definition?.symbol ?? '')}</span></button>`).join('')}
+      <button class="btn btn--sm btn--ghost" type="button" data-action="strategy-new">+ New</button>
+    </div>
+    ${strategyEditor(d)}
+    ${strategyResult()}`;
+}
+
+function strategyEditor(d) {
+  const def = d.def;
+  return `
+    <form class="card strategy" data-strategy autocomplete="off">
+      <div class="card__head">
+        <h2 class="card__title">${d.id ? 'Edit strategy' : 'New strategy'}</h2>
+        <span class="card__meta presets">Start from:
+          ${STRATEGY_TEMPLATES.map((t) => `<button class="btn btn--sm btn--ghost" type="button" data-action="strategy-template" data-key="${t.key}">${esc(t.label)}</button>`).join('')}
+        </span>
+      </div>
+      <div class="card__body">
+        <div class="strategy__grid">
+          <div class="field strategy__name">
+            <label class="field__label" for="strategy-name">Name</label>
+            <input class="input" id="strategy-name" name="name" maxlength="80" value="${esc(d.name)}" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-symbol">Symbol</label>
+            <input class="input input--mono" id="strategy-symbol" name="symbol" value="${esc(def.symbol)}" autocapitalize="characters" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-interval">Bars</label>
+            <select class="select" id="strategy-interval" name="interval">
+              ${ARCHIVE_INTERVALS.map((i) => `<option value="${i.key}" ${def.interval === i.key ? 'selected' : ''}>${esc(i.label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-from">From</label>
+            <input class="input" id="strategy-from" name="from" type="date" value="${esc(def.from)}" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-to">To</label>
+            <input class="input" id="strategy-to" name="to" type="date" value="${esc(def.to)}" />
+            <span class="field__hint">Empty is today.</span>
+          </div>
+        </div>
+        ${ruleEditor('entry', 'Buy when', def.entry)}
+        ${ruleEditor('exit', 'Sell when', def.exit)}
+        <p class="field__hint">No sell rule holds until a stop, a target or the end of the test. A signal on a bar’s close trades at the next bar’s open.</p>
+        <div class="strategy__grid">
+          <div class="field">
+            <label class="field__label" for="strategy-stop">Stop-loss %</label>
+            <input class="input" id="strategy-stop" name="stopLoss" type="number" min="0" max="99" step="any" value="${esc(def.stopLoss || '')}" placeholder="none" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-target">Take-profit %</label>
+            <input class="input" id="strategy-target" name="takeProfit" type="number" min="0" step="any" value="${esc(def.takeProfit || '')}" placeholder="none" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-fee">Fee % a trade</label>
+            <input class="input" id="strategy-fee" name="feePercent" type="number" min="0" max="10" step="any" value="${esc(def.feePercent ?? 0)}" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="strategy-initial">Starting capital</label>
+            <input class="input" id="strategy-initial" name="initial" type="number" min="1" step="any" value="${esc(def.initial || 10000)}" />
+          </div>
+          <div class="field">
+            <span class="field__label">Dividends</span>
+            <label class="checkbox"><input type="checkbox" name="dividends" ${def.dividends ? 'checked' : ''} /> Trade adjusted prices</label>
+            <span class="field__hint">Daily bars only: payouts count while a position is held, as they do for holding.</span>
+          </div>
+        </div>
+        <datalist id="strategy-operands">
+          ${STRATEGY_OPERANDS.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('')}
+        </datalist>
+      <div class="form-actions strategy__actions">
+        <button class="btn btn--primary" type="submit" ${state.strategy.running ? 'disabled' : ''}>${state.strategy.running ? 'Running…' : 'Run backtest'}</button>
+        <button class="btn btn--outline" type="button" data-action="strategy-save">${d.id ? 'Save' : 'Save strategy'}</button>
+        ${d.id ? `<button class="btn btn--ghost" type="button" data-action="strategy-copy">Save as new</button>
+          <button class="btn btn--ghost btn--danger" type="button" data-action="strategy-delete">Delete</button>` : ''}
+      </div>
+      </div>
+    </form>`;
+}
+
+function ruleEditor(side, title, rule) {
+  const rows = rule.conditions.map((c, i) => `
+    <div class="condition" role="group" aria-label="${esc(title)} condition ${i + 1}">
+      <input class="input input--mono" name="${side}.${i}.left" value="${esc(c.left)}" list="strategy-operands"
+        aria-label="Left side" spellcheck="false" autocapitalize="off" />
+      <select class="select" name="${side}.${i}.op" aria-label="Comparison">
+        ${STRATEGY_OPS.map(([v, l]) => `<option value="${esc(v)}" ${c.op === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select>
+      <input class="input input--mono" name="${side}.${i}.right" value="${esc(c.right)}" list="strategy-operands"
+        aria-label="Right side" spellcheck="false" autocapitalize="off" />
+      <button class="btn btn--sm btn--ghost" type="button" data-action="strategy-remove" data-side="${side}" data-index="${i}"
+        aria-label="Remove this condition">×</button>
+    </div>`).join('');
+  return `
+    <fieldset class="rule">
+      <legend class="field__label">${esc(title)}
+        <select class="select select--inline" name="${side}.match" aria-label="How the conditions combine">
+          <option value="all" ${rule.match !== 'any' ? 'selected' : ''}>all of</option>
+          <option value="any" ${rule.match === 'any' ? 'selected' : ''}>any of</option>
+        </select></legend>
+      ${rows || `<p class="field__hint">${side === 'entry' ? 'A strategy needs at least one buy condition.' : 'No sell conditions.'}</p>`}
+      ${rule.conditions.length < 8 ? `<button class="btn btn--sm btn--ghost" type="button" data-action="strategy-add" data-side="${side}">+ Condition</button>` : ''}
+    </fieldset>`;
+}
+
+/** Copy one field of the editor into the draft. Field names are paths:
+ *  `symbol`, `entry.2.left`, `exit.match`. */
+function syncStrategyField(el) {
+  const d = state.strategy.draft;
+  const name = el.name;
+  if (!name) return;
+  if (name === 'name') { d.name = el.value; return; }
+  const [side, a, b] = name.split('.');
+  if (side === 'entry' || side === 'exit') {
+    if (a === 'match') d.def[side].match = el.value;
+    else if (d.def[side].conditions[a]) d.def[side].conditions[a][b] = el.value;
+    return;
+  }
+  if (el.type === 'checkbox') d.def[name] = el.checked;
+  else if (el.type === 'number') d.def[name] = el.value === '' ? 0 : Number(el.value);
+  else d.def[name] = name === 'symbol' ? el.value.trim().toUpperCase() : el.value;
+}
+
+function strategyResult() {
+  const r = state.strategy.result;
+  if (!r) return '';
+  if (r.error) return `<div class="banner banner--warn" role="status">${esc(r.error)}</div>`;
+  const res = r.res;
+  const m = res.strategy, h = res.hold, st = res.stats;
+  const tile = (label, a, b, fmtv, better = 'high') => {
+    const wins = better === 'high' ? a > b : a < b;
+    return `<div class="stat"><div class="stat__label">${esc(label)}</div>
+      <div class="stat__value ${a === b ? '' : wins ? 'stat__value--up' : 'stat__value--down'}">${fmtv(a)}</div>
+      <div class="field__hint">holding: ${fmtv(b)}</div></div>`;
+  };
+  const pct = (v) => percent(v);
+  const warnings = (res.warnings ?? []).map((w) => `<div class="banner banner--warn">${esc(w.charAt(0).toUpperCase() + w.slice(1))}.</div>`).join('');
+  return `
+    ${warnings}
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">${esc(res.symbol)} · ${esc(when(res.from))} – ${esc(when(res.to))}</h2>
+        <span class="card__meta">${count(res.bars)} bars of ${esc(res.interval)}</span></div>
+      <div class="card__body">
+        <div class="stat-row">
+          ${tile('Total return', m.totalReturn, h.totalReturn, pct)}
+          ${tile('A year', m.cagr, h.cagr, pct)}
+          ${tile('Worst drawdown', m.maxDrawdown, h.maxDrawdown, pct)}
+          ${tile('Sharpe', m.sharpe, h.sharpe, (v) => v.toFixed(2))}
+          ${tile('Ends with', m.final, h.final, amount)}
+        </div>
+        ${equityChart(res)}
+        <div class="chart-legend">
+          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--line"></span>Strategy</span>
+          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--dash"></span>Buy and hold</span>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">Signals</h2>
+        <span class="card__meta">▲ bought · ▼ sold</span></div>
+      <div class="card__body">
+        ${signalChart(res)}
+        <div class="stat-row">
+          <div class="stat"><div class="stat__label">Trades</div><div class="stat__value">${count(st.trades)}</div>
+            <div class="field__hint">in the market ${percent(st.exposure, 0).replace(/^\+/, '')} of the time</div></div>
+          <div class="stat"><div class="stat__label">Won</div><div class="stat__value">${st.trades ? percent(st.winRate, 0).replace(/^\+/, '') : '—'}</div>
+            <div class="field__hint">profit factor ${st.profitFactor == null ? (st.trades ? 'no losses' : '—') : st.profitFactor.toFixed(2)}</div></div>
+          <div class="stat"><div class="stat__label">Average trade</div><div class="stat__value">${st.trades ? pct(st.avgTrade) : '—'}</div>
+            <div class="field__hint">held ${st.trades ? st.avgBars.toFixed(1) : '—'} bars</div></div>
+          <div class="stat"><div class="stat__label">Best / worst</div><div class="stat__value">${st.trades ? `${pct(st.bestTrade)} / ${pct(st.worstTrade)}` : '—'}</div></div>
+        </div>
+        ${tradesTable(res)}
+      </div>
+    </section>
+    <p class="field__hint">Fills are at the next bar’s open after a signal, all in, with the fee charged both ways. A stop or target is checked against each bar’s range and fills at its level, or at the open when the bar gaps past it; a bar that reaches both counts as the stop. Past results on one symbol are a description, not a forecast.</p>`;
+}
+
+/** The strategy's equity against holding, on one scale. */
+function equityChart(res) {
+  const pts = res.equity ?? [];
+  if (pts.length < 2) return '<div class="empty">Nothing to chart.</div>';
+  const W = 720, H = 220, pad = { l: 8, r: 64, t: 10, b: 22 };
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { lo = Math.min(lo, p.equity, p.hold); hi = Math.max(hi, p.equity, p.hold); }
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const x = (i) => pad.l + (i / (pts.length - 1)) * (W - pad.l - pad.r);
+  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const line = (pick) => pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(pick(p)).toFixed(1)}`).join(' ');
+  const last = pts[pts.length - 1];
+  const stroke = `var(--${last.equity >= pts[0].equity ? 'up' : 'down'})`;
+  const start = pts[0].equity;
+  return `
+    <svg class="candles" viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Strategy equity from ${esc(amount(start))} to ${esc(amount(last.equity))}, against ${esc(amount(last.hold))} holding">
+      <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(start)}" y2="${y(start)}" />
+      <path d="${line((p) => p.hold)}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4" stroke-linejoin="round" />
+      <path d="${line((p) => p.equity)}" fill="none" stroke="${stroke}" stroke-width="1.8" stroke-linejoin="round" />
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(hi) + 4}">${esc(compact(hi))}</text>
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(lo)}">${esc(compact(lo))}</text>
+      <text class="candles__tick" x="${pad.l}" y="${H - 6}">${esc(when(pts[0].t))}</text>
+      <text class="candles__tick" x="${W - pad.r}" y="${H - 6}" text-anchor="end">${esc(when(last.t))}</text>
+    </svg>`;
+}
+
+/** The price with the rules' overlays and a mark at every fill. Marks are
+ *  placed by time, not by index: the price series is thinned for drawing,
+ *  and a trade's bar may not be one of the points kept. */
+function signalChart(res) {
+  const pts = res.prices ?? [];
+  if (pts.length < 2) return '';
+  const W = 720, H = 240, pad = { l: 8, r: 64, t: 12, b: 22 };
+  const times = pts.map((p) => Date.parse(p.t));
+  const t0 = times[0], t1 = times[times.length - 1] || t0 + 1;
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { lo = Math.min(lo, p.close); hi = Math.max(hi, p.close); }
+  for (const l of res.lines ?? []) for (const v of l.values) if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  for (const t of res.trades ?? []) { lo = Math.min(lo, t.entryPrice, t.exitPrice || t.entryPrice); hi = Math.max(hi, t.entryPrice, t.exitPrice || t.entryPrice); }
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const xt = (t) => pad.l + ((t - t0) / (t1 - t0 || 1)) * (W - pad.l - pad.r);
+  const x = (i) => xt(times[i]);
+  const y = (v) => pad.t + (1 - (v - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const price = `<polyline class="candle-line" points="${pts.map((p, i) => `${x(i).toFixed(1)},${y(p.close).toFixed(1)}`).join(' ')}" />`;
+  const legend = [];
+  const overlays = (res.lines ?? []).map((l, n) => {
+    const color = OVERLAY_COLORS[n % OVERLAY_COLORS.length];
+    legend.push(`<span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--line" style="border-top-color:${color}"></span>${esc(l.label)}</span>`);
+    return polyline(l.values, x, y, color);
+  }).join('');
+  // Too many marks to read is a smear; past a few hundred trades the table
+  // says it better.
+  const trades = (res.trades ?? []).slice(-300);
+  const marks = trades.map((t) => {
+    const ex = xt(Date.parse(t.entryTime)), ey = y(t.entryPrice);
+    let out = `<path class="trade-mark trade-mark--buy" d="M${ex.toFixed(1)} ${(ey + 3).toFixed(1)} l-4 7 h8 z"><title>Bought ${esc(when(t.entryTime, { time: res.interval !== '1d' }))} at ${esc(fmt(t.entryPrice))}</title></path>`;
+    if (t.reason !== 'open') {
+      const xx = xt(Date.parse(t.exitTime)), xy = y(t.exitPrice);
+      out += `<path class="trade-mark trade-mark--${t.return >= 0 ? 'win' : 'loss'}" d="M${xx.toFixed(1)} ${(xy - 3).toFixed(1)} l-4 -7 h8 z"><title>Sold (${esc(t.reason)}) ${esc(when(t.exitTime, { time: res.interval !== '1d' }))} at ${esc(fmt(t.exitPrice))}: ${esc(percent(t.return))}</title></path>`;
+    }
+    return out;
+  }).join('');
+  return `
+    ${legend.length ? `<div class="chart-legend">${legend.join('')}</div>` : ''}
+    <svg class="candles" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(res.symbol)} with ${count((res.trades ?? []).length)} trades marked">
+      <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(hi)}" y2="${y(hi)}" />
+      <line class="candles__grid" x1="${pad.l}" x2="${W - pad.r}" y1="${y(lo)}" y2="${y(lo)}" />
+      ${price}
+      ${overlays}
+      ${marks}
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(hi) + 4}">${esc(fmt(hi))}</text>
+      <text class="candles__tick" x="${W - pad.r + 4}" y="${y(lo)}">${esc(fmt(lo))}</text>
+      <text class="candles__tick" x="${pad.l}" y="${H - 6}">${esc(when(pts[0].t))}</text>
+      <text class="candles__tick" x="${W - pad.r}" y="${H - 6}" text-anchor="end">${esc(when(pts[pts.length - 1].t))}</text>
+    </svg>`;
+}
+
+const REASONS = { rule: 'rule', stop: 'stop-loss', target: 'take-profit', open: 'still open' };
+
+function tradesTable(res) {
+  const trades = res.trades ?? [];
+  if (!trades.length) return '<p class="field__hint">The buy rule never held over this window.</p>';
+  const time = res.interval !== '1d';
+  // Newest first: the last few trades are the ones a reader checks against
+  // what they remember of the chart.
+  const rows = [...trades].reverse().slice(0, 500).map((t) => `
+    <tr>
+      <td>${esc(when(t.entryTime, { time }))}</td>
+      <td class="num">${esc(fmt(t.entryPrice))}</td>
+      <td>${t.reason === 'open' ? '—' : esc(when(t.exitTime, { time }))}</td>
+      <td class="num">${esc(fmt(t.exitPrice))}</td>
+      <td class="num"><span class="perf-change perf-change--${direction(t.return)}">${esc(percent(t.return))}</span></td>
+      <td class="num">${count(t.bars)}</td>
+      <td>${esc(REASONS[t.reason] ?? t.reason)}</td>
+    </tr>`).join('');
+  return `
+    <div class="table-scroll"><table class="table">
+      <thead><tr><th>Bought</th><th class="num">at</th><th>Sold</th><th class="num">at</th><th class="num">Return</th><th class="num">Bars</th><th>Why</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    ${trades.length > 500 ? `<p class="field__hint">The newest 500 of ${count(trades.length)} trades.</p>` : ''}`;
+}
+
+async function runStrategy() {
+  const s = state.strategy;
+  if (s.running) return;
+  s.running = true;
+  render({ force: true });
+  const def = structuredClone(s.draft.def);
+  try {
+    s.result = { def, res: await post('/strategies/run', { definition: def }) };
+  } catch (err) {
+    s.result = { def, error: err.message };
+  } finally {
+    s.running = false;
+    render({ force: true });
+  }
+}
+
+$('#view').addEventListener('input', (event) => {
+  if (event.target.closest('[data-strategy]')) syncStrategyField(event.target);
+});
+$('#view').addEventListener('change', (event) => {
+  if (event.target.closest('[data-strategy]')) syncStrategyField(event.target);
+});
+
+$('#view').addEventListener('submit', (event) => {
+  if (!event.target.matches('[data-strategy]')) return;
+  event.stopImmediatePropagation();
+  event.preventDefault();
+  runStrategy();
+}, true);
+
+$('#view').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-action^="strategy-"]');
+  if (!button) return;
+  const s = state.strategy;
+  const d = s.draft;
+  switch (button.dataset.action) {
+    case 'strategy-add':
+      d.def[button.dataset.side].conditions.push(cond('close', '>', 'sma:50'));
+      render({ force: true });
+      break;
+    case 'strategy-remove':
+      d.def[button.dataset.side].conditions.splice(Number(button.dataset.index), 1);
+      render({ force: true });
+      break;
+    case 'strategy-template': {
+      const t = STRATEGY_TEMPLATES.find((x) => x.key === button.dataset.key);
+      // A template replaces the rules, not what they run on: the symbol,
+      // dates and costs someone set up stay.
+      s.draft = { ...d, name: d.id ? d.name : t.label, def: { ...d.def, ...structuredClone(t.def) } };
+      render({ force: true });
+      break;
+    }
+    case 'strategy-new':
+      s.draft = blankStrategy(STRATEGY_TEMPLATES[0], d.def.symbol || 'SPY');
+      s.result = null;
+      render({ force: true });
+      break;
+    case 'strategy-open': {
+      const st = (s.list ?? []).find((x) => x.id === button.dataset.id);
+      if (!st) return;
+      const base = blankStrategy();
+      s.draft = { id: st.id, name: st.name, def: { ...base.def, ...structuredClone(st.definition) } };
+      for (const side of ['entry', 'exit']) {
+        s.draft.def[side] = { match: 'all', conditions: [], ...s.draft.def[side] };
+        s.draft.def[side].conditions ??= [];
+      }
+      s.result = null;
+      render({ force: true });
+      break;
+    }
+    case 'strategy-save':
+    case 'strategy-copy': {
+      const copy = button.dataset.action === 'strategy-copy';
+      const body = { name: copy ? `${d.name} (copy)` : d.name, definition: d.def };
+      act(async () => {
+        const saved = d.id && !copy
+          ? await send('PUT')(`/strategies/${encodeURIComponent(d.id)}`, body)
+          : await post('/strategies', body);
+        s.draft = { ...d, id: saved.id, name: saved.name };
+      }, { success: copy ? 'Saved as a new strategy' : 'Strategy saved' });
+      break;
+    }
+    case 'strategy-delete':
+      if (!confirm(`Delete “${d.name}”?`)) return;
+      act(async () => {
+        await del(`/strategies/${encodeURIComponent(d.id)}`);
+        s.draft = { ...d, id: '' };
+      }, { success: 'Strategy deleted' });
       break;
   }
 });

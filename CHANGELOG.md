@@ -9,6 +9,21 @@ each heading must be `## <tag> — <title>`.
 
 ### A market-data archive, and a Data page to run it
 
+**Strategies: backtest your own trading rules.** A new Strategies page.
+
+- **Rules from indicators:** buy and sell rules built from price fields,
+  numbers and indicators, such as *SMA 50 crosses above SMA 200* or *RSI 14
+  over 70*.
+- **Tested on the archive:** runs over the archive's daily or intraday bars,
+  with stop-loss, take-profit, fees and dividends.
+- **Compared with holding:** returns, drawdown and Sharpe side by side with
+  buy-and-hold, plus an equity chart, a price chart marking every trade, and
+  the trade list.
+- **Templates and saving:** four templates to start from, and strategies are
+  saved on the server.
+- **API:** `/api/strategies` (list, create, update, delete) and
+  `POST /api/strategies/run`.
+
 **Technical indicators on the symbol chart.**
 
 - **On the price:** SMA, EMA, Bollinger Bands and VWAP.

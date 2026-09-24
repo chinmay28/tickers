@@ -250,4 +250,23 @@ ALTER TABLE logos ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
 UPDATE logos SET updated_at = fetched_at WHERE updated_at = '';
 `,
 	},
+	{
+		// Saved trading strategies. A whole new table, so an older binary
+		// rolled back onto this database never reads it.
+		//
+		// The rules are one JSON column, like a portfolio's allocations and
+		// for the same reasons: nothing queries inside them, they are written
+		// and read as a unit, and the shape can grow — a new comparison, a
+		// trailing stop — without another migration.
+		ID: "011_strategies",
+		SQL: `
+CREATE TABLE strategies (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  definition TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`,
+	},
 }

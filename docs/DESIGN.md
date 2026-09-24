@@ -1541,6 +1541,38 @@ The chart draws what it is sent:
   with their conventional guide lines, and scaled to its data otherwise;
 - a line is broken, not bridged, across undefined values.
 
+### Strategies
+
+`internal/strategy` is pure like `indicators`: a `Definition` (plain strings
+and numbers, the same JSON the editor sends and the store keeps) compiles into
+a `Plan`, and `Simulate` runs a plan over bars handed to it. Reading the bars,
+the warm-up and the dividend adjustment are `Engine.RunStrategy`'s. That split
+is what lets every fill rule be tested on a dozen bars worked by hand.
+
+- **Only the archive.** A rule needs opens to fill at, and highs and lows to
+  trip a stop inside a bar. The provider's history is closes alone, so there is
+  no fallback to it: no archive is a 409, and a symbol with no bars is a 422
+  that says why. A symbol that isn't being collected is added to the user's
+  list, so asking is also how it gets collected.
+- **Operands reuse indicator specs.** `sma:50`, `bb:20:2.lower`,
+  `macd.signal`: one grammar for the chart and the rules. The engine warms up
+  by the largest `Warmup` among them, plus the one bar a cross looks back.
+- **Fills are pessimistic and simple.** A signal on bar i's close fills at bar
+  i+1's open. A stop or target fills at its level, or at the open on a gap
+  through it. When one bar reaches both, the stop wins: which came first can't
+  be known from the bar. Sizing is all in, fractional, with the fee on both
+  sides. There is no shorting and no pyramiding; they would need a model of
+  margin and borrow that a single-symbol tester has no business guessing at.
+- **Compared with holding, always.** Buy-and-hold runs over the same bars from
+  the same first open, so the two can be compared directly.
+- **Thinned for drawing only.** The equity and price series sent to the client
+  are thinned to 1,500 points; every metric is computed from every bar.
+  Signal marks are placed by time, not by index, for that reason.
+- **Saved as JSON.** `strategies` (migration 011) keeps the definition as a
+  JSON object. It is compiled before saving, so a saved strategy always opens,
+  and it is re-compiled on every run, so a newer binary's stricter rules apply
+  to old saves.
+
 ### Renames
 
 A company that changes its symbol leaves the history collected under the old

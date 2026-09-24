@@ -1823,6 +1823,66 @@ thead .sectors__col {
   font-size: 11px;
 }
 
+/* Strategies. A condition is a sentence — left, comparison, right — so its
+   row stays one line wide enough to read as one, and wraps whole on a phone. */
+.strategy__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.8rem;
+}
+.strategy__name {
+  grid-column: span 2;
+}
+.rule {
+  margin: 1.1rem 0 0;
+  padding: 0.8rem 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  align-items: flex-start;
+}
+.rule legend {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.4rem 0 0;
+}
+.select--inline {
+  width: auto;
+  padding-block: 0.2rem;
+}
+/* Specs are lower case on the server; the mono field's capitals would make
+   "sma:50" read as a ticker. */
+.condition .input {
+  text-transform: none;
+}
+.condition {
+  display: grid;
+  grid-template-columns: minmax(7rem, 1fr) minmax(8rem, 11rem) minmax(7rem, 1fr) auto;
+  gap: 0.4rem;
+  align-items: center;
+  width: 100%;
+}
+.stat__value--up {
+  color: var(--up);
+}
+.stat__value--down {
+  color: var(--down);
+}
+/* Fills on the signal chart: a buy under the price, a sale over it, coloured
+   by whether the round trip made money. */
+.trade-mark--buy {
+  fill: var(--primary);
+}
+.trade-mark--win {
+  fill: var(--up);
+}
+.trade-mark--loss {
+  fill: var(--down);
+}
+
 @media (max-width: 720px) {
   /* Columns a phone can do without: the symbol browser's exchange, which
      leaves the name room to be read. */
@@ -1834,6 +1894,21 @@ thead .sectors__col {
   }
   .tab-bar {
     display: flex;
+  }
+  /* Six tabs across a 360px phone: the padding gives, the labels don't. */
+  .tab-bar__item {
+    padding-inline: 0.3rem;
+  }
+  .strategy__name {
+    grid-column: auto;
+  }
+  /* Two lines, still in reading order: "close · crosses above", then
+     "SMA 50 · ×". */
+  .condition {
+    grid-template-columns: 1fr 1fr;
+  }
+  .condition > button {
+    justify-self: start;
   }
   /* Lift the button — and, through the token, the toasts — clear of the tab
      bar that only exists at this width. */

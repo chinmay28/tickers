@@ -377,6 +377,34 @@ page shows; the rest of the fund is stated as a percentage rather than implied.
 A quote source that can't answer at all leaves the page unavailable with a
 reason, in the way the performance sheet does.
 
+**Strategies** — test a trading rule on one symbol's history from the
+archive: *buy when the 50-day average crosses above the 200-day, sell when RSI
+goes over 70*. Each side is a list of conditions, joined by *all of* or *any
+of*. A condition compares two things: a price field (`close`, `open`, `high`,
+`low`, `volume`), a number, or any indicator the chart knows. A `.line` picks
+one line of an indicator that draws several: `bb:20:2.lower`, `macd.signal`,
+`stoch.d`. The comparisons are *is above/below*, *at least/at most*, and
+*crosses above/below*. A cross means the left side was at or under the right
+on the previous bar and is over it now.
+
+Start from a template (golden cross, RSI mean reversion, MACD crossover,
+Bollinger bounce), change what you like, and **Run backtest**. What you see:
+
+- total return, yearly return, worst drawdown, Sharpe and the final value,
+  each set against simply holding the symbol over the same bars;
+- the equity curve over holding's;
+- the price with the rules' overlays and a mark at every buy and sale;
+- every trade, and a warning when the archive doesn't cover the window yet.
+
+The simulation is deliberately plain. A signal on a bar's close fills at the
+next bar's open, all in, with the fee charged both ways. A stop-loss or
+take-profit is checked against each bar's range and fills at its level, or at
+the open when the bar gaps past it; a bar that reaches both counts as the stop.
+Daily tests trade dividend-adjusted prices unless you untick it. Any interval
+the archive holds works: daily, hourly, 5-minute or 1-minute bars. Asking about
+a symbol the archive isn't collecting adds it, first in line. **Save** keeps a
+strategy on the server, so every browser sees it.
+
 **Settings** — everything that configures a running instance, and the evidence
 that it worked. The refresh interval, history retention, the quote source,
 pinned symbols and logos are at the top; **Publishing** and **Recent cycles**
