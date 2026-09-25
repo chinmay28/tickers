@@ -348,7 +348,9 @@ const state = {
   pendingScroll: '',
 };
 
-async function loadState(opts) {
+/** Read /api/state into `state.data` without drawing, so a caller that is
+ *  also fetching a view's own data can ask for both at once and draw once. */
+async function fetchState() {
   try {
     state.data = await api('/state');
     if (!state.connected) {
@@ -361,11 +363,19 @@ async function loadState(opts) {
     console.warn('state fetch failed', err);
   }
   $('#offline-banner').hidden = state.connected;
+}
+
+/** Reload everything the current view needs, then redraw.
+ *
+ *  Every request goes out at once, so a page waits for its slowest request
+ *  rather than for the sum of them. */
+async function refreshView(opts) {
+  await Promise.all([loadView(), fetchState()]);
   render(opts);
 }
 
-/** Reload everything the current view needs, then redraw. */
-async function refreshView(opts) {
+/** The current route's own data, beside /api/state. */
+async function loadView() {
   // A fund page's subject is in the URL, so landing on one — by navigation, by
   // reload, or by somebody's pasted link — is what asks for the lookup. Only
   // when it changed: the poll runs through here every ten seconds, and
@@ -374,26 +384,29 @@ async function refreshView(opts) {
   if (route() === 'funds' && routeArg() && state.fund?.symbol !== routeArg().toUpperCase()) {
     loadFund(routeArg());
   }
-  if (route() === 'data' || route() === 'settings') await loadArchive();
+  const loads = [];
+  if (route() === 'data' || route() === 'settings') loads.push(loadArchive());
   // The list is re-read with the page so a strategy saved in another tab
   // shows up; the editor and the last result are the page's own and stay.
-  if (route() === 'strategies') await loadStrategies();
-  if (route() === 'settings') {
-    try {
-      // The window is "the newest N", not "page number N". It grows when the
-      // reader asks for more and is re-fetched whole on every poll, which is
-      // what keeps a log being appended to at one end and pruned at the other
-      // from needing cursors that go stale between redraws — the newest cycle
-      // is always the first row, however deep the page has been opened.
-      const body = await api(`/runs?limit=${state.runsShown}`);
-      state.runs = body?.runs ?? [];
-      state.runsMore = Boolean(body?.more);
-    } catch {
-      state.runs = [];
-      state.runsMore = false;
-    }
+  if (route() === 'strategies') loads.push(loadStrategies());
+  if (route() === 'settings') loads.push(loadRuns());
+  await Promise.all(loads);
+}
+
+async function loadRuns() {
+  try {
+    // The window is "the newest N", not "page number N". It grows when the
+    // reader asks for more and is re-fetched whole on every poll, which is
+    // what keeps a log being appended to at one end and pruned at the other
+    // from needing cursors that go stale between redraws — the newest cycle
+    // is always the first row, however deep the page has been opened.
+    const body = await api(`/runs?limit=${state.runsShown}`);
+    state.runs = body?.runs ?? [];
+    state.runsMore = Boolean(body?.more);
+  } catch {
+    state.runs = [];
+    state.runsMore = false;
   }
-  await loadState(opts);
 }
 
 /** Wrap an action so the UI can't fire two overlapping mutations, and so
@@ -667,9 +680,13 @@ function render({ force = false } = {}) {
  *  flag is set by the hash change and cleared here. */
 function scrollToSection() {
   if (!state.pendingScroll) return;
+  // A route change paints before its data arrives, and the section may not
+  // exist until it has: the scroll stays owed until there is something to
+  // scroll to.
   const target = $(`#section-${state.pendingScroll}`);
+  if (!target) return;
   state.pendingScroll = '';
-  target?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  target.scrollIntoView({ block: 'start', behavior: 'auto' });
 }
 
 function renderFooter(data) {
@@ -909,35 +926,39 @@ function renderQuote(t) {
  *  enough points simply stay blank — an axis-less two-point line says nothing
  *  a reader can use. */
 async function drawSparklines() {
-  for (const svg of $$('[data-spark]')) {
-    const id = svg.dataset.spark;
-    let points = state.history.get(id);
-    if (!points) {
-      try {
-        points = (await api(`/tickers/${id}/history?limit=90`))?.points ?? [];
-      } catch {
-        points = [];
-      }
-      state.history.set(id, points);
-      // The view may have been replaced while that request was in flight.
-      if (!svg.isConnected) continue;
+  // Every row's request goes out at once, and each line is drawn as its own
+  // lands — one at a time, a long watchlist filled in row by row.
+  await Promise.all($$('[data-spark]').map(drawSparkline));
+}
+
+async function drawSparkline(svg) {
+  const id = svg.dataset.spark;
+  let points = state.history.get(id);
+  if (!points) {
+    try {
+      points = (await api(`/tickers/${id}/history?limit=90`))?.points ?? [];
+    } catch {
+      points = [];
     }
-    if (points.length < 3) continue;
-
-    const values = points.map((p) => p.price);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const span = max - min || 1;
-    const stepX = 180 / (values.length - 1);
-    const path = values
-      .map((v, i) => `${i ? 'L' : 'M'}${(i * stepX).toFixed(1)} ${(24 - ((v - min) / span) * 22).toFixed(1)}`)
-      .join(' ');
-
-    const rising = values[values.length - 1] >= values[0];
-    svg.innerHTML =
-      `<path d="${path}" fill="none" stroke="var(--${rising ? 'up' : 'down'})" ` +
-      `stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" opacity="0.9" />`;
+    state.history.set(id, points);
+    // The view may have been replaced while that request was in flight.
+    if (!svg.isConnected) return;
   }
+  if (points.length < 3) return;
+
+  const values = points.map((p) => p.price);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const stepX = 180 / (values.length - 1);
+  const path = values
+    .map((v, i) => `${i ? 'L' : 'M'}${(i * stepX).toFixed(1)} ${(24 - ((v - min) / span) * 22).toFixed(1)}`)
+    .join(' ');
+
+  const rising = values[values.length - 1] >= values[0];
+  svg.innerHTML =
+    `<path d="${path}" fill="none" stroke="var(--${rising ? 'up' : 'down'})" ` +
+    `stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" opacity="0.9" />`;
 }
 
 /* --------------------------- Portfolios ----------------------------
@@ -2713,37 +2734,49 @@ state.archive = {
   offset: 0,
   page: null,
   detail: null,
+  /** Which symbol `detail` is for: the page paints before a new one lands,
+   *  and must not show the last symbol's under this one's name. */
+  detailFor: '',
   chart: { interval: '1d', range: '6m', extended: false, ind: loadIndicators() },
   bars: null,
   barsKey: '',
   folder: null,
 };
 
+/** The archive's status and, on the Data page, what the page shows. They are
+ *  asked for together rather than status first: the symbol requests answer
+ *  409 on their own when the archive isn't open, and waiting to find that out
+ *  would put a round trip in front of every visit to the page. */
 async function loadArchive() {
   const a = state.archive;
-  try {
-    a.view = await api('/archive');
-    a.disabled = false;
-    a.error = '';
-  } catch (err) {
+  const symbol = route() === 'data' ? routeArg().toUpperCase() : '';
+  const view = api('/archive');
+  let own = null;
+  if (route() === 'data' && symbol) {
+    own = Promise.all([api(`/archive/symbols/${encodeURIComponent(symbol)}`), loadBars(symbol)]).then(
+      ([detail]) => ({ detail }),
+      (err) => ({ detail: { error: err.message } }),
+    );
+  } else if (route() === 'data') {
+    const q = new URLSearchParams({ ...a.query, offset: a.offset, limit: ARCHIVE_PAGE });
+    own = api(`/archive/symbols?${q}`).then((page) => ({ page }), (err) => ({ page: { error: err.message } }));
+  }
+  const [status, got] = await Promise.all([view.then((v) => ({ v }), (err) => ({ err })), own]);
+  if (status.err) {
     a.view = null;
-    a.disabled = err.status === 501;
-    a.error = err.message;
+    a.disabled = status.err.status === 501;
+    a.error = status.err.message;
     return;
   }
-  if (a.view.state !== 'open' || route() !== 'data') return;
-  const symbol = routeArg().toUpperCase();
-  try {
-    if (symbol) {
-      a.detail = await api(`/archive/symbols/${encodeURIComponent(symbol)}`);
-      await loadBars(symbol);
-    } else {
-      const q = new URLSearchParams({ ...a.query, offset: a.offset, limit: ARCHIVE_PAGE });
-      a.page = await api(`/archive/symbols?${q}`);
-    }
-  } catch (err) {
-    if (symbol) a.detail = { error: err.message };
-    else a.page = { error: err.message };
+  a.view = status.v;
+  a.disabled = false;
+  a.error = '';
+  if (a.view.state !== 'open' || !got) return;
+  if ('detail' in got) {
+    a.detail = got.detail;
+    a.detailFor = symbol;
+  } else {
+    a.page = got.page;
   }
 }
 
@@ -2840,6 +2873,10 @@ function archiveBanner(v) {
 }
 
 function archiveOverview(v) {
+  // The server counts in the background and sends no stats until its first
+  // count is done — seconds on a full archive — so the page says so rather
+  // than showing a row of zeros that read as an empty archive.
+  const counting = !v.stats;
   const s = v.stats ?? {};
   const c = v.collector ?? {};
   const h = c.lastHour ?? {};
@@ -2866,9 +2903,9 @@ function archiveOverview(v) {
         <span class="card__meta">${esc(collectorLine(c))}</span></div>
       <div class="card__body">
         <div class="stat-row">
-          <div class="stat"><div class="stat__label">Symbols</div><div class="stat__value">${count(s.active)}</div>
-            <div class="field__hint">${count(s.priority)} first in line · ${count(s.retired)} retired · ${count(s.excluded)} excluded</div></div>
-          <div class="stat"><div class="stat__label">On disk</div><div class="stat__value">${bytes(v.size)}</div>
+          <div class="stat"><div class="stat__label">Symbols</div><div class="stat__value">${counting ? '—' : count(s.active)}</div>
+            <div class="field__hint">${counting ? 'Counting…' : `${count(s.priority)} first in line · ${count(s.retired)} retired · ${count(s.excluded)} excluded`}</div></div>
+          <div class="stat"><div class="stat__label">On disk</div><div class="stat__value">${counting ? '—' : bytes(v.size)}</div>
             <div class="field__hint">${v.diskTotal ? `${bytes(v.diskFree)} free of ${bytes(v.diskTotal)}` : ''}</div>
             ${v.diskTotal ? `<div class="meter"><span style="width:${(used * 100).toFixed(1)}%"></span></div>` : ''}</div>
           <div class="stat"><div class="stat__label">Last hour</div><div class="stat__value">${count(h.requests)} requests</div>
@@ -2883,7 +2920,9 @@ function archiveOverview(v) {
             <th class="num">Failing</th><th>Deepest</th><th>Newest</th><th>Stalest</th></tr></thead>
           <tbody>${intervals}</tbody></table></div>
         <p class="field__hint">Complete means a source has walked a series back as far as it goes — the listing, or the edge of what it keeps. Stalest is the least current series' newest bar: how far behind the daily pass is.</p>`
-        : '<p class="field__hint">Nothing collected yet — the first requests go out within a few seconds of the archive opening.</p>'}
+        : counting
+          ? '<p class="field__hint">Counting what the archive holds — this fills in on the next refresh.</p>'
+          : '<p class="field__hint">Nothing collected yet — the first requests go out within a few seconds of the archive opening.</p>'}
         ${(c.jobs ?? []).length ? jobsTable(c.jobs) : ''}
       </div>
     </section>`;
@@ -3121,7 +3160,7 @@ function archiveSettings(v) {
 function renderArchiveSymbol() {
   const a = state.archive;
   const symbol = routeArg().toUpperCase();
-  const d = a.detail;
+  const d = a.detailFor === symbol ? a.detail : null;
   const back = '<a class="btn btn--sm btn--ghost" href="#/data">← All symbols</a>';
   if (a.view.state !== 'open') {
     return `<div class="page-head"><div><h1>${esc(symbol)}</h1></div>${back}</div>${archiveBanner(a.view)}`;
@@ -5521,6 +5560,11 @@ window.addEventListener('hashchange', () => {
   // didn't move because a field still had focus would be a worse bug than the
   // one the deferral exists to fix. Drafts survive the trip, so a half-filled
   // form is still there when you come back to it.
+  //
+  // It paints at once with whatever is already loaded — the page's own
+  // "Loading…" where nothing is — and again when the requests land, so a tap
+  // on a tab answers straight away however long the server takes.
+  render({ force: true });
   refreshView({ force: true });
 });
 
@@ -5530,6 +5574,6 @@ state.pendingScroll = movedSection();
 refreshView();
 // The Data page reads its own endpoint on the same beat as the state poll.
 setInterval(async () => {
-  if (route() === 'data' || route() === 'settings') await loadArchive();
-  loadState();
+  await Promise.all([route() === 'data' || route() === 'settings' ? loadArchive() : null, fetchState()]);
+  render();
 }, POLL_MS);

@@ -96,7 +96,7 @@ func (a *Archive) candles(id int64, interval quotes.Interval, from, to time.Time
 		if db == nil {
 			continue
 		}
-		rows, err := db.Query(`SELECT ts, open, high, low, close, volume, coalesce(vwap, 0), coalesce(trades, 0), session FROM bars
+		rows, err := db.read.Query(`SELECT ts, open, high, low, close, volume, coalesce(vwap, 0), coalesce(trades, 0), session FROM bars
 			WHERE symbol_id = ? AND ts >= ? AND ts < ?`+session+` ORDER BY ts`, id, from.Unix(), to.Unix())
 		if err != nil {
 			return nil, err
@@ -233,7 +233,7 @@ func Resample(candles []quotes.Candle, to quotes.Interval) []quotes.Candle {
 
 // Dividends returns a symbol's recorded dividends in [from, to).
 func (a *Archive) Dividends(symbol string, from, to time.Time) ([]quotes.Dividend, error) {
-	rows, err := a.catalog.Query(`SELECT d.ts, d.amount FROM dividends d JOIN symbols s ON s.id = d.symbol_id
+	rows, err := a.catalog.read.Query(`SELECT d.ts, d.amount FROM dividends d JOIN symbols s ON s.id = d.symbol_id
 		WHERE s.symbol = ? AND d.ts >= ? AND d.ts < ? ORDER BY d.ts`, NormalizeSymbol(symbol), from.Unix(), to.Unix())
 	if err != nil {
 		return nil, err
@@ -254,7 +254,7 @@ func (a *Archive) Dividends(symbol string, from, to time.Time) ([]quotes.Dividen
 
 // Splits returns a symbol's recorded splits.
 func (a *Archive) Splits(symbol string) ([]quotes.Split, error) {
-	rows, err := a.catalog.Query(`SELECT sp.ts, sp.numerator, sp.denominator FROM splits sp JOIN symbols s ON s.id = sp.symbol_id
+	rows, err := a.catalog.read.Query(`SELECT sp.ts, sp.numerator, sp.denominator FROM splits sp JOIN symbols s ON s.id = sp.symbol_id
 		WHERE s.symbol = ? ORDER BY sp.ts`, NormalizeSymbol(symbol))
 	if err != nil {
 		return nil, err
@@ -276,7 +276,7 @@ func (a *Archive) Splits(symbol string) ([]quotes.Split, error) {
 // HeldDays reports which UTC days in [from, to) already have intraday bars
 // for a symbol at an interval — what a gap-filling source skips.
 func (a *Archive) HeldDays(id int64, interval quotes.Interval, from, to time.Time) (map[int64]bool, error) {
-	rows, err := a.catalog.Query(`SELECT day FROM days WHERE symbol_id = ? AND interval = ? AND day >= ? AND day < ? AND bars > 0`,
+	rows, err := a.catalog.read.Query(`SELECT day FROM days WHERE symbol_id = ? AND interval = ? AND day >= ? AND day < ? AND bars > 0`,
 		id, string(interval), dayOf(from), to.Unix())
 	if err != nil {
 		return nil, err
@@ -301,7 +301,7 @@ func (a *Archive) TradingDays(id int64, from, to time.Time) ([]int64, error) {
 	if err != nil || db == nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT ts FROM bars WHERE symbol_id = ? AND ts >= ? AND ts < ? ORDER BY ts`, id, dayOf(from), to.Unix())
+	rows, err := db.read.Query(`SELECT ts FROM bars WHERE symbol_id = ? AND ts >= ? AND ts < ? ORDER BY ts`, id, dayOf(from), to.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +358,7 @@ type Stats struct {
 // it — on a full archive it is a second or two of work.
 func (a *Archive) Stats() (Stats, error) {
 	st := Stats{Lists: map[List]int{}, Sources: map[string]int64{}}
-	if err := a.catalog.QueryRow(`SELECT
+	if err := a.catalog.read.QueryRow(`SELECT
 		  coalesce(sum(`+activeSQL+`), 0),
 		  coalesce(sum(`+activeSQL+` AND `+priorityExpr+`), 0),
 		  coalesce(sum(excluded = 0 AND (listed + extra + watchlist + user) = 0), 0),
@@ -367,7 +367,7 @@ func (a *Archive) Stats() (Stats, error) {
 		return st, err
 	}
 	var listed, extra, watchlist, user int
-	if err := a.catalog.QueryRow(`SELECT coalesce(sum(listed), 0), coalesce(sum(extra), 0),
+	if err := a.catalog.read.QueryRow(`SELECT coalesce(sum(listed), 0), coalesce(sum(extra), 0),
 		  coalesce(sum(watchlist), 0), coalesce(sum(user), 0) FROM symbols WHERE excluded = 0`).
 		Scan(&listed, &extra, &watchlist, &user); err != nil {
 		return st, err
@@ -375,7 +375,7 @@ func (a *Archive) Stats() (Stats, error) {
 	st.Lists[Listed], st.Lists[Extra], st.Lists[Watchlist], st.Lists[User] = listed, extra, watchlist, user
 
 	// Per interval, a symbol's coverage is the union of its sources'.
-	rows, err := a.catalog.Query(`SELECT interval, count(newest), coalesce(sum(complete), 0), coalesce(sum(failing), 0),
+	rows, err := a.catalog.read.Query(`SELECT interval, count(newest), coalesce(sum(complete), 0), coalesce(sum(failing), 0),
 		  min(oldest), max(newest), min(newest)
 		FROM (SELECT c.symbol_id, c.interval, min(c.oldest) AS oldest, max(c.newest) AS newest,
 		        max(c.complete) AS complete, max(c.failures > 0) AS failing
@@ -404,7 +404,7 @@ func (a *Archive) Stats() (Stats, error) {
 		return st, err
 	}
 
-	counts, err := a.catalog.Query(`SELECT interval, sum(bars) FROM days GROUP BY interval`)
+	counts, err := a.catalog.read.Query(`SELECT interval, sum(bars) FROM days GROUP BY interval`)
 	if err != nil {
 		return st, err
 	}
@@ -425,7 +425,7 @@ func (a *Archive) Stats() (Stats, error) {
 	} else if db != nil {
 		s := byInterval[quotes.Daily]
 		s.Interval = quotes.Daily
-		if err := db.QueryRow(`SELECT count(*) FROM bars`).Scan(&s.Bars); err != nil {
+		if err := db.read.QueryRow(`SELECT count(*) FROM bars`).Scan(&s.Bars); err != nil {
 			return st, err
 		}
 		byInterval[quotes.Daily] = s
@@ -440,7 +440,7 @@ func (a *Archive) Stats() (Stats, error) {
 	if err != nil {
 		return st, err
 	}
-	srcRows, err := a.catalog.Query(`SELECT source_id, count(*) FROM cursors WHERE newest IS NOT NULL GROUP BY source_id`)
+	srcRows, err := a.catalog.read.Query(`SELECT source_id, count(*) FROM cursors WHERE newest IS NOT NULL GROUP BY source_id`)
 	if err != nil {
 		return st, err
 	}
@@ -498,7 +498,7 @@ func (a *Archive) SymbolCoverage(symbol string) (Coverage, error) {
 
 	// SQLite has no bitwise aggregate, so the months are folded here. A
 	// symbol's ledger is a few hundred rows a year.
-	rows, err := a.catalog.Query(`SELECT interval, day, bars, sources FROM days WHERE symbol_id = ? ORDER BY interval, day`, s.ID)
+	rows, err := a.catalog.read.Query(`SELECT interval, day, bars, sources FROM days WHERE symbol_id = ? ORDER BY interval, day`, s.ID)
 	if err != nil {
 		return cov, err
 	}
@@ -539,7 +539,7 @@ func (a *Archive) SymbolCoverage(symbol string) (Coverage, error) {
 	if db, err := a.partition(partitionKey(quotes.Daily, time.Time{}), false); err != nil {
 		return cov, err
 	} else if db != nil {
-		drows, err := db.Query(`SELECT strftime('%Y-%m', ts, 'unixepoch') AS month, count(*), group_concat(DISTINCT source_id)
+		drows, err := db.read.Query(`SELECT strftime('%Y-%m', ts, 'unixepoch') AS month, count(*), group_concat(DISTINCT source_id)
 			FROM bars WHERE symbol_id = ? GROUP BY month ORDER BY month`, s.ID)
 		if err != nil {
 			return cov, err
@@ -565,10 +565,10 @@ func (a *Archive) SymbolCoverage(symbol string) (Coverage, error) {
 		drows.Close()
 	}
 
-	if err := a.catalog.QueryRow(`SELECT count(*) FROM splits WHERE symbol_id = ?`, s.ID).Scan(&cov.Splits); err != nil {
+	if err := a.catalog.read.QueryRow(`SELECT count(*) FROM splits WHERE symbol_id = ?`, s.ID).Scan(&cov.Splits); err != nil {
 		return cov, err
 	}
-	if err := a.catalog.QueryRow(`SELECT count(*) FROM dividends WHERE symbol_id = ?`, s.ID).Scan(&cov.Dividends); err != nil {
+	if err := a.catalog.read.QueryRow(`SELECT count(*) FROM dividends WHERE symbol_id = ?`, s.ID).Scan(&cov.Dividends); err != nil {
 		return cov, err
 	}
 	return cov, nil

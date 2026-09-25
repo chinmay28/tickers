@@ -112,13 +112,22 @@ func TestMovingCopiesEverythingAndSwitches(t *testing.T) {
 	if err := m.Use(from); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, m, "open", isState(StateOpen))
-	// Put some bars in so there is something to copy.
-	m.Read(func(a *archive.Archive) error {
-		s, _ := a.Lookup("VTI")
-		return a.Record(archive.Batch{SymbolID: s.ID, Interval: quotes.OneMinute, Source: "yahoo",
-			Series: quotes.CandleSeries{Candles: []quotes.Candle{{Time: time.Date(2026, 1, 5, 14, 30, 0, 0, time.UTC), Open: 1, High: 1, Low: 1, Close: 1}}}})
+	// Open is not the same as having tracked the watchlist: that is the
+	// collector's first step, and reads no longer queue behind it.
+	var vti archive.Symbol
+	waitFor(t, m, "open with the watchlist tracked", func(s Status) bool {
+		return s.State == StateOpen && m.Read(func(a *archive.Archive) (err error) {
+			vti, err = a.Lookup("VTI")
+			return err
+		}) == nil
 	})
+	// Put some bars in so there is something to copy.
+	if err := m.Read(func(a *archive.Archive) error {
+		return a.Record(archive.Batch{SymbolID: vti.ID, Interval: quotes.OneMinute, Source: "yahoo",
+			Series: quotes.CandleSeries{Candles: []quotes.Candle{{Time: time.Date(2026, 1, 5, 14, 30, 0, 0, time.UTC), Open: 1, High: 1, Low: 1, Close: 1}}}})
+	}); err != nil {
+		t.Fatalf("record a bar to move: %v", err)
+	}
 
 	full := t.TempDir()
 	os.WriteFile(filepath.Join(full, "photo.jpg"), []byte("x"), 0o600)

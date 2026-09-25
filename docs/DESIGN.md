@@ -927,7 +927,10 @@ configuring it is a section of Settings, like Publishing, and `#/archive`
 lands there the way `#/publishing` does. It reads its own endpoint,
 `/api/archive`, on the same ten-second beat as the state poll, rather than
 riding in `/api/state`: every open tab polls state, and none of them should
-pay for counting the archive. Its symbol browser pages on the server, because
+pay for counting the archive. A route change paints at once from what is
+already loaded, then asks for the view's data and the state together and paints
+again; nothing a page needs is asked for only after something else has
+answered. Its symbol browser pages on the server, because
 ten thousand rows is not a list to send whole. Its settings form keeps the
 interval checkboxes under distinct names (`interval_1m`), because the draft
 machinery stashes by field name and a checkbox group sharing one name would
@@ -1336,6 +1339,21 @@ chosen folder is on the root filesystem, and the Data page warns about it.
   is one range scan.
 
 That comes to about 60 bytes a bar with the index.
+
+### One writer, and readers beside it
+
+Every file is opened twice: one connection that writes, so the collector's
+writes queue in Go rather than contend for SQLite's lock, and a small
+`query_only` pool that reads. WAL is what lets a reader run while a write
+transaction is open; a single shared connection threw that away, and every
+Data page request and sparkline waited out whatever the collector was in the
+middle of. A read that decides a write stays on the writer, because the pool
+can be a commit behind.
+
+The Data page's totals (`Archive.Stats`) scan the day ledger and count the
+daily file — seconds on a full archive on a Pi. The archiver counts in the
+background at most once a minute and `/api/archive` serves the last count, or
+none yet, so opening the page never waits on it.
 
 A daily bar's `ts` is its exchange date at midnight UTC, not the instant the
 provider stamps it with. That instant moves: the in-progress bar carries the

@@ -93,6 +93,11 @@ type Manager struct {
 	stats     *archive.Stats
 	size      int64
 	statsAt   time.Time
+	// counting is set while a stats count runs, so polls don't stack them;
+	// opened is bumped on every open, so a count that outlives its archive
+	// can't publish the old folder's numbers as the new one's.
+	counting bool
+	opened   int
 }
 
 // New builds a manager. Run starts it.
@@ -168,6 +173,7 @@ func (m *Manager) runArchive(ctx context.Context, a *archive.Archive, path strin
 	m.open.Unlock()
 	m.mu.Lock()
 	m.coll, m.cancelRun, m.stats = coll, cancel, nil
+	m.opened++
 	m.mu.Unlock()
 	m.set(StateOpen, path, "")
 	m.log.Info("market-data archive open", "path", path)
@@ -359,20 +365,25 @@ type Status struct {
 	FromFlag  bool              `json:"fromFlag"`
 	Error     string            `json:"error"`
 	Collector *collector.Status `json:"collector"`
-	Stats     *archive.Stats    `json:"stats"`
-	Size      int64             `json:"size"`
-	DiskFree  uint64            `json:"diskFree"`
-	DiskTotal uint64            `json:"diskTotal"`
-	Move      *Move             `json:"move"`
+	// Stats is the last count, nil until the first one finishes; StatsAt
+	// says when it was taken.
+	Stats     *archive.Stats `json:"stats"`
+	StatsAt   time.Time      `json:"statsAt"`
+	Size      int64          `json:"size"`
+	DiskFree  uint64         `json:"diskFree"`
+	DiskTotal uint64         `json:"diskTotal"`
+	Move      *Move          `json:"move"`
 }
 
 // statsEvery is how long a stats snapshot is served. Stats counts the daily
-// file and walks the folder — a second or two on a full archive on a Pi —
-// and the Data page polls every ten seconds.
+// file and the day ledger and walks the folder — seconds on a full archive on
+// a Pi — and the Data page polls every ten seconds.
 const statsEvery = time.Minute
 
-// Status reports the archive's state. Stats are refreshed at most once a
-// minute; fresh forces it.
+// Status reports the archive's state. It never waits on a count: stats come
+// from the last snapshot, and a stale one (or fresh) starts a recount in the
+// background that a later poll picks up. Counting on the request made opening
+// the Data page take as long as the count did.
 func (m *Manager) Status(fresh bool) Status {
 	m.mu.Lock()
 	st := Status{State: m.state, Path: m.path, Error: m.err}
@@ -388,7 +399,7 @@ func (m *Manager) Status(fresh bool) Status {
 		st.Move = &mv
 	}
 	stale := fresh || m.stats == nil || time.Since(m.statsAt) > statsEvery
-	st.Stats, st.Size = m.stats, m.size
+	st.Stats, st.Size, st.StatsAt = m.stats, m.size, m.statsAt
 	m.mu.Unlock()
 
 	if cfg, err := m.opts.Store.ArchiveConfig(); err == nil {
@@ -404,20 +415,49 @@ func (m *Manager) Status(fresh bool) Status {
 		}
 	}
 	if st.State == StateOpen && stale {
-		m.Read(func(a *archive.Archive) error {
-			stats, err := a.Stats()
-			if err != nil {
-				return err
-			}
-			size, _ := a.Size()
-			m.mu.Lock()
-			m.stats, m.size, m.statsAt = &stats, size, time.Now()
-			m.mu.Unlock()
-			st.Stats, st.Size = &stats, size
-			return nil
-		})
+		m.recount()
 	}
 	return st
+}
+
+// recount starts a stats count unless one is already running.
+func (m *Manager) recount() {
+	m.mu.Lock()
+	if m.counting {
+		m.mu.Unlock()
+		return
+	}
+	m.counting = true
+	opened := m.opened
+	m.mu.Unlock()
+
+	go func() {
+		var stats archive.Stats
+		var size int64
+		// Read holds the archive open for the count, so closing it (to move
+		// it, or at shutdown) waits for the count rather than pulling the
+		// files out from under it.
+		err := m.Read(func(a *archive.Archive) error {
+			var err error
+			if stats, err = a.Stats(); err != nil {
+				return err
+			}
+			size, _ = a.Size()
+			return nil
+		})
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.counting = false
+		if err != nil {
+			if !errors.Is(err, ErrNotOpen) {
+				m.log.Warn("could not count the archive", "error", err)
+			}
+			return
+		}
+		if opened == m.opened {
+			m.stats, m.size, m.statsAt = &stats, size, time.Now()
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------
