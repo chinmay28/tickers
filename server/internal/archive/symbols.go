@@ -93,7 +93,7 @@ func (a *Archive) SetList(list List, entries []Entry, now time.Time) (joined, le
 	if err != nil {
 		return 0, 0, err
 	}
-	tx, err := a.catalog.Begin()
+	tx, err := a.catalog.write.Begin()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -166,7 +166,7 @@ func (a *Archive) Add(list List, e Entry, now time.Time) error {
 	if symbol == "" {
 		return errors.New("a symbol is required")
 	}
-	tx, err := a.catalog.Begin()
+	tx, err := a.catalog.write.Begin()
 	if err != nil {
 		return err
 	}
@@ -184,7 +184,7 @@ func (a *Archive) Remove(list List, symbol string) error {
 	if err != nil {
 		return err
 	}
-	_, err = a.catalog.Exec(`UPDATE symbols SET `+col+` = 0 WHERE symbol = ?`, NormalizeSymbol(symbol))
+	_, err = a.catalog.write.Exec(`UPDATE symbols SET `+col+` = 0 WHERE symbol = ?`, NormalizeSymbol(symbol))
 	return err
 }
 
@@ -203,7 +203,7 @@ func (a *Archive) SetPriority(symbol string, priority bool) error {
 }
 
 func (a *Archive) setFlag(symbol, col string, on bool) error {
-	res, err := a.catalog.Exec(`UPDATE symbols SET `+col+` = ? WHERE symbol = ?`, on, NormalizeSymbol(symbol))
+	res, err := a.catalog.write.Exec(`UPDATE symbols SET `+col+` = ? WHERE symbol = ?`, on, NormalizeSymbol(symbol))
 	if err != nil {
 		return err
 	}
@@ -241,7 +241,7 @@ func scanSymbol(row interface{ Scan(...any) error }) (Symbol, error) {
 
 // ActiveSymbols lists every symbol the collector should fetch.
 func (a *Archive) ActiveSymbols() ([]Symbol, error) {
-	rows, err := a.catalog.Query(`SELECT ` + symbolColumns + ` FROM symbols WHERE ` + activeSQL + ` ORDER BY symbol`)
+	rows, err := a.catalog.read.Query(`SELECT ` + symbolColumns + ` FROM symbols WHERE ` + activeSQL + ` ORDER BY symbol`)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +259,7 @@ func (a *Archive) ActiveSymbols() ([]Symbol, error) {
 
 // Lookup returns one symbol, or ErrUnknownSymbol.
 func (a *Archive) Lookup(symbol string) (Symbol, error) {
-	s, err := scanSymbol(a.catalog.QueryRow(`SELECT `+symbolColumns+` FROM symbols WHERE symbol = ?`, NormalizeSymbol(symbol)))
+	s, err := scanSymbol(a.catalog.read.QueryRow(`SELECT `+symbolColumns+` FROM symbols WHERE symbol = ?`, NormalizeSymbol(symbol)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, ErrUnknownSymbol
 	}
@@ -336,10 +336,10 @@ func (a *Archive) QuerySymbols(q SymbolQuery) (SymbolPage, error) {
 	}
 
 	var page SymbolPage
-	if err := a.catalog.QueryRow(`SELECT count(*) FROM symbols`+cond, args...).Scan(&page.Total); err != nil {
+	if err := a.catalog.read.QueryRow(`SELECT count(*) FROM symbols`+cond, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := a.catalog.Query(`SELECT `+symbolColumns+` FROM symbols`+cond+
+	rows, err := a.catalog.read.Query(`SELECT `+symbolColumns+` FROM symbols`+cond+
 		` ORDER BY `+priorityExpr+` DESC, symbol LIMIT ? OFFSET ?`, append(args, limit, max(q.Offset, 0))...)
 	if err != nil {
 		return page, err
@@ -367,7 +367,7 @@ type Alias struct {
 // all the same: it is a fact about the company, and costs nothing until
 // something is stored under it.
 func (a *Archive) SetAliases(id int64, aliases []Alias) error {
-	tx, err := a.catalog.Begin()
+	tx, err := a.catalog.write.Begin()
 	if err != nil {
 		return err
 	}
@@ -390,7 +390,7 @@ func (a *Archive) SetAliases(id int64, aliases []Alias) error {
 
 // Aliases lists a symbol's former symbols, oldest first.
 func (a *Archive) Aliases(id int64) ([]Alias, error) {
-	rows, err := a.catalog.Query(`SELECT former, until FROM aliases WHERE symbol_id = ? ORDER BY until`, id)
+	rows, err := a.catalog.read.Query(`SELECT former, until FROM aliases WHERE symbol_id = ? ORDER BY until`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +416,7 @@ type aliasID struct {
 // aliasIDs resolves a symbol's aliases to the rows its former symbols' bars
 // are stored under, skipping any the archive holds nothing for.
 func (a *Archive) aliasIDs(id int64) ([]aliasID, error) {
-	rows, err := a.catalog.Query(`SELECT s.id, al.until FROM aliases al JOIN symbols s ON s.symbol = al.former
+	rows, err := a.catalog.read.Query(`SELECT s.id, al.until FROM aliases al JOIN symbols s ON s.symbol = al.former
 		WHERE al.symbol_id = ? AND s.id <> ?`, id, id)
 	if err != nil {
 		return nil, err
@@ -441,7 +441,7 @@ func (a *Archive) Members(list List) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := a.catalog.Query(`SELECT symbol FROM symbols WHERE ` + col + ` = 1`)
+	rows, err := a.catalog.read.Query(`SELECT symbol FROM symbols WHERE ` + col + ` = 1`)
 	if err != nil {
 		return nil, err
 	}

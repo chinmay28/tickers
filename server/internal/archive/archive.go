@@ -94,11 +94,35 @@ func IsArchive(root string) bool {
 // collector is its one writer and the API reads alongside it.
 type Archive struct {
 	root    string
-	catalog *sql.DB
+	catalog *file
 
 	mu         sync.Mutex
-	partitions map[string]*sql.DB
+	partitions map[string]*file
 	sources    map[string]int64
+}
+
+// file is one SQLite file opened twice. Writes go through a single
+// connection, so they queue in Go rather than fighting over SQLite's lock;
+// reads go through a small read-only pool, which WAL lets run alongside the
+// writer. Were reads on the writer's connection too, every page of the Data
+// view and every sparkline would wait out whatever transaction the collector
+// had open — and a stats count would stall the collector in turn.
+//
+// A read that decides a write (read-modify-write) belongs on write: the pool
+// can see a snapshot a commit older than the transaction about to be written.
+type file struct {
+	write *sql.DB
+	read  *sql.DB
+}
+
+// Close closes the readers first: the last connection to close checkpoints
+// the WAL into the main file, and that should be the writer.
+func (f *file) Close() error {
+	rerr := f.read.Close()
+	if err := f.write.Close(); err != nil {
+		return err
+	}
+	return rerr
 }
 
 // Open opens the archive at root, applying any pending migrations and
@@ -115,7 +139,7 @@ func Open(root string) (*Archive, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &Archive{root: root, catalog: db, partitions: map[string]*sql.DB{}, sources: map[string]int64{}}
+	a := &Archive{root: root, catalog: db, partitions: map[string]*file{}, sources: map[string]int64{}}
 	if err := a.resumeSplits(); err != nil {
 		a.Close()
 		return nil, err
@@ -148,30 +172,49 @@ func (a *Archive) Ping() error {
 	if !IsArchive(a.root) {
 		return fmt.Errorf("%w: the marker file at %s has gone (was the drive unplugged?)", ErrUnavailable, a.root)
 	}
-	return a.catalog.Ping()
+	return a.catalog.read.Ping()
 }
+
+// readers bounds each file's read pool. A handful is plenty for one person's
+// browser tabs; each connection carries its own page cache, and a Pi has a
+// dozen partition files open, so this is kept small and idle ones are let go.
+const (
+	readers      = 4
+	readerIdle   = time.Minute
+	pragmaCommon = "_pragma=busy_timeout(10000)&_pragma=synchronous(NORMAL)"
+)
 
 // openDB opens one SQLite file with the pragmas every file here uses: WAL so a
 // reader never blocks the collector, busy_timeout so a second process waits
-// instead of failing, one connection so writes queue in Go.
-func openDB(path string, migrations []migration) (*sql.DB, error) {
-	dsn := path + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
-	db, err := sql.Open("sqlite", dsn)
+// instead of failing, one writing connection so writes queue in Go.
+func openDB(path string, migrations []migration) (*file, error) {
+	w, err := sql.Open("sqlite", path+"?"+pragmaCommon+"&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("archive: open %s: %w", path, err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-	if err := db.Ping(); err != nil {
-		db.Close()
+	w.SetMaxOpenConns(1)
+	w.SetMaxIdleConns(1)
+	w.SetConnMaxLifetime(0)
+	if err := w.Ping(); err != nil {
+		w.Close()
 		return nil, fmt.Errorf("archive: open %s: %w", path, err)
 	}
-	if err := migrate(db, migrations); err != nil {
-		db.Close()
+	if err := migrate(w, migrations); err != nil {
+		w.Close()
 		return nil, fmt.Errorf("archive: %s: %w", filepath.Base(path), err)
 	}
-	return db, nil
+	// Opened after the writer has put the file in WAL mode and migrated it,
+	// so a reader never sees a half-built schema. query_only makes a write
+	// that strayed onto this pool an error rather than a second writer.
+	r, err := sql.Open("sqlite", path+"?"+pragmaCommon+"&_pragma=query_only(1)")
+	if err != nil {
+		w.Close()
+		return nil, fmt.Errorf("archive: open %s: %w", path, err)
+	}
+	r.SetMaxOpenConns(readers)
+	r.SetMaxIdleConns(1)
+	r.SetConnMaxIdleTime(readerIdle)
+	return &file{write: w, read: r}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +249,7 @@ func (a *Archive) partitionPath(key string) string {
 // partition returns a handle on one partition. With create false, a partition
 // that doesn't exist yet comes back nil rather than as an empty file — a read
 // of a year nothing was collected in must not litter the drive.
-func (a *Archive) partition(key string, create bool) (*sql.DB, error) {
+func (a *Archive) partition(key string, create bool) (*file, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if db, ok := a.partitions[key]; ok {
@@ -264,10 +307,10 @@ func (a *Archive) sourceID(name string) (int64, error) {
 	if ok {
 		return id, nil
 	}
-	if _, err := a.catalog.Exec(`INSERT OR IGNORE INTO sources (name) VALUES (?)`, name); err != nil {
+	if _, err := a.catalog.write.Exec(`INSERT OR IGNORE INTO sources (name) VALUES (?)`, name); err != nil {
 		return 0, err
 	}
-	if err := a.catalog.QueryRow(`SELECT id FROM sources WHERE name = ?`, name).Scan(&id); err != nil {
+	if err := a.catalog.write.QueryRow(`SELECT id FROM sources WHERE name = ?`, name).Scan(&id); err != nil {
 		return 0, err
 	}
 	a.mu.Lock()
@@ -278,7 +321,7 @@ func (a *Archive) sourceID(name string) (int64, error) {
 
 // sourceNames maps IDs back to names.
 func (a *Archive) sourceNames() (map[int64]string, error) {
-	rows, err := a.catalog.Query(`SELECT id, name FROM sources`)
+	rows, err := a.catalog.read.Query(`SELECT id, name FROM sources`)
 	if err != nil {
 		return nil, err
 	}
@@ -302,14 +345,14 @@ func (a *Archive) sourceNames() (map[int64]string, error) {
 // SetMeta and Meta keep small facts about the archive itself — when the
 // exchange lists were last read, say.
 func (a *Archive) SetMeta(key, value string) error {
-	_, err := a.catalog.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+	_, err := a.catalog.write.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }
 
 func (a *Archive) Meta(key string) (string, error) {
 	var v string
-	err := a.catalog.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+	err := a.catalog.read.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

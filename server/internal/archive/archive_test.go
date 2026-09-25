@@ -344,10 +344,10 @@ func TestAnInterruptedSplitResumesWithoutDoubling(t *testing.T) {
 	// Simulate a crash after the split was marked pending and one file was
 	// rescaled, but not the other.
 	split := quotes.Split{Time: day(2), Numerator: 2, Denominator: 1}
-	a.catalog.Exec(`INSERT INTO splits (symbol_id, ts, numerator, denominator, state) VALUES (?, ?, 2, 1, 'pending')`, id, split.Time.Unix())
+	a.catalog.write.Exec(`INSERT INTO splits (symbol_id, ts, numerator, denominator, state) VALUES (?, ?, 2, 1, 'pending')`, id, split.Time.Unix())
 	db, _ := a.partition("1m/2025", false)
-	db.Exec(`UPDATE bars SET close = close * 0.5, open = open * 0.5, high = high * 0.5, low = low * 0.5 WHERE symbol_id = ?`, id)
-	db.Exec(`INSERT INTO applied_splits (symbol_id, ts) VALUES (?, ?)`, id, split.Time.Unix())
+	db.write.Exec(`UPDATE bars SET close = close * 0.5, open = open * 0.5, high = high * 0.5, low = low * 0.5 WHERE symbol_id = ?`, id)
+	db.write.Exec(`INSERT INTO applied_splits (symbol_id, ts) VALUES (?, ?)`, id, split.Time.Unix())
 	root := a.Root()
 	a.Close()
 
@@ -361,7 +361,7 @@ func TestAnInterruptedSplitResumesWithoutDoubling(t *testing.T) {
 		t.Errorf("after resuming, closes = %v, want both 200 — the done file untouched, the other finished", closes(mins))
 	}
 	var state string
-	b.catalog.QueryRow(`SELECT state FROM splits WHERE symbol_id = ?`, id).Scan(&state)
+	b.catalog.read.QueryRow(`SELECT state FROM splits WHERE symbol_id = ?`, id).Scan(&state)
 	if state != "applied" {
 		t.Errorf("split state = %q after resuming, want applied", state)
 	}
@@ -575,5 +575,72 @@ func TestARenamedSymbolReadsItsFormerHistory(t *testing.T) {
 	}
 	if err := a.SetAliases(meta, []Alias{{Former: "FB"}}); err == nil {
 		t.Error("an alias with no end date was accepted")
+	}
+}
+
+// A read must not wait out the collector's transaction. With both on one
+// connection, the Data page and every sparkline stalled for as long as a
+// write (or a stats count) held it.
+func TestReadsDoNotWaitForAWriteInProgress(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, User, "AAPL")
+	id := idOf(t, a, "AAPL")
+	record(t, a, Batch{SymbolID: id, Interval: quotes.OneMinute, Source: "yahoo", Series: quotes.CandleSeries{Candles: minutes(session(1), 3, 100)}})
+
+	catalog, err := a.catalog.write.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Rollback()
+	if _, err := catalog.Exec(`UPDATE symbols SET name = 'mid-write' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	bars, err := a.partition("1m/2026", false)
+	if err != nil || bars == nil {
+		t.Fatalf("partition: %v", err)
+	}
+	partition, err := bars.write.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer partition.Rollback()
+	if _, err := partition.Exec(`UPDATE bars SET close = 1 WHERE symbol_id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		s, err := a.Lookup("AAPL")
+		if err == nil && s.Name == "mid-write" {
+			err = errors.New("a read saw a write that had not been committed")
+		}
+		if err == nil {
+			var got []quotes.Candle
+			got, err = a.Candles("AAPL", quotes.OneMinute, day(0), day(3))
+			if err == nil && (len(got) != 3 || got[0].Close != 100) {
+				err = fmt.Errorf("read %d bars closing at %v, want the 3 committed ones at 100", len(got), got)
+			}
+		}
+		if err == nil {
+			_, err = a.Stats()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reads queued behind an open write transaction")
+	}
+}
+
+// Reads go through a read-only pool; a write that strayed onto it must fail
+// loudly rather than become a second writer.
+func TestTheReadPoolRefusesWrites(t *testing.T) {
+	a := newTestArchive(t)
+	if _, err := a.catalog.read.Exec(`INSERT INTO meta (key, value) VALUES ('k', 'v')`); err == nil {
+		t.Fatal("the read pool accepted a write")
 	}
 }

@@ -43,7 +43,7 @@ func (a *Archive) SymbolCursors(id int64) ([]Cursor, error) {
 }
 
 func (a *Archive) queryCursors(where string, args ...any) ([]Cursor, error) {
-	rows, err := a.catalog.Query(`SELECT c.symbol_id, c.interval, s.name, c.oldest, c.newest, c.complete,
+	rows, err := a.catalog.read.Query(`SELECT c.symbol_id, c.interval, s.name, c.oldest, c.newest, c.complete,
 		  c.failures, c.next_attempt, c.last_error
 		FROM cursors c JOIN sources s ON s.id = c.source_id `+where, args...)
 	if err != nil {
@@ -79,7 +79,7 @@ func (a *Archive) SaveCursor(c Cursor) error {
 	if err != nil {
 		return err
 	}
-	return saveCursor(a.catalog, c, sid)
+	return saveCursor(a.catalog.write, c, sid)
 }
 
 type execer interface {
@@ -118,10 +118,10 @@ func validCursor(c Cursor) error {
 // start. Bars are kept; a walk that finds them held skips them.
 func (a *Archive) ResetCursors(id int64, interval quotes.Interval) error {
 	if interval == "" {
-		_, err := a.catalog.Exec(`DELETE FROM cursors WHERE symbol_id = ?`, id)
+		_, err := a.catalog.write.Exec(`DELETE FROM cursors WHERE symbol_id = ?`, id)
 		return err
 	}
-	_, err := a.catalog.Exec(`DELETE FROM cursors WHERE symbol_id = ? AND interval = ?`, id, string(interval))
+	_, err := a.catalog.write.Exec(`DELETE FROM cursors WHERE symbol_id = ? AND interval = ?`, id, string(interval))
 	return err
 }
 
@@ -188,7 +188,7 @@ func (a *Archive) Record(b Batch) error {
 		return err
 	}
 
-	tx, err := a.catalog.Begin()
+	tx, err := a.catalog.write.Begin()
 	if err != nil {
 		return err
 	}
@@ -249,7 +249,7 @@ func (a *Archive) writeBars(b Batch, sid int64) (map[int64]dayCount, error) {
 		if err != nil {
 			return nil, err
 		}
-		tx, err := db.Begin()
+		tx, err := db.write.Begin()
 		if err != nil {
 			return nil, err
 		}
@@ -349,10 +349,10 @@ func (a *Archive) applySplits(id int64, splits []quotes.Split) error {
 			continue
 		}
 		var state string
-		err := a.catalog.QueryRow(`SELECT state FROM splits WHERE symbol_id = ? AND ts = ?`, id, s.Time.Unix()).Scan(&state)
+		err := a.catalog.write.QueryRow(`SELECT state FROM splits WHERE symbol_id = ? AND ts = ?`, id, s.Time.Unix()).Scan(&state)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			if _, err := a.catalog.Exec(`INSERT INTO splits (symbol_id, ts, numerator, denominator, state) VALUES (?, ?, ?, ?, 'pending')`,
+			if _, err := a.catalog.write.Exec(`INSERT INTO splits (symbol_id, ts, numerator, denominator, state) VALUES (?, ?, ?, ?, 'pending')`,
 				id, s.Time.Unix(), s.Numerator, s.Denominator); err != nil {
 				return fmt.Errorf("record split: %w", err)
 			}
@@ -367,7 +367,7 @@ func (a *Archive) applySplits(id int64, splits []quotes.Split) error {
 		// Dividends are quoted per share, so a split changes them too; they
 		// live in the catalog, which makes this and marking the split applied
 		// one transaction.
-		tx, err := a.catalog.Begin()
+		tx, err := a.catalog.write.Begin()
 		if err != nil {
 			return err
 		}
@@ -402,7 +402,7 @@ func (a *Archive) rescale(id int64, at time.Time, ratio float64) error {
 		if err != nil || db == nil {
 			return err
 		}
-		tx, err := db.Begin()
+		tx, err := db.write.Begin()
 		if err != nil {
 			return err
 		}
@@ -430,7 +430,7 @@ func (a *Archive) rescale(id int64, at time.Time, ratio float64) error {
 
 // resumeSplits finishes any split a crash left pending.
 func (a *Archive) resumeSplits() error {
-	rows, err := a.catalog.Query(`SELECT symbol_id, ts, numerator, denominator FROM splits WHERE state = 'pending'`)
+	rows, err := a.catalog.write.Query(`SELECT symbol_id, ts, numerator, denominator FROM splits WHERE state = 'pending'`)
 	if err != nil {
 		return err
 	}

@@ -7,6 +7,17 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### A quick Data page again
+
+**Opening the Data page, and the app around a busy archive, is fast again.**
+The page used to wait for the archive's totals to be counted — seconds on a
+full archive on a Pi — before showing anything, and while they were counted
+(or while the collector was writing) sparklines, charts and the symbol list
+queued behind it. Totals are now counted in the background and shown when
+ready, archive reads run alongside the collector's writes instead of after
+them, a tab paints the moment it is tapped, and each page's requests and every
+row's sparkline go out together rather than one after another.
+
 ### A market-data archive, and a Data page to run it
 
 **Strategies: backtest your own trading rules.** A new Strategies page.
