@@ -240,3 +240,57 @@ func VWAP(high, low, close, volume, vwap []float64, day []int64) []float64 {
 	}
 	return out
 }
+
+// Change is the percentage change of x over n bars: the return a rule or a
+// ranking reads without spelling out an average.
+func Change(x []float64, n int) []float64 {
+	out := filled(len(x))
+	for i := n; i < len(x); i++ {
+		if x[i-n] > 0 {
+			out[i] = (x[i]/x[i-n] - 1) * 100
+		}
+	}
+	return out
+}
+
+// Gap is each bar's open against the previous bar's close, in percent. On
+// daily bars it is the overnight gap; on intraday bars it is only nonzero
+// where a session opens away from the last one's close.
+func Gap(open, close []float64) []float64 {
+	out := filled(len(open))
+	for i := 1; i < len(open); i++ {
+		if close[i-1] > 0 {
+			out[i] = (open[i]/close[i-1] - 1) * 100
+		}
+	}
+	return out
+}
+
+// Range is each bar's high-to-low range over its close, in percent.
+func Range(high, low, close []float64) []float64 {
+	out := filled(len(high))
+	for i := range high {
+		if close[i] > 0 {
+			out[i] = (high[i] - low[i]) / close[i] * 100
+		}
+	}
+	return out
+}
+
+// RelativeVolume is each bar's volume over the average of the n bars before
+// it — not including it, or a spike would dilute its own yardstick. 3 is
+// three times the usual.
+func RelativeVolume(volume []float64, n int) []float64 {
+	out := filled(len(volume))
+	var sum float64
+	for i := range volume {
+		if i >= n {
+			if sum > 0 {
+				out[i] = volume[i] / (sum / float64(n))
+			}
+			sum -= volume[i-n]
+		}
+		sum += volume[i]
+	}
+	return out
+}

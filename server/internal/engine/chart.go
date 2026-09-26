@@ -82,3 +82,25 @@ func lookback(interval quotes.Interval, n int, extended bool) time.Duration {
 	days := (n + perDay - 1) / perDay
 	return time.Duration(days*7/5+4) * day
 }
+
+// Bars reads a window of a symbol's regular-session bars, adjusted for
+// dividends when asked (daily bars only: a payout is a daily event).
+func (e *Engine) Bars(symbol string, interval quotes.Interval, from, to time.Time, dividends bool) ([]quotes.Candle, error) {
+	r := e.archiveReader()
+	if r == nil {
+		return nil, ErrNoArchive
+	}
+	var bars []quotes.Candle
+	err := r.Read(func(a *archive.Archive) error {
+		var err error
+		if bars, err = a.Best(archive.Query{Symbol: symbol, Interval: interval, From: from, To: to}); err != nil || !dividends || interval.Intraday() {
+			return err
+		}
+		divs, err := a.Dividends(symbol, from, to)
+		if err == nil && len(divs) > 0 {
+			bars = adjustCandles(bars, divs)
+		}
+		return err
+	})
+	return bars, err
+}

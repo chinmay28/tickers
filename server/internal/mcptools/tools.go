@@ -66,6 +66,7 @@ func New(opts Options) *mcp.Server {
 	t.registerSQL(s)
 	t.registerResearch(s)
 	t.registerXSection(s)
+	t.registerPatterns(s)
 	t.registerStrategies(s)
 	t.registerLedger(s)
 	s.AddResource(mcp.Resource{

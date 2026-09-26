@@ -1675,6 +1675,18 @@ markets, and the tools decode, call `engine` and encode.
   evidence they have. Rotations are recorded in the research log under their
   universe (`TOP200-STOCK`, `LIST12-…`), since a universe is the data they
   compete over.
+- **Patterns by the calendar.** `internal/patterns` groups returns a trader
+  could have held — a day's close to close, or a slice of a session from its
+  first open to its last close, with the overnight gap apart — and reports
+  each group against all of them, since a weekday effect exists only relative
+  to the other days. Time of day is measured from the session's first bar
+  rather than the clock, which follows daylight saving without a timezone
+  database, as `Resample` does. The bars' last month may not be over, so its
+  days are never counted from its end.
+- **Operands a pattern needs.** `change:N`, `gap`, `range` and `rvol:N` are
+  indicators like any other, so rules, screens, factors, studies and charts
+  get them at once. `rvol` divides by the average of the bars *before*, so a
+  spike is measured against the quiet it broke.
 - **Studies measure what could have been traded.** `strategy.StudyPlan` finds
   the bars a rule held on and measures from the next bar's open — the
   backtester's fill — to the close N bars on. Every horizon carries the same

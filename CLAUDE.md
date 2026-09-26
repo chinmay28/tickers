@@ -107,7 +107,8 @@ dividend adjustment.
 many symbols' daily bars on one calendar (NaN where one didn't trade),
 factors, `RunStudy` (IC and quantiles) and `Rotate` (rank-and-hold).
 `Engine.Panel` loads it. Operands and filters come from `strategy`, so there
-is one rule language.
+is one rule language. **`internal/patterns`** is calendar seasonality, pure
+as well.
 
 **`internal/mcp`** is the Model Context Protocol, hand-written (JSON-RPC,
 the handshake, tools, resources, Streamable HTTP, and the stdio `Bridge`) and

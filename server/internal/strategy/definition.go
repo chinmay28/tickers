@@ -313,6 +313,10 @@ var lineNames = map[string]struct {
 	indicators.KindStochastic: {map[string]string{"k": "%K", "d": "%D"}, "%K"},
 	indicators.KindATR:        {map[string]string{"atr": "ATR"}, "ATR"},
 	indicators.KindOBV:        {map[string]string{"obv": "OBV"}, "OBV"},
+	indicators.KindChange:     {map[string]string{"change": "change"}, "change"},
+	indicators.KindGap:        {map[string]string{"gap": "gap"}, "gap"},
+	indicators.KindRange:      {map[string]string{"range": "range"}, "range"},
+	indicators.KindRVol:       {map[string]string{"rvol": "rvol"}, "rvol"},
 }
 
 func parseOperand(raw string) (operand, error) {

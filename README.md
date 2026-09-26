@@ -651,6 +651,10 @@ volume under them, and indicators you switch on with a tap:
 - **Over the price:** SMA (20, 50, 200), EMA, Bollinger Bands, and VWAP on
   intraday charts.
 - **In panels below:** RSI, MACD, Stochastic, ATR and On-Balance Volume.
+- **By name, in rules and the URL below:** `change:N` (percent change over N
+  bars), `gap` (the open against the previous close), `range` (the bar's
+  high-to-low range) and `rvol:N` (volume against its N-bar average), so a
+  rule can say *gap up 2% on three times the usual volume*.
 - **Custom periods:** *Add* takes any parameters, such as `SMA 100`, `MACD 8,
   21, 5` or `Bollinger 20, 2.5`. Your choice is remembered in this browser.
 
@@ -738,6 +742,8 @@ The tools:
 | `screen` | rank a universe — a list, or the most-traded stocks or ETFs — by a factor on a day |
 | `factor_study` | whether ranking by a factor predicted what followed: its information coefficient and the return of each quantile |
 | `rotation_backtest` | hold the top-ranked few, rebalanced every N days, against a benchmark or the whole universe |
+| `seasonality` | returns by weekday, month, day of the month, turn of the month, or time of day, pooled across symbols |
+| `compare_symbols` | several symbols' returns, risk and drawdowns side by side, with betas and a correlation matrix |
 | `list_strategies`, `save_strategy` | the saved strategies; saving puts one on the Strategies page |
 | `research_log` | every strategy agents have tested, by symbol and interval |
 
