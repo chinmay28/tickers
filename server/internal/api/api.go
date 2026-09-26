@@ -38,6 +38,8 @@ type Server struct {
 	// archive runs the market-data archive; nil means none, and its
 	// endpoints answer 501.
 	archive *archiver.Manager
+	// mcp is the Model Context Protocol endpoint; nil means none.
+	mcp http.Handler
 }
 
 // Runtime is the start-up configuration the Settings page shows read-only.
@@ -66,6 +68,8 @@ type Options struct {
 	Runtime Runtime
 	// Archive backs the Data page. Nil disables it.
 	Archive *archiver.Manager
+	// MCP answers at /mcp, for agents. Nil disables it.
+	MCP http.Handler
 }
 
 // New builds the API server.
@@ -87,6 +91,7 @@ func New(opts Options) *Server {
 		runtime:   opts.Runtime,
 		web:       opts.Web,
 		archive:   opts.Archive,
+		mcp:       opts.MCP,
 	}
 }
 
@@ -152,6 +157,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no such endpoint: "+r.Method+" "+r.URL.Path)
 	})
+
+	// The MCP endpoint takes every method: it answers anything but a POST
+	// with the 405 its transport specifies, not the web client's shell.
+	if s.mcp != nil {
+		mux.Handle("/mcp", s.mcp)
+	}
 
 	// Anything not under /api is the web client (or a 404 if it isn't built in).
 	if s.web != nil {
@@ -1242,7 +1253,7 @@ func (s *Server) withCommonHeaders(next http.Handler) http.Handler {
 		// in that model.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/mcp" {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)

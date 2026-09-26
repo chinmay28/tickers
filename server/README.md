@@ -14,6 +14,8 @@ server/
     ├── publish/          downstream publishing + the legacy payload
     ├── engine/           the refresh + publish cycle and its scheduler
     ├── api/              HTTP handlers
+    ├── mcp/              the Model Context Protocol server and stdio bridge
+    ├── mcptools/         the tools /mcp offers agents
     └── web/              the web client, embedded with go:embed
 ```
 
@@ -39,6 +41,7 @@ is what makes `CGO_ENABLED=0` and cross-compilation work.
 ```
 tickers serve [flags]     run the API, the web client and the refresh loop
 tickers publish [flags]   run one refresh + publish cycle, then exit
+tickers mcp [--url URL]   relay an MCP client over stdio to a server's /mcp
 tickers version           print the version
 tickers help
 ```

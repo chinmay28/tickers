@@ -7,6 +7,18 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### An MCP server for agents
+
+**Agents can now research the archive directly.** The server answers the
+Model Context Protocol at `/mcp`, and `tickers mcp` relays a stdio-only client
+to it. Its tools read bars and indicators, backtest a rule, sweep a strategy's
+parameters with a hold-out period so the winner is judged on data it wasn't
+picked on, study what followed a pattern across up to 25 symbols against the
+baseline from every bar, backtest an allocation, and save a strategy to the
+Strategies page. Batched backtests share one archive read per series and give
+exactly what each gives alone. No new dependency: the protocol is implemented
+in-tree.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,

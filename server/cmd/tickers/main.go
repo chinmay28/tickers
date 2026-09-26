@@ -7,6 +7,7 @@
 //	tickers publish        # one cycle, then exit (the original script's job)
 //	tickers collect        # the market-data archive collector on its own
 //	tickers coverage       # how far the archive has got
+//	tickers mcp            # connect an MCP client over stdio to a server's /mcp
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,6 +30,8 @@ import (
 	"github.com/chinmay28/tickers/server/internal/archive"
 	"github.com/chinmay28/tickers/server/internal/archiver"
 	"github.com/chinmay28/tickers/server/internal/engine"
+	"github.com/chinmay28/tickers/server/internal/mcp"
+	"github.com/chinmay28/tickers/server/internal/mcptools"
 	"github.com/chinmay28/tickers/server/internal/publish"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -65,6 +69,8 @@ func run(args []string) error {
 		return coverage(args[1:])
 	case "archive-init":
 		return archiveInit(args[1:])
+	case "mcp":
+		return mcpBridge(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version.String())
 		return nil
@@ -86,6 +92,7 @@ Usage:
   tickers collect [flags]   run only the market-data archive collector
   tickers coverage [flags]  report how far the archive has got
   tickers archive-init DIR  make an existing, empty folder a market-data archive
+  tickers mcp [--url URL]   connect an MCP client over stdio to a running server
   tickers version           print the version
   tickers help              show this message
 
@@ -214,6 +221,7 @@ func serve(args []string) error {
 			Web:     webHandler,
 			Runtime: runtimeInfo(cfg),
 			Archive: archives,
+			MCP:     mcptools.New(mcptools.Options{Store: st, Engine: eng, Archive: archives}),
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No write timeout: a manual refresh can legitimately take longer than
@@ -425,6 +433,32 @@ func archiveInit(args []string) error {
 	}
 	fmt.Printf("%s is now a market-data archive\n", dir)
 	return nil
+}
+
+// mcpBridge connects an MCP client that launches commands — rather than
+// dialling URLs — to a running server's /mcp endpoint. It opens nothing
+// itself: the archive has one writer, and it is the server, so the bridge
+// only relays. Everything it prints on stdout is protocol; anything else goes
+// to stderr.
+func mcpBridge(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	endpoint := fs.String("url", envOr("TICKERS_MCP_URL", "http://localhost:8797/mcp"),
+		"the tickers server's MCP endpoint (a bare http://host:port gets /mcp added)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	u, err := url.Parse(*endpoint)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("--url must be an http(s) address like http://raspberrypi.local:8797/mcp, not %q", *endpoint)
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/mcp"
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// No overall timeout: a sweep on a Pi can take minutes, and the client
+	// cancels by closing stdin.
+	return mcp.Bridge(ctx, u.String(), os.Stdin, os.Stdout, &http.Client{})
 }
 
 // runtimeInfo is the start-up configuration the Settings page shows read-only:

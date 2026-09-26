@@ -332,6 +332,14 @@ not gain any — see [docs/DESIGN.md](./docs/DESIGN.md#threat-model).
 Bind to loopback when a proxy is in front: set `HOST=127.0.0.1` so the port
 isn't reachable directly.
 
+The MCP endpoint for agents, `/mcp`, is on the same port and under the same
+rule. It refuses any request carrying an `Origin` header — MCP clients don't
+send one, browsers do — so a web page can't use a visitor's browser to reach
+it. Its tools only read, apart from saving a strategy, but a parameter sweep is
+up to 250 backtests: on a Pi that is real work, so leave it to agents you run.
+If a proxy with authentication is in front, point the agent at the proxy's
+`/mcp` with whatever credentials the proxy wants.
+
 ## 6. Uninstalling
 
 ```bash
