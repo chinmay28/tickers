@@ -143,32 +143,11 @@ func Compile(d Definition, now time.Time) (p Plan, err error) {
 		}
 	}()
 	p = Plan{Def: d}
-	d.Symbol = strings.ToUpper(strings.TrimSpace(d.Symbol))
-	p.Def.Symbol = d.Symbol
-	if d.Symbol == "" {
-		return p, errors.New("a symbol is required")
+	if p.Def.Symbol, p.Def.Interval, p.Interval, err = compileSeries(d.Symbol, d.Interval); err != nil {
+		return p, err
 	}
-	if d.Interval == "" {
-		d.Interval = "1d"
-		p.Def.Interval = "1d"
-	}
-	interval, perr := quotes.ParseInterval(d.Interval)
-	if perr != nil {
-		return p, perr
-	}
-	p.Interval = interval
-	if p.From, err = time.Parse(time.DateOnly, d.From); err != nil {
-		return p, errors.New("the start date must be a date like 2015-01-31")
-	}
-	if d.To == "" {
-		p.To = now
-	} else if p.To, err = time.Parse(time.DateOnly, d.To); err != nil {
-		return p, errors.New("the end date must be a date like 2024-12-31")
-	} else {
-		p.To = p.To.AddDate(0, 0, 1)
-	}
-	if !p.From.Before(p.To) {
-		return p, errors.New("the start date must be before the end date")
+	if p.From, p.To, err = compileWindow(d.From, d.To, now); err != nil {
+		return p, err
 	}
 	for name, v := range map[string]float64{"stop-loss": d.StopLoss, "take-profit": d.TakeProfit} {
 		if v < 0 || v > MaxPercent || math.IsNaN(v) {
@@ -187,38 +166,13 @@ func Compile(d Definition, now time.Time) (p Plan, err error) {
 		return p, errors.New("the starting capital must be a positive amount")
 	}
 
-	seen := map[string]bool{}
-	addSpec := func(o operand) {
-		if o.spec.Kind != "" && !seen[o.spec.Key()] {
-			seen[o.spec.Key()] = true
-			p.Specs = append(p.Specs, o.spec)
-		}
+	if p.entry, err = compileRule("entry", d.Entry); err != nil {
+		return p, err
 	}
-	for _, side := range []struct {
-		name string
-		rule Rule
-		out  *compiled
-	}{{"entry", d.Entry, &p.entry}, {"exit", d.Exit, &p.exit}} {
-		switch side.rule.Match {
-		case "", "all":
-		case "any":
-			side.out.any = true
-		default:
-			return p, fmt.Errorf("the %s rule must match \"all\" or \"any\" of its conditions", side.name)
-		}
-		if len(side.rule.Conditions) > MaxConditions {
-			return p, fmt.Errorf("the %s rule can have at most %d conditions", side.name, MaxConditions)
-		}
-		for i, c := range side.rule.Conditions {
-			cc, err := compileCondition(c)
-			if err != nil {
-				return p, fmt.Errorf("%s condition %d: %w", side.name, i+1, err)
-			}
-			addSpec(cc.left)
-			addSpec(cc.right)
-			side.out.conds = append(side.out.conds, cc)
-		}
+	if p.exit, err = compileRule("exit", d.Exit); err != nil {
+		return p, err
 	}
+	p.Specs = specsOf(p.entry, p.exit)
 	if len(p.entry.conds) == 0 {
 		return p, errors.New("a strategy needs at least one entry condition")
 	}
@@ -226,6 +180,94 @@ func Compile(d Definition, now time.Time) (p Plan, err error) {
 		return p, fmt.Errorf("a strategy can use at most %d different indicators", indicators.MaxSpecs)
 	}
 	return p, nil
+}
+
+// Warmup is how many bars before the first one traded the plan needs: the
+// slowest indicator's settling time, and one more so a cross on the first
+// bar has a previous bar to look back to.
+func (p Plan) Warmup() int { return warmup(p.Specs) }
+
+func warmup(specs []indicators.Spec) int {
+	warm := 1
+	for _, s := range specs {
+		warm = max(warm, s.Warmup()+1)
+	}
+	return warm
+}
+
+// compileSeries reads what a test runs over: a symbol, normalised, and an
+// interval, daily when unset.
+func compileSeries(symbol, interval string) (string, string, quotes.Interval, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return symbol, interval, "", errors.New("a symbol is required")
+	}
+	if interval == "" {
+		interval = string(quotes.Daily)
+	}
+	i, err := quotes.ParseInterval(interval)
+	return symbol, interval, i, err
+}
+
+// compileWindow reads a test's dates: From is required, To is inclusive and
+// empty means now. The returned To is exclusive.
+func compileWindow(from, to string, now time.Time) (start, end time.Time, err error) {
+	if start, err = time.Parse(time.DateOnly, from); err != nil {
+		return start, end, errors.New("the start date must be a date like 2015-01-31")
+	}
+	if to == "" {
+		end = now
+	} else if end, err = time.Parse(time.DateOnly, to); err != nil {
+		return start, end, errors.New("the end date must be a date like 2024-12-31")
+	} else {
+		end = end.AddDate(0, 0, 1)
+	}
+	if !start.Before(end) {
+		return start, end, errors.New("the start date must be before the end date")
+	}
+	return start, end, nil
+}
+
+// compileRule compiles one side of a strategy; name says which in its
+// refusals.
+func compileRule(name string, r Rule) (compiled, error) {
+	var out compiled
+	switch r.Match {
+	case "", "all":
+	case "any":
+		out.any = true
+	default:
+		return out, fmt.Errorf("the %s rule must match \"all\" or \"any\" of its conditions", name)
+	}
+	if len(r.Conditions) > MaxConditions {
+		return out, fmt.Errorf("the %s rule can have at most %d conditions", name, MaxConditions)
+	}
+	for i, c := range r.Conditions {
+		cc, err := compileCondition(c)
+		if err != nil {
+			return out, fmt.Errorf("%s condition %d: %w", name, i+1, err)
+		}
+		out.conds = append(out.conds, cc)
+	}
+	return out, nil
+}
+
+// specsOf is every indicator the rules read, once each, in the order they
+// first appear.
+func specsOf(rules ...compiled) []indicators.Spec {
+	var specs []indicators.Spec
+	seen := map[string]bool{}
+	for _, r := range rules {
+		for _, c := range r.conds {
+			for _, o := range []operand{c.left, c.right} {
+				if o.spec.Kind != "" && !seen[o.spec.Key()] {
+					seen[o.spec.Key()] = true
+					specs = append(specs, o.spec)
+				}
+			}
+		}
+	}
+	return specs
 }
 
 func compileCondition(c Condition) (compiledCondition, error) {

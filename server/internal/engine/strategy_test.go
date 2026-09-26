@@ -2,6 +2,9 @@ package engine
 
 import (
 	"errors"
+	"fmt"
+	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -84,5 +87,95 @@ func TestAdjustCandlesCreditsDividends(t *testing.T) {
 	}
 	if bars[0].Close != 100 {
 		t.Error("adjusting rewrote the caller's bars")
+	}
+}
+
+func TestRunStrategiesMatchesRunningEachAlone(t *testing.T) {
+	eng, _ := newTestEngine(t, &fakeProvider{})
+	a := newTestArchive(t)
+	eng.UseArchive(openArchive{a})
+	var closes []float64
+	for i := 0; i < 400; i++ {
+		closes = append(closes, 100+10*math.Sin(float64(i)/15)+float64(i)/20)
+	}
+	// One payout inside every window, and one after the shorter run ends —
+	// which that run must not be adjusted for.
+	ago := func(n int) time.Time { return time.Now().AddDate(0, 0, -n).UTC().Truncate(24 * time.Hour) }
+	days := archiveDaily(t, a, "VTI", closes, []quotes.Dividend{{Time: ago(100), Amount: 1}, {Time: ago(30), Amount: 2}})
+	archiveDaily(t, a, "GLD", closes[:300], nil)
+
+	from := days[250].Format(time.DateOnly)
+	mid := days[330].Format(time.DateOnly)
+	cross := func(symbol string, fast int, to string) strategy.Definition {
+		return strategy.Definition{Symbol: symbol, From: from, To: to, Dividends: true,
+			Entry: strategy.Rule{Conditions: []strategy.Condition{{Left: fmt.Sprintf("ema:%d", fast), Op: "crosses_above", Right: "sma:50"}}},
+			Exit:  strategy.Rule{Conditions: []strategy.Condition{{Left: fmt.Sprintf("ema:%d", fast), Op: "crosses_below", Right: "sma:50"}}}}
+	}
+	defs := []strategy.Definition{
+		cross("VTI", 5, ""), cross("VTI", 20, mid), cross("GLD", 10, ""),
+		{Symbol: "VTI"}, // no start: refused on its own, without sinking the rest
+		cross("NOPE", 5, ""),
+	}
+	runs := eng.RunStrategies(defs)
+	if len(runs) != len(defs) {
+		t.Fatalf("got %d runs for %d definitions", len(runs), len(defs))
+	}
+	for i, def := range defs[:3] {
+		alone, err := eng.RunStrategy(def)
+		if err != nil || runs[i].Err != nil {
+			t.Fatalf("run %d: alone %v, batched %v", i, err, runs[i].Err)
+		}
+		if !reflect.DeepEqual(alone, runs[i].Result) {
+			t.Errorf("run %d: batched %+v differs from alone %+v — a shared read must cut each plan its own window and adjustment",
+				i, runs[i].Result.Strategy, alone.Strategy)
+		}
+	}
+	if runs[1].Result.To.After(days[330]) {
+		t.Errorf("the run ending %s went on to %s", mid, runs[1].Result.To)
+	}
+	if !strategy.IsInvalid(runs[3].Err) {
+		t.Errorf("an invalid definition gave %v, want an InvalidError", runs[3].Err)
+	}
+	if !errors.Is(runs[4].Err, ErrNoBars) {
+		t.Errorf("an unknown symbol gave %v, want ErrNoBars", runs[4].Err)
+	}
+}
+
+func TestRunStudyOverTheArchive(t *testing.T) {
+	eng, _ := newTestEngine(t, &fakeProvider{})
+	def := strategy.StudyDefinition{Symbol: "VTI", From: time.Now().AddDate(0, -6, 0).Format(time.DateOnly),
+		Signal: strategy.Rule{Conditions: []strategy.Condition{{Left: "close", Op: "<", Right: "sma:10"}}}, Horizons: []int{3}}
+	if _, err := eng.RunStudy(def); !errors.Is(err, ErrNoArchive) {
+		t.Fatalf("with no archive: %v, want ErrNoArchive", err)
+	}
+	a := newTestArchive(t)
+	eng.UseArchive(openArchive{a})
+	// A saw-tooth: ten days up a point, then a five-point drop. Every drop
+	// takes the close under its average, and the next three days rise.
+	var closes []float64
+	for i := 0; i < 300; i++ {
+		p := 100 + float64(i%11)
+		if i%11 == 10 {
+			p = 95
+		}
+		closes = append(closes, p)
+	}
+	archiveDaily(t, a, "VTI", closes, nil)
+	st, err := eng.RunStudy(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Signals == 0 || st.Horizons[0].Count == 0 {
+		t.Fatalf("study = %+v, want the drops found", st)
+	}
+	if st.Horizons[0].Mean <= st.Horizons[0].Baseline.Mean {
+		t.Errorf("after a drop the mean was %.2f%%, baseline %.2f%%: want the bounce to show as an edge", st.Horizons[0].Mean, st.Horizons[0].Baseline.Mean)
+	}
+	if st.From.Before(time.Now().AddDate(0, -6, -1)) {
+		t.Errorf("the study started %s, before the window — warm-up bars must not be counted", st.From)
+	}
+	def.Signal.Conditions[0].Op = "sideways"
+	if _, err := eng.RunStudy(def); !strategy.IsInvalid(err) {
+		t.Errorf("a bad operator gave %v, want an InvalidError", err)
 	}
 }

@@ -26,29 +26,139 @@ var ErrNoBars = errors.New("no bars")
 // history, closes alone, doesn't have. A symbol the archive has never heard of
 // is added to it, first in line, so asking is also how it gets collected.
 func (e *Engine) RunStrategy(def strategy.Definition) (strategy.Result, error) {
-	plan, err := strategy.Compile(def, time.Now())
-	if err != nil {
-		return strategy.Result{}, err
+	run := e.RunStrategies([]strategy.Definition{def})[0]
+	return run.Result, run.Err
+}
+
+// StrategyRun is one backtest of a batch: its result, or why it has none.
+type StrategyRun struct {
+	Result strategy.Result
+	Err    error
+}
+
+// RunStrategies backtests several strategies, reading the archive once per
+// symbol, interval and adjustment they share rather than once each — a
+// parameter sweep is a hundred backtests of one series. Each result is
+// exactly what RunStrategy gives for its definition alone: every plan is cut
+// its own window and warm-up from the shared read, and adjusted for only the
+// dividends inside it.
+func (e *Engine) RunStrategies(defs []strategy.Definition) []StrategyRun {
+	out := make([]StrategyRun, len(defs))
+	plans := make([]strategy.Plan, len(defs))
+	var reads []*seriesRead
+	byKey := map[seriesKey]*seriesRead{}
+	now := time.Now()
+	for i, def := range defs {
+		p, err := strategy.Compile(def, now)
+		if err != nil {
+			out[i].Err = err
+			continue
+		}
+		plans[i] = p
+		key := seriesKey{p.Def.Symbol, p.Interval, p.Interval == quotes.Daily && p.Def.Dividends}
+		rd := byKey[key]
+		if rd == nil {
+			rd = &seriesRead{key: key}
+			byKey[key] = rd
+			reads = append(reads, rd)
+		}
+		rd.want(p.From, p.To, p.Warmup())
+		rd.plans = append(rd.plans, i)
+	}
+	if len(reads) == 0 {
+		return out
 	}
 	r := e.archiveReader()
-	if r == nil {
-		return strategy.Result{}, ErrNoArchive
+	for _, rd := range reads {
+		s, err := e.readSeries(r, rd)
+		for _, i := range rd.plans {
+			if err != nil {
+				out[i].Err = err
+				continue
+			}
+			p := plans[i]
+			bars, start, warnings, err := s.window(p.From, p.To, p.Warmup())
+			if err != nil {
+				out[i].Err = err
+				continue
+			}
+			res := strategy.Simulate(p, bars, start)
+			res.Warnings = append(warnings, res.Warnings...)
+			out[i].Result = res
+		}
 	}
-	warm := 1 // a cross looks one bar back
-	for _, s := range plan.Specs {
-		warm = max(warm, s.Warmup()+1)
-	}
-	q := archive.Query{
-		Symbol: plan.Def.Symbol, Interval: plan.Interval,
-		From: plan.From.Add(-lookback(plan.Interval, warm, false)), To: plan.To,
-	}
+	return out
+}
 
-	var bars []quotes.Candle
-	var dividends []quotes.Dividend
-	var warnings []string
-	added := false
-	err = r.Read(func(a *archive.Archive) error {
-		sym, err := a.Lookup(plan.Def.Symbol)
+// RunStudy finds a pattern in the archive's bars and measures what followed
+// it; see strategy.StudyPlan. The archive is read, and an unknown symbol
+// added to it, exactly as for a backtest.
+func (e *Engine) RunStudy(def strategy.StudyDefinition) (strategy.Study, error) {
+	p, err := strategy.CompileStudy(def, time.Now())
+	if err != nil {
+		return strategy.Study{}, err
+	}
+	rd := &seriesRead{key: seriesKey{p.Def.Symbol, p.Interval, p.Interval == quotes.Daily && p.Def.Dividends}}
+	rd.want(p.From, p.To, p.Warmup())
+	s, err := e.readSeries(e.archiveReader(), rd)
+	if err != nil {
+		return strategy.Study{}, err
+	}
+	bars, start, warnings, err := s.window(p.From, p.To, p.Warmup())
+	if err != nil {
+		return strategy.Study{}, err
+	}
+	st := p.Run(bars, start)
+	st.Warnings = append(warnings, st.Warnings...)
+	return st, nil
+}
+
+// seriesKey is what makes two runs' reads the same read.
+type seriesKey struct {
+	symbol    string
+	interval  quotes.Interval
+	dividends bool
+}
+
+// seriesRead is one read of the archive on behalf of several runs: the
+// union of their windows, reaching back as far as the most demanding
+// warm-up.
+type seriesRead struct {
+	key      seriesKey
+	from, to time.Time
+	plans    []int
+}
+
+func (rd *seriesRead) want(from, to time.Time, warm int) {
+	lead := from.Add(-lookback(rd.key.interval, warm, false))
+	if rd.from.IsZero() || lead.Before(rd.from) {
+		rd.from = lead
+	}
+	if to.After(rd.to) {
+		rd.to = to
+	}
+}
+
+// archived is what one read found: raw bars and dividends, and what the read
+// learned about the symbol on the way.
+type archived struct {
+	key       seriesKey
+	bars      []quotes.Candle
+	dividends []quotes.Dividend
+	// added says the symbol wasn't being collected until this read asked
+	// for it.
+	added    bool
+	warnings []string
+}
+
+func (e *Engine) readSeries(r ArchiveReader, rd *seriesRead) (archived, error) {
+	s := archived{key: rd.key}
+	if r == nil {
+		return s, ErrNoArchive
+	}
+	symbol := rd.key.symbol
+	err := r.Read(func(a *archive.Archive) error {
+		sym, err := a.Lookup(symbol)
 		unknown := errors.Is(err, archive.ErrUnknownSymbol)
 		if err != nil && !unknown {
 			return err
@@ -57,19 +167,20 @@ func (e *Engine) RunStrategy(def strategy.Definition) (strategy.Result, error) {
 		// the catalog still names every listed symbol. One nobody excluded
 		// is put on the user's list either way.
 		if unknown || (!sym.Active && !sym.Excluded) {
-			if err := a.Add(archive.User, archive.Entry{Symbol: plan.Def.Symbol}, time.Now()); err != nil {
+			if err := a.Add(archive.User, archive.Entry{Symbol: symbol}, time.Now()); err != nil {
 				return err
 			}
-			added = true
+			s.added = true
 		}
 		if unknown {
-			return fmt.Errorf("%w: %s wasn't in the archive; it has been added and goes first in line — try again once it has been collected", ErrNoBars, plan.Def.Symbol)
+			return fmt.Errorf("%w: %s wasn't in the archive; it has been added and goes first in line — try again once it has been collected", ErrNoBars, symbol)
 		}
-		if bars, err = a.Best(q); err != nil {
+		q := archive.Query{Symbol: symbol, Interval: rd.key.interval, From: rd.from, To: rd.to}
+		if s.bars, err = a.Best(q); err != nil {
 			return err
 		}
-		if plan.Interval == quotes.Daily && plan.Def.Dividends {
-			if dividends, err = a.Dividends(plan.Def.Symbol, q.From, q.To); err != nil {
+		if rd.key.dividends {
+			if s.dividends, err = a.Dividends(symbol, rd.from, rd.to); err != nil {
 				return err
 			}
 		}
@@ -79,39 +190,50 @@ func (e *Engine) RunStrategy(def strategy.Definition) (strategy.Result, error) {
 		}
 		complete := false
 		for _, c := range cursors {
-			if c.Interval == plan.Interval && c.Complete {
+			if c.Interval == rd.key.interval && c.Complete {
 				complete = true
 			}
 		}
 		if !complete {
-			warnings = append(warnings, fmt.Sprintf("%s's %s history is still being collected; the test covers what the archive holds so far", plan.Def.Symbol, plan.Interval))
+			s.warnings = append(s.warnings, fmt.Sprintf("%s's %s history is still being collected; the test covers what the archive holds so far", symbol, rd.key.interval))
 		}
 		return nil
 	})
-	if err != nil {
-		return strategy.Result{}, err
-	}
+	return s, err
+}
 
-	start := sort.Search(len(bars), func(i int) bool { return !bars[i].Time.Before(plan.From) })
-	if start >= len(bars) && added {
-		return strategy.Result{}, fmt.Errorf("%w: %s wasn't being collected; it has been added and goes first in line — try again once it has been collected", ErrNoBars, plan.Def.Symbol)
+// window cuts one run's bars from a read: its warm-up lead-in, then its
+// window from start on, adjusted for the dividends inside that span alone.
+func (s archived) window(from, to time.Time, warm int) (bars []quotes.Candle, start int, warnings []string, err error) {
+	lead := from.Add(-lookback(s.key.interval, warm, false))
+	lo := sort.Search(len(s.bars), func(i int) bool { return !s.bars[i].Time.Before(lead) })
+	hi := sort.Search(len(s.bars), func(i int) bool { return !s.bars[i].Time.Before(to) })
+	bars = s.bars[lo:hi]
+	start = sort.Search(len(bars), func(i int) bool { return !bars[i].Time.Before(from) })
+	if start >= len(bars) && s.added {
+		return nil, 0, nil, fmt.Errorf("%w: %s wasn't being collected; it has been added and goes first in line — try again once it has been collected", ErrNoBars, s.key.symbol)
 	}
 	if start >= len(bars) {
-		return strategy.Result{}, fmt.Errorf("%w: the archive holds no %s bars for %s between %s and %s", ErrNoBars,
-			plan.Interval, plan.Def.Symbol, plan.From.Format(time.DateOnly), plan.To.AddDate(0, 0, -1).Format(time.DateOnly))
+		return nil, 0, nil, fmt.Errorf("%w: the archive holds no %s bars for %s between %s and %s", ErrNoBars,
+			s.key.interval, s.key.symbol, from.Format(time.DateOnly), to.AddDate(0, 0, -1).Format(time.DateOnly))
+	}
+	var dividends []quotes.Dividend
+	for _, d := range s.dividends {
+		if !d.Time.Before(lead) && d.Time.Before(to) {
+			dividends = append(dividends, d)
+		}
 	}
 	if len(dividends) > 0 {
 		bars = adjustCandles(bars, dividends)
 	}
-	if first := bars[start].Time; first.Sub(plan.From) > 7*24*time.Hour {
+	warnings = append([]string(nil), s.warnings...)
+	if first := bars[start].Time; first.Sub(from) > 7*24*time.Hour {
 		warnings = append(warnings, fmt.Sprintf("the archive's bars start on %s, after the start asked for", first.Format(time.DateOnly)))
 	}
 	if start < warm-1 {
 		warnings = append(warnings, "the archive has too little history before the start for every indicator to be settled on the first bars")
 	}
-	res := strategy.Simulate(plan, bars, start)
-	res.Warnings = append(warnings, res.Warnings...)
-	return res, nil
+	return bars, start, warnings, nil
 }
 
 // adjustCandles scales every bar before each ex-date the way adjustedBars
