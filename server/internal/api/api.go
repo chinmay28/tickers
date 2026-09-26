@@ -150,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/search", s.handleSearch)
 	s.routeArchive(mux)
 	s.routeStrategies(mux)
+	s.routeResearch(mux)
 
 	// Any /api path or method that didn't match above. Without this the
 	// catch-all below would answer `PUT /api/tickers` with the HTML shell,

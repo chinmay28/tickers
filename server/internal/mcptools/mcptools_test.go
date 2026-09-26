@@ -184,7 +184,7 @@ func TestEveryToolIsListedWithAStrictSchema(t *testing.T) {
 	}
 	json.Unmarshal(h.server.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)), &resp)
 	want := []string{"archive_status", "search_symbols", "symbol_info", "get_bars", "get_indicators",
-		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "screen", "factor_study", "rotation_backtest", "seasonality", "compare_symbols", "list_strategies", "save_strategy", "research_log"}
+		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "screen", "factor_study", "rotation_backtest", "seasonality", "compare_symbols", "list_strategies", "save_strategy", "research_log", "save_report", "list_reports", "watch_strategy", "forward_tests"}
 	if len(resp.Result.Tools) != len(want) {
 		t.Fatalf("listed %d tools, want %d", len(resp.Result.Tools), len(want))
 	}
@@ -699,5 +699,32 @@ func TestRelativeValueAndRegimes(t *testing.T) {
 		"entry": regime, "exit": map[string]any{"conditions": []map[string]string{{"left": "close@VTI", "op": "<", "right": "sma:50@VTI"}}}}})
 	if bt["stats"].(map[string]any)["trades"].(float64) < 2 {
 		t.Errorf("a backtest timed by VTI's trend = %v, want it in and out", bt["stats"])
+	}
+}
+
+func TestReportsAndForwardTests(t *testing.T) {
+	h := newHarness(t, true)
+	saved := h.mustCall(t, "save_report", map[string]any{"title": "VTI's sine", "body": strings.Repeat("It rises and falls. ", 40), "author": "test"})
+	if saved["id"] == "" {
+		t.Fatalf("save = %v", saved)
+	}
+	list := h.mustCall(t, "list_reports", map[string]any{})["reports"].([]any)
+	if body := list[0].(map[string]any)["body"].(string); len([]rune(body)) > 301 || !strings.HasSuffix(body, "…") {
+		t.Errorf("a listed report's body is %d characters, want it cut to 300", len([]rune(body)))
+	}
+	if full := h.mustCall(t, "list_reports", map[string]any{"full": true})["reports"].([]any); len(full[0].(map[string]any)["body"].(string)) < 700 {
+		t.Error("full didn't give the whole report")
+	}
+	if out, isErr := h.call(t, "save_report", map[string]any{"title": "", "body": "x"}); !isErr {
+		t.Errorf("a report without a title = %v", out)
+	}
+
+	if out, isErr := h.call(t, "forward_tests", map[string]any{}); !isErr || !strings.Contains(out["error"].(string), "watch_strategy") {
+		t.Errorf("forward tests with nothing watched = %v, want pointed at watch_strategy", out)
+	}
+	w := h.mustCall(t, "watch_strategy", map[string]any{"name": "EMA cross", "definition": golden(h.day(0)), "note": "test"})
+	fw := h.mustCall(t, "forward_tests", map[string]any{})["watches"].([]any)
+	if len(fw) != 1 || fw[0].(map[string]any)["status"] != "waiting" || fw[0].(map[string]any)["since"] != w["since"] {
+		t.Errorf("forward tests = %v, want the new watch waiting from %v", fw, w["since"])
 	}
 }

@@ -12,7 +12,7 @@ A productive order of work:
 4. find_signals to learn whether a condition carries information — the return after it versus the baseline from every bar — before trading on it. Pool across several symbols for more occurrences.
 5. run_backtest to trade a rule; sweep_strategy to tune its parameters, with holdoutFrom so the ranking is checked on data it wasn't chosen on.
    Across many symbols: screen ranks a universe on a day; factor_study asks whether ranking by a factor predicted the next period's returns (information coefficient, quantile spread); rotation_backtest holds the top-ranked, rebalanced on a schedule.
-6. save_strategy to hand a finding to the person, who sees it on the app's Strategies page.
+6. Hand back what held up: save_strategy puts it on the app's Strategies page; watch_strategy freezes it and starts a forward test on bars that don't exist yet (forward_tests reports on it, and says what its rules want at the next open); save_report writes up the finding — question, evidence, trials, holdout, deflated Sharpe, caveats — for the person to read in the app. list_reports and forward_tests show earlier work.
 
 Facts that matter:
 - Every backtest is recorded. Each result's overfitting.deflatedSharpe is the probability its true Sharpe is above zero after allowing for every strategy tried on the same symbol and interval; below 0.95, treat it as possibly luck however good it looks. Trying many variants raises the bar for all of them — search deliberately, not exhaustively.
@@ -21,6 +21,7 @@ Facts that matter:
 - Intraday bars are the regular session unless asked otherwise. Times are UTC.
 - Backtests fill at the next bar's open after a signal on a close, go all in, and are long only. Metrics are percentages (12.5 is 12.5%).
 - Asking for a symbol the archive doesn't collect adds it to the front of the queue; the call says so, and a retry some minutes later finds it.
+- Nothing here places orders. A forward test's "next" is a signal for the person, not an instruction to anyone.
 - The server may be a Raspberry Pi: prefer narrow windows and small grids first, then widen.
 
 The rule language is described in the run_backtest tool and in full in the resource ` + languageURI + `.`

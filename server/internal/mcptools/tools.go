@@ -69,6 +69,7 @@ func New(opts Options) *mcp.Server {
 	t.registerPatterns(s)
 	t.registerStrategies(s)
 	t.registerLedger(s)
+	t.registerOutputs(s)
 	s.AddResource(mcp.Resource{
 		URI:         languageURI,
 		Name:        "strategy-language",

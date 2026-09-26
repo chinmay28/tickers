@@ -46,6 +46,12 @@ Relative value and regimes: any operand can read another series with `@` —
 and cross-sectional filters, and a strategy or study can run on a formula such
 as `SPY/TLT`. A `zscore:N` indicator joins the rest.
 
+What agents hand back now shows on the Strategies page, under *From your
+agents*: their written reports, and strategies they are watching — frozen on
+the day and judged only on the bars that arrive after, with what their rules
+say to do at the next open. **Watch forward** in the editor starts one for a
+strategy of your own.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,
