@@ -179,3 +179,28 @@ func TestRunStudyOverTheArchive(t *testing.T) {
 		t.Errorf("a bad operator gave %v, want an InvalidError", err)
 	}
 }
+
+func TestAReadOnlyArchiveIsNotQueuedInto(t *testing.T) {
+	eng, _ := newTestEngine(t, &fakeProvider{})
+	a := newTestArchive(t)
+	archiveDaily(t, a, "VTI", make([]float64, 50), nil)
+	ro, err := archive.OpenReadOnly(a.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	eng.UseArchive(openArchive{ro})
+	def := strategy.Definition{Symbol: "NEWCO", From: time.Now().AddDate(0, -1, 0).Format(time.DateOnly),
+		Entry: strategy.Rule{Conditions: []strategy.Condition{{Left: "close", Op: ">", Right: "1"}}}}
+	_, err = eng.RunStrategy(def)
+	if !errors.Is(err, ErrNoBars) || !strings.Contains(err.Error(), "copy of the archive") {
+		t.Fatalf("an unknown symbol in a read-only archive gave %v, want ErrNoBars saying so", err)
+	}
+	if _, err := a.Lookup("NEWCO"); !errors.Is(err, archive.ErrUnknownSymbol) {
+		t.Errorf("NEWCO was added to an archive opened read-only (%v)", err)
+	}
+	def.Symbol = "VTI"
+	if _, err := eng.RunStrategy(def); err != nil {
+		t.Errorf("a held symbol in a read-only archive: %v", err)
+	}
+}

@@ -19,6 +19,11 @@ Strategies page. Batched backtests share one archive read per series and give
 exactly what each gives alone. No new dependency: the protocol is implemented
 in-tree.
 
+Agents can also ask the archive anything in SQL (`query_sql`: one read-only
+query over bars, dividends, splits and every symbol ever listed, bounded in
+rows and time), and `tickers research` serves the tools alone over an archive
+opened read-only — beside the collector, or against a copy on a bigger machine.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,
