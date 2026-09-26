@@ -103,6 +103,15 @@ line is settled at the first bar shown, then trims it.
 bars. `Engine.RunStrategy` supplies the bars (archive only), the warm-up and the
 dividend adjustment.
 
+**`internal/mcp`** is the Model Context Protocol, hand-written (JSON-RPC,
+the handshake, tools, resources, Streamable HTTP, and the stdio `Bridge`) and
+knowing nothing about markets. **`internal/mcptools`** is its catalogue, and
+stands to it as `api` stands to `net/http`: decode arguments strictly, call
+`engine`, shape the answer for a model (rows, rounded, limited). Rule-language
+work — studies (`strategy.StudyPlan`), grids (`strategy.Grid`), rankings —
+belongs in `strategy`, not here. `Engine.RunStrategies` batches backtests over
+one archive read per series; each result must equal `RunStrategy`'s alone.
+
 **`internal/archive` / `collector` / `archiver` / `universe`** are the
 market-data archive: a *folder* of SQLite files (catalog + one bar file per
 interval per year), on by default (the quick start creates one), configured

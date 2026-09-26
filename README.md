@@ -51,7 +51,11 @@ tickers/
         ├── collector/          #   fills it from each source, paced to its limits
         ├── archiver/           #   keeps it open wherever the settings say it is
         ├── universe/           #   every symbol listed on a US exchange
+        ├── indicators/         #   indicator arithmetic over the archive's bars
+        ├── strategy/           #   the rule backtester, signal studies, parameter grids
         ├── api/                #   the REST layer
+        ├── mcp/                #   the Model Context Protocol server, for agents
+        ├── mcptools/           #   the tools it offers: bars, backtests, sweeps, studies
         └── web/assets/         #   the web client, embedded at build time
 ```
 
@@ -697,6 +701,49 @@ SELECT datetime(b.ts, 'unixepoch') AS day, open, high, low, close, volume
   FROM bars b JOIN c.symbols s ON s.id = b.symbol_id
  WHERE s.symbol = 'AAPL' ORDER BY b.ts;          -- run against bars/1d/all.sqlite
 ```
+
+## Agents (MCP)
+
+The archive is also open to AI agents, through a
+[Model Context Protocol](https://modelcontextprotocol.io) endpoint at
+`/mcp` on the same port. An agent connected to it can look at the data, test
+whether a pattern has meant anything, backtest and tune strategies, and save
+the ones worth a look to the Strategies page for you.
+
+Connecting a client that takes a URL, such as Claude Code:
+
+```bash
+claude mcp add --transport http tickers http://raspberrypi.local:8797/mcp
+```
+
+A client that launches a command instead, such as Claude Desktop, runs the
+bridge built into the same binary (on the machine the client runs on):
+
+```json
+{ "mcpServers": { "tickers": { "command": "tickers", "args": ["mcp", "--url", "http://raspberrypi.local:8797"] } } }
+```
+
+The tools:
+
+| Tool | What it does |
+|---|---|
+| `archive_status` | what the archive holds, per bar width |
+| `search_symbols`, `symbol_info` | find symbols; one symbol's coverage, splits and dividends |
+| `get_bars`, `get_indicators` | OHLCV rows, and any indicator the chart knows, settled from the first row |
+| `run_backtest` | the Strategies page's backtester |
+| `sweep_strategy` | every combination of a parameter grid, ranked — with a hold-out period so the winner is tested on data it wasn't picked on |
+| `find_signals` | every time a condition held, on up to 25 symbols, and the return after it compared with the return from any day |
+| `backtest_portfolio` | the Portfolios page's allocation backtest |
+| `list_strategies`, `save_strategy` | the saved strategies; saving puts one on the Strategies page |
+
+Everything but `save_strategy` only reads (asking about a symbol the archive
+doesn't collect queues it, as the Strategies page does). Answers are shaped for
+a model to read: rows rather than chart series, rounded numbers, and a limit on
+everything long. The rule language is the Strategies page's; the endpoint also
+serves a reference for it (`tickers://docs/rule-language`) that agents can
+read. Like the rest of the app, the endpoint has no login: it refuses requests
+from web pages, and is otherwise for your own network — see
+[DEPLOYMENT.md](./DEPLOYMENT.md#5-exposure-and-tls).
 
 ## Versioning
 

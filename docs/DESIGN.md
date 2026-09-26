@@ -878,6 +878,7 @@ its life half-updated.
 | POST | `/api/publish` | publish the current snapshot now |
 | GET | `/api/preview` | render the payload without sending it |
 | GET | `/api/search` | resolve free text to symbols |
+| POST | `/mcp` | the Model Context Protocol endpoint (see [Agents](#agents)) |
 
 Conventions:
 
@@ -1591,6 +1592,54 @@ is what lets every fill rule be tested on a dozen bars worked by hand.
   and it is re-compiled on every run, so a newer binary's stricter rules apply
   to old saves.
 
+### Agents
+
+`/mcp` offers the archive and the backtester to AI agents over the Model
+Context Protocol. `internal/mcp` is the protocol and `internal/mcptools` the
+tools, split the way `net/http` and `api` are: the protocol knows nothing about
+markets, and the tools decode, call `engine` and encode.
+
+- **The protocol is written here.** A tool server needs JSON-RPC, the
+  handshake, `tools/*` and `resources/*` — a few hundred lines. An SDK would be
+  the second dependency, for a surface that small, in a binary whose whole
+  deployment story is that it has one.
+- **Streamable HTTP without the stream.** Every request is answered in its own
+  response; a GET is a 405, which the transport allows. The server never
+  initiates anything, so there is nothing to stream and no session to track.
+  A request with an `Origin` is refused: clients don't send one, and a browser
+  that does is a web page reaching into the LAN.
+- **A bridge, not a second server.** `tickers mcp` relays a stdio client to a
+  running server's `/mcp` instead of opening the database and archive itself.
+  The archive has one writer, a backtest of an uncollected symbol writes (it
+  queues it), and a laptop's client can't open a Pi's files anyway.
+- **Shaped for a model.** Answers are rows under named columns rather than
+  parallel arrays, rounded (Yahoo's float32 prices carry a dozen meaningless
+  digits, and every one is read), and bounded — the most recent bars of a long
+  window, the last trades, the leaders of a sweep. An error is a tool result
+  saying what to do, not a protocol failure, so a model can correct itself;
+  arguments are decoded strictly, so a misspelt one is named, not ignored.
+- **Sweeps batch.** `Engine.RunStrategies` reads the archive once per symbol,
+  interval and adjustment, for the union of the windows asked, then cuts each
+  plan its own lead-in and adjusts it for the dividends inside its own span
+  alone. Each result is exactly what `RunStrategy` gives by itself — a test
+  pins that — because a sweep whose leader can't be reproduced by running it
+  is worse than a slow one.
+- **A grid is a template.** `strategy.Grid` substitutes `{name}` placeholders
+  textually in a definition's strings, so a parameter can be a whole operand,
+  part of one (`sma:{fast}`), or a numeric field spelled as a string. Invalid
+  corners of a grid fail one variant each, not the sweep.
+- **Hold-out, because the best of many flatters itself.** With `holdoutFrom`,
+  variants are ranked before the date and the leaders rerun after it. Without
+  one, the answer says it was chosen on the data it is reported on.
+- **Studies measure what could have been traded.** `strategy.StudyPlan` finds
+  the bars a rule held on and measures from the next bar's open — the
+  backtester's fill — to the close N bars on. Every horizon carries the same
+  measurement from every bar as its baseline, since in a rising market
+  anything is followed by a rise. Only the first bar of a stretch counts by
+  default: ten oversold days in a row are one event, not ten that agree with
+  each other. Studies pool across symbols by occurrence, so a symbol with more
+  history weighs more.
+
 ### Renames
 
 A company that changes its symbol leaves the history collected under the old
@@ -1725,7 +1774,8 @@ provider:
 There is no authentication, by design, and the README says so plainly: run it
 on a trusted network. Within that model the server still does the things that
 are cheap and still buy something — `X-Content-Type-Options`, `X-Frame-Options`,
-a 1 MB cap on request bodies, an 8 MB cap on provider responses, scheme
+a 1 MB cap on request bodies, an 8 MB cap on provider responses, refusing
+browser-originated requests at `/mcp`, scheme
 validation on outbound URLs, and a systemd unit with `ProtectSystem=strict`
 and exactly one writable path.
 
