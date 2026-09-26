@@ -9,6 +9,10 @@ import (
 	"github.com/chinmay28/tickers/server/internal/quotes"
 )
 
+// WarnNoTrades is the warning on a result that never traded, for a caller
+// summarising many results to recognise.
+const WarnNoTrades = "the entry rule never held, so the strategy never traded"
+
 // Exit reasons.
 const (
 	ReasonRule   = "rule"
@@ -148,43 +152,8 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 		return res
 	}
 	n := len(bars)
-	series := evaluate(p.Specs, bars)
-	val := func(o operand, i int) float64 {
-		switch {
-		case o.isNum:
-			return o.value
-		case o.field != "":
-			b := bars[i]
-			switch o.field {
-			case "open":
-				return b.Open
-			case "high":
-				return b.High
-			case "low":
-				return b.Low
-			case "volume":
-				return float64(b.Volume)
-			}
-			return b.Close
-		}
-		return series[o.spec.Key()][o.line][i]
-	}
-	holds := func(r compiled, i int) bool {
-		if len(r.conds) == 0 {
-			return false
-		}
-		for _, c := range r.conds {
-			ok := c.holds(val, i)
-			if r.any && ok {
-				return true
-			}
-			if !r.any && !ok {
-				return false
-			}
-		}
-		return !r.any
-	}
-
+	f := newFrame(p.Specs, bars)
+	series := f.series
 	fee := p.Def.FeePercent / 100
 	cash := p.Def.Initial
 	var shares, entryPrice, entryCash float64
@@ -238,9 +207,9 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 			break
 		}
 		switch {
-		case !inPos && holds(p.entry, i):
+		case !inPos && f.holds(p.entry, i):
 			wantIn = true
-		case inPos && holds(p.exit, i):
+		case inPos && f.holds(p.exit, i):
 			wantOut = true
 		}
 	}
@@ -259,7 +228,7 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 	res.Hold = metrics(p.Def.Initial, hold, first, last, perYear)
 	res.Stats = stats(res.Trades, held, n-start)
 	if len(res.Trades) == 0 {
-		res.Warnings = append(res.Warnings, "the entry rule never held, so the strategy never traded")
+		res.Warnings = append(res.Warnings, WarnNoTrades)
 	}
 	if len(res.Trades) > maxTrades {
 		res.Warnings = append(res.Warnings, "only the first trades are listed; every trade is in the numbers")
@@ -267,6 +236,57 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 	}
 	res.Equity, res.Prices, res.Lines = thin(bars[start:], equity, hold, series, p.Specs, start)
 	return res
+}
+
+// frame is a series of bars with every indicator its rules read computed
+// over it, once, for asking whether a rule held on a bar.
+type frame struct {
+	bars   []quotes.Candle
+	series map[string]map[string][]float64
+}
+
+func newFrame(specs []indicators.Spec, bars []quotes.Candle) frame {
+	return frame{bars: bars, series: evaluate(specs, bars)}
+}
+
+// value is an operand on bar i; NaN where an indicator isn't defined yet.
+func (f frame) value(o operand, i int) float64 {
+	switch {
+	case o.isNum:
+		return o.value
+	case o.field != "":
+		b := f.bars[i]
+		switch o.field {
+		case "open":
+			return b.Open
+		case "high":
+			return b.High
+		case "low":
+			return b.Low
+		case "volume":
+			return float64(b.Volume)
+		}
+		return b.Close
+	}
+	return f.series[o.spec.Key()][o.line][i]
+}
+
+// holds reports whether a rule held on bar i. A rule with no conditions
+// never holds.
+func (f frame) holds(r compiled, i int) bool {
+	if len(r.conds) == 0 {
+		return false
+	}
+	for _, c := range r.conds {
+		ok := c.holds(f.value, i)
+		if r.any && ok {
+			return true
+		}
+		if !r.any && !ok {
+			return false
+		}
+	}
+	return !r.any
 }
 
 func (c compiledCondition) holds(val func(operand, int) float64, i int) bool {
