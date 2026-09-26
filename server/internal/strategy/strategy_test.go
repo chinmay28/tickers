@@ -245,11 +245,65 @@ func TestASignalHoldsWhereItsRuleDoes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := sig.Holds(ohlc(flat(9), flat(11), flat(12), flat(9), flat(11)))
+	got := sig.Holds(ohlc(flat(9), flat(11), flat(12), flat(9), flat(11)), nil)
 	if fmt.Sprint(got) != "[false true false false true]" {
 		t.Errorf("holds = %v, want the two crossings", got)
 	}
 	if _, err := CompileSignal(Rule{}); !IsInvalid(err) {
 		t.Errorf("an empty filter gave %v, want refused", err)
+	}
+}
+
+func TestOperandsCanReadAnotherSeries(t *testing.T) {
+	for raw, want := range map[string]string{"close@^vix": "^VIX", "zscore:20@ko / pep": "KO/PEP", "sma:50@spy": "SPY"} {
+		o, err := parseOperand(raw)
+		if err != nil || o.ref != want {
+			t.Errorf("%q = %+v (%v), want it reading %s", raw, o, err, want)
+		}
+	}
+	for _, bad := range []string{"70@SPY", "close@", "close@SP Y", "close@(SPY"} {
+		if _, err := parseOperand(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+
+	// Trade TEST while REF is above 10. REF has no bar on day 2 — its day-1
+	// value carries — and stops after day 3, so from day 11 it is stale.
+	bars := ohlc(flat(5), flat(5), flat(5), flat(5), flat(5), flat(5))
+	ref := ohlc(flat(9), flat(11), flat(11), flat(12))
+	ref = append(ref[:2:2], ref[3])
+	p := plan(t, Definition{Entry: rule(Condition{"close@ref", ">", "10"}), Exit: rule(Condition{"close@ref", "<", "10"})})
+	if fmt.Sprint(p.References()) != "[REF]" || len(p.Specs) != 0 {
+		t.Fatalf("references %v, specs %v: want REF and no indicator on the traded series", p.References(), p.Specs)
+	}
+	p.Others = map[string][]quotes.Candle{"REF": ref}
+	res := Simulate(p, bars, 0)
+	if len(res.Trades) != 1 || !res.Trades[0].EntryTime.Equal(bars[2].Time) {
+		t.Errorf("trades = %+v, want one entered on day 2's open after REF closed above 10 on day 1", res.Trades)
+	}
+	withSMA := plan(t, Definition{Entry: rule(Condition{"close", ">", "sma:30@ref"})})
+	if withSMA.Warmup() < 31 || len(withSMA.Specs) != 0 {
+		t.Errorf("warm-up %d, specs %v: want the other series' SMA to set the warm-up but not be computed on this one", withSMA.Warmup(), withSMA.Specs)
+	}
+	// Without its bars, a reference reads as undefined: no trades, no panic.
+	p.Others = nil
+	if res := Simulate(p, bars, 0); len(res.Trades) != 0 {
+		t.Errorf("with no REF bars the strategy traded %+v", res.Trades)
+	}
+	if _, err := ParseOperand("close@SPY"); !IsInvalid(err) {
+		t.Error("a factor reading another series was accepted")
+	}
+}
+
+func TestAStaleReferenceIsUndefined(t *testing.T) {
+	bars := ohlc(flat(5), flat(5), flat(5), flat(5), flat(5), flat(5), flat(5), flat(5), flat(5), flat(5), flat(5))
+	ref := ohlc(flat(11))
+	sig, err := CompileSignal(rule(Condition{"close@ref", ">", "10"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sig.Holds(bars, map[string][]quotes.Candle{"REF": ref})
+	if !got[7] || got[8] {
+		t.Errorf("holds = %v, want REF's day-0 close carried a week and no further", got)
 	}
 }

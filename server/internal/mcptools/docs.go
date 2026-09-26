@@ -75,8 +75,21 @@ A cross holds on the one bar it happens. A level comparison holds on every bar i
 | gap | the open against the previous bar's close, in percent (the overnight gap on daily bars) | gap |
 | range | the bar's high-to-low range over its close, in percent | range |
 | rvol:N | volume over the average of the N bars before it (3 is three times the usual) | rvol |
+| zscore:N | standard deviations of the close from its N-bar average (2 is the upper Bollinger band) | zscore |
 
-Parameters default when left off: sma and ema 20, bb 20:2, rsi 14, macd 12:26:9, stoch 14:3, atr 14, change 1, rvol 20. Periods are whole bars, 1–1000. A strategy can use at most 12 distinct indicators.
+Parameters default when left off: sma and ema 20, bb 20:2, rsi 14, macd 12:26:9, stoch 14:3, atr 14, change 1, rvol 20, zscore 20.
+
+## Other series: @
+
+Any operand but a number can read another series by ending in @ and a symbol or a formula: close@^VIX, sma:200@SPY, zscore:20@KO/PEP. The other series is read at the same interval, as of each bar — its latest bar at or before it, never a later one — and is undefined once it has gone a week without a bar (or, intraday, outside the session). This is how a rule says what regime it trades in, or trades one symbol on another's signal:
+
+- Only in a calm market: close@^VIX < "20"
+- Only in an uptrend: close@SPY > sma:200@SPY
+- Pairs: zscore:20@KO/PEP < "-2"
+
+A strategy or study's symbol can be a formula too — "SPY/TLT", "KO / PEP", "QQQ - SPY" (a hyphen spaced is subtraction; BTC-USD is a symbol). Its bars exist where every leg's do; its open and close are the formula over the legs', and its high and low are only the larger and smaller of those two, so stops trip on opens and closes. A backtest of a formula says so: it isn't something that can be bought.
+
+Screens, factor studies and rotations accept @ in their where rule (a regime filter reads SPY; the symbol is loaded and never ranked) but not formulas there. Factors can't use @: they rank each symbol by its own data. Periods are whole bars, 1–1000. A strategy can use at most 12 distinct indicators.
 
 Every indicator is computed from bars before the test window as well, so it is settled on the first bar tested. An indicator not yet defined (not enough history) makes any condition reading it false.
 
@@ -89,6 +102,7 @@ Examples:
 - Quiet market: atr:14 < "2"
 - Gap and go: gap > "2" and rvol:20 > "3"
 - A big down day: change:1 < "-3"
+- Oversold in a calm market: rsi:14 < "30" and close@^VIX < "20"
 
 ## How a backtest trades
 

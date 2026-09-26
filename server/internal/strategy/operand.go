@@ -23,6 +23,9 @@ func ParseOperand(raw string) (Operand, error) {
 	if o.isNum {
 		return Operand{}, &InvalidError{msg: "a number is the same for every symbol, so it can't be a factor"}
 	}
+	if o.ref != "" {
+		return Operand{}, &InvalidError{msg: "a factor ranks each symbol by its own data, so it can't read another series with @"}
+	}
 	return Operand{o}, nil
 }
 
@@ -83,11 +86,17 @@ func CompileSignal(r Rule) (Signal, error) {
 }
 
 // Warmup is how many bars before the first judged one the rule needs.
-func (s Signal) Warmup() int { return warmup(s.specs) }
+func (s Signal) Warmup() int { return max(warmup(s.specs), refWarmup(s.rule)) }
 
-// Holds reports, for every bar, whether the rule held on it.
-func (s Signal) Holds(bars []quotes.Candle) []bool {
+// References are the other series the rule reads: a regime filter's
+// "close@SPY > sma:200@SPY".
+func (s Signal) References() []string { return references(s.rule) }
+
+// Holds reports, for every daily bar, whether the rule held on it; others
+// are the daily bars of the series in References.
+func (s Signal) Holds(bars []quotes.Candle, others map[string][]quotes.Candle) []bool {
 	f := newFrame(s.specs, bars)
+	f.attach(refOperands(s.rule), others, quotes.Daily)
 	out := make([]bool, len(bars))
 	for i := range bars {
 		out[i] = f.holds(s.rule, i)

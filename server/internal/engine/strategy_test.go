@@ -204,3 +204,56 @@ func TestAReadOnlyArchiveIsNotQueuedInto(t *testing.T) {
 		t.Errorf("a held symbol in a read-only archive: %v", err)
 	}
 }
+
+func TestRulesReadOtherSeriesAndFormulas(t *testing.T) {
+	eng, _ := newTestEngine(t, &fakeProvider{})
+	a := newTestArchive(t)
+	eng.UseArchive(openArchive{a})
+	n := 120
+	up, down := make([]float64, n), make([]float64, n)
+	for i := range up {
+		up[i], down[i] = 100+float64(i), 200-float64(i)
+	}
+	days := archiveDaily(t, a, "UP", up, nil)
+	archiveDaily(t, a, "DOWN", down[20:], nil) // lists 20 days later
+	from := days[40].Format(time.DateOnly)
+	cond := func(l, op, r string) strategy.Rule {
+		return strategy.Rule{Conditions: []strategy.Condition{{Left: l, Op: op, Right: r}}}
+	}
+
+	// Hold UP only while DOWN is above 150: DOWN closes under it on day
+	// 51, so the exit fills at day 52's open.
+	res, err := eng.RunStrategy(strategy.Definition{Symbol: "UP", From: from, Entry: cond("close@down", ">", "150"), Exit: cond("close@down", "<", "150")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Trades) != 1 || !res.Trades[0].ExitTime.Equal(days[52]) {
+		t.Errorf("trades = %+v, want one, closed the day after DOWN fell under 150", res.Trades)
+	}
+
+	_, err = eng.RunStrategy(strategy.Definition{Symbol: "UP", From: from, Entry: cond("close@nope", ">", "1")})
+	if !errors.Is(err, ErrNoBars) || !strings.Contains(err.Error(), "refer to") {
+		t.Errorf("a rule reading an unknown symbol gave %v, want ErrNoBars naming it as referred to", err)
+	}
+
+	// A formula as the series itself: UP/DOWN only exists where both do,
+	// and rises every day. The bars are flat, so the return from the next
+	// open is measured two bars on, not one.
+	st, err := eng.RunStudy(strategy.StudyDefinition{Symbol: "up / down", From: days[10].Format(time.DateOnly), Signal: cond("close", ">", "0"), Horizons: []int{2}, EveryBar: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Symbol != "UP/DOWN" || !st.From.Equal(days[20]) {
+		t.Errorf("study of %s from %s, want UP/DOWN from day 20, when DOWN listed", st.Symbol, st.From)
+	}
+	if h := st.Horizons[0]; h.WinRate != 100 {
+		t.Errorf("a rising ratio's two-day win rate = %v, want 100", h.WinRate)
+	}
+	bt, err := eng.RunStrategy(strategy.Definition{Symbol: "UP/DOWN", From: from, Entry: cond("zscore:10", ">", "-5")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(bt.Warnings, " "), "not something that can be bought") {
+		t.Errorf("warnings = %v, want a formula's backtest to say it isn't an asset", bt.Warnings)
+	}
+}

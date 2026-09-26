@@ -160,6 +160,7 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 	}
 	n := len(bars)
 	f := newFrame(p.Specs, bars)
+	f.attach(refOperands(p.entry, p.exit), p.Others, p.Interval)
 	series := f.series
 	fee := p.Def.FeePercent / 100
 	cash := p.Def.Initial
@@ -250,14 +251,65 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 type frame struct {
 	bars   []quotes.Candle
 	series map[string]map[string][]float64
+	// refs are operands on other series, each already aligned with bars.
+	refs map[string][]float64
 }
 
 func newFrame(specs []indicators.Spec, bars []quotes.Candle) frame {
 	return frame{bars: bars, series: evaluate(specs, bars)}
 }
 
+// attach computes the operands that read other series on those series'
+// own bars, and aligns each with the frame's bars: a bar reads the other
+// series' latest bar at or before it. Both are at the same interval, so
+// "at or before" never sees a bar that closed later. A stale value — the
+// other series stopped trading — is carried a week on daily bars and to
+// the end of the session intraday, and is undefined after that.
+func (f *frame) attach(ops []operand, others map[string][]quotes.Candle, interval quotes.Interval) {
+	if len(ops) == 0 {
+		return
+	}
+	f.refs = map[string][]float64{}
+	for _, o := range ops {
+		other := others[o.ref]
+		local := o
+		local.ref = ""
+		var specs []indicators.Spec
+		if o.spec.Kind != "" {
+			specs = []indicators.Spec{o.spec}
+		}
+		of := newFrame(specs, other)
+		out := make([]float64, len(f.bars))
+		j := -1
+		for i, b := range f.bars {
+			for j+1 < len(other) && !other[j+1].Time.After(b.Time) {
+				j++
+			}
+			out[i] = math.NaN()
+			if j < 0 || stale(other[j].Time, b.Time, interval) {
+				continue
+			}
+			out[i] = of.value(local, j)
+		}
+		f.refs[o.text] = out
+	}
+}
+
+func stale(then, now time.Time, interval quotes.Interval) bool {
+	if interval.Intraday() {
+		return then.Unix()/86400 != now.Unix()/86400
+	}
+	return now.Sub(then) > 7*24*time.Hour
+}
+
 // value is an operand on bar i; NaN where an indicator isn't defined yet.
 func (f frame) value(o operand, i int) float64 {
+	if o.ref != "" {
+		if v, ok := f.refs[o.text]; ok {
+			return v[i]
+		}
+		return math.NaN()
+	}
 	switch {
 	case o.isNum:
 		return o.value

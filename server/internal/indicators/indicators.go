@@ -294,3 +294,18 @@ func RelativeVolume(volume []float64, n int) []float64 {
 	}
 	return out
 }
+
+// ZScore is how many standard deviations the close sits from its n-bar
+// average — the same deviation Bollinger bands are drawn with, so a z-score
+// of 2 is the upper band. On a ratio of two symbols it is the pairs trader's
+// spread signal.
+func ZScore(close []float64, n int) []float64 {
+	mid, upper, _ := Bollinger(close, n, 1)
+	out := filled(len(close))
+	for i := range close {
+		if sd := upper[i] - mid[i]; !math.IsNaN(sd) && sd > 0 {
+			out[i] = (close[i] - mid[i]) / sd
+		}
+	}
+	return out
+}

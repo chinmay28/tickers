@@ -1687,6 +1687,19 @@ markets, and the tools decode, call `engine` and encode.
   indicators like any other, so rules, screens, factors, studies and charts
   get them at once. `rvol` divides by the average of the bars *before*, so a
   spike is measured against the quiet it broke.
+- **Other series, as of each bar.** An operand ending `@SYMBOL` or
+  `@FORMULA` reads another series; `strategy` compiles it apart from the
+  traded series' indicators (`Plan.Specs` excludes it, `Plan.Warmup`
+  includes it), and a plan carries the referenced bars in `Others`, filled by
+  the engine's batched reads (`readSet`), so a sweep over a regime filter
+  still reads VIX once. Alignment is as-of at the same interval — the latest
+  bar at or before — which can't see a later close, and a reference quiet for
+  a week (or out of the session) goes undefined rather than being carried
+  forever. A formula's bars are combined from its legs where all have one:
+  open and close are the formula's, high and low only their extremes, because
+  a ratio's intrabar range isn't knowable from the legs'. Factors refuse `@`
+  (a ranking compares each symbol's own data), and cross-sectional `where`
+  rules take symbols but not formulas, because a panel holds symbols.
 - **Studies measure what could have been traded.** `strategy.StudyPlan` finds
   the bars a rule held on and measures from the next bar's open — the
   backtester's fill — to the close N bars on. Every horizon carries the same

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chinmay28/tickers/server/internal/engine"
+	"github.com/chinmay28/tickers/server/internal/expr"
 	"github.com/chinmay28/tickers/server/internal/mcp"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/store"
@@ -148,9 +149,23 @@ func (f filterArgs) compile() (xsection.Filter, error) {
 		if err != nil {
 			return out, err
 		}
+		for _, ref := range sig.References() {
+			if expr.Looks(ref) {
+				return out, strategy.Invalid("a where rule can read another symbol (close@SPY) but not a formula (%s)", ref)
+			}
+		}
 		out.Where = &sig
 	}
 	return out, nil
+}
+
+// withRefs adds the series a filter's rule reads to what a panel loads;
+// Panel reports them back as extras, which are never ranked.
+func withRefs(u engine.Universe, f xsection.Filter) engine.Universe {
+	if f.Where != nil {
+		u.Also = append(slices.Clone(u.Also), f.Where.References()...)
+	}
+	return u
 }
 
 type screenArgs struct {
@@ -179,7 +194,7 @@ func (t *tools) screen(ctx context.Context, in screenArgs) (any, error) {
 	}
 	// A month back is the window the universe's liquidity is judged over,
 	// and holds the day asked for across any holiday.
-	p, info, err := t.engine.Panel(ctx, in.Universe.engine(), day.AddDate(0, 0, -30), day.AddDate(0, 0, 1), factor.Warmup()+filter.Warmup(), false)
+	p, info, err := t.engine.Panel(ctx, withRefs(in.Universe.engine(), filter), day.AddDate(0, 0, -30), day.AddDate(0, 0, 1), factor.Warmup()+filter.Warmup(), false)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +203,7 @@ func (t *tools) screen(ctx context.Context, in screenArgs) (any, error) {
 	if i < 0 {
 		return nil, fmt.Errorf("no bars on or before %s", day.Format(time.DateOnly))
 	}
+	filter.Exclude = info.Extra
 	ranked := xsection.Screen(p, factor, filter, i, in.Ascending)
 	out := struct {
 		Date     string   `json:"date"`
@@ -256,12 +272,13 @@ func (t *tools) factorStudy(ctx context.Context, in factorStudyArgs) (any, error
 	}
 	every := clamp(in.Every, 21, 252)
 	spec := xsection.StudySpec{Factor: factor, Every: every, Horizon: clamp(in.Horizon, every, 252), Quantiles: clamp(in.Quantiles, 5, 10), Filter: filter}
-	p, info, err := t.engine.Panel(ctx, in.Universe.engine(), from, to, factor.Warmup()+filter.Warmup(), in.Dividends)
+	p, info, err := t.engine.Panel(ctx, withRefs(in.Universe.engine(), filter), from, to, factor.Warmup()+filter.Warmup(), in.Dividends)
 	if err != nil {
 		return nil, err
 	}
 	warnings := info.Warnings
 	spec.From = p.First(from)
+	spec.Filter.Exclude = info.Extra
 	st, err := xsection.RunStudy(p, spec)
 	if err != nil {
 		return nil, err
@@ -340,10 +357,10 @@ func (t *tools) rotation(ctx context.Context, in rotationArgs) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	u := in.Universe.engine()
+	u := withRefs(in.Universe.engine(), filter)
 	bench := store.NormalizeSymbol(in.Benchmark)
 	if bench != "" {
-		u.Also = []string{bench}
+		u.Also = append(u.Also, bench)
 	}
 	p, info, err := t.engine.Panel(ctx, u, from, to, factor.Warmup()+filter.Warmup(), in.Dividends)
 	if err != nil {
@@ -352,10 +369,8 @@ func (t *tools) rotation(ctx context.Context, in rotationArgs) (any, error) {
 	warnings := info.Warnings
 	spec := xsection.RotationSpec{Factor: factor, From: p.First(from), Every: clamp(in.Every, 21, 252), Hold: clamp(in.Hold, 10, 100),
 		Ascending: in.Ascending, Filter: filter, FeePercent: in.FeePercent, Initial: in.Initial, Benchmark: bench}
-	if slices.Contains(info.Extra, bench) {
-		// Loaded only to be compared with, so not ranked.
-		spec.Filter.Exclude = bench
-	}
+	// Loaded only to be compared with or read by a rule, so not ranked.
+	spec.Filter.Exclude = info.Extra
 	rot, err := xsection.Rotate(p, spec)
 	if err != nil {
 		return nil, err

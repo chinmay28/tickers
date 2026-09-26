@@ -33,7 +33,7 @@ const (
 // tool that takes one. The descriptions carry the rule language, since the
 // schema is what a model reads when it writes a call.
 const strategySchema = `{"type":"object","properties":{
-	"symbol":{"type":"string"},
+	"symbol":{"type":"string","description":"A symbol, or a formula such as SPY/TLT (not tradable itself; the result says so)."},
 	"interval":{"type":"string","enum":["1d","1h","5m","1m"],"description":"Bar width; default 1d."},
 	"from":{"type":"string","description":"First day tested, YYYY-MM-DD. Required."},
 	"to":{"type":"string","description":"Last day tested, YYYY-MM-DD, inclusive; default today."},
@@ -49,7 +49,7 @@ const strategySchema = `{"type":"object","properties":{
 const ruleSchema = `{"type":"object","properties":{
 	"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough."},
 	"conditions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{
-		"left":{"type":"string","description":"An operand: open, high, low, close (or price), volume, a number, or an indicator spec with an optional line, e.g. sma:50, rsi:14, bb:20:2.lower, macd:12:26:9.signal, stoch:14:3.k; also change:N (% over N bars), gap (% open vs previous close), range (% high-low), rvol:N (volume vs its N-bar average)."},
+		"left":{"type":"string","description":"An operand: open, high, low, close (or price), volume, a number, or an indicator spec with an optional line, e.g. sma:50, rsi:14, bb:20:2.lower, macd:12:26:9.signal, stoch:14:3.k; also change:N (% over N bars), gap (% open vs previous close), range (% high-low), rvol:N (volume vs its N-bar average), zscore:N. End any of them with @SYMBOL or @FORMULA to read another series: close@^VIX, sma:200@SPY, zscore:20@KO/PEP."},
 		"op":{"type":"string","enum":[">","<",">=","<=","crosses_above","crosses_below"]},
 		"right":{"type":"string","description":"An operand, as for left. Numbers are written as strings: \"70\"."}
 	},"required":["left","op","right"],"additionalProperties":false}}

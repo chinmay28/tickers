@@ -14,10 +14,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/chinmay28/tickers/server/internal/expr"
 	"github.com/chinmay28/tickers/server/internal/indicators"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 )
@@ -91,8 +93,12 @@ type Plan struct {
 	Interval quotes.Interval
 	From, To time.Time
 	Specs    []indicators.Spec
-	entry    compiled
-	exit     compiled
+	// Others are the bars of the series in References, at the plan's
+	// interval, supplied with the bars before simulating. A series missing
+	// here reads as undefined, so a condition on it never holds.
+	Others map[string][]quotes.Candle
+	entry  compiled
+	exit   compiled
 }
 
 type compiled struct {
@@ -114,6 +120,9 @@ type operand struct {
 	isNum bool
 	spec  indicators.Spec
 	line  string // the indicator line's canonical name
+	// ref is another series the operand reads — a symbol or a formula,
+	// canonical — rather than the one being traded: "close@^VIX".
+	ref string
 }
 
 // InvalidError is a definition that can't run. Its message is a sentence
@@ -190,9 +199,13 @@ func Compile(d Definition, now time.Time) (p Plan, err error) {
 }
 
 // Warmup is how many bars before the first one traded the plan needs: the
-// slowest indicator's settling time, and one more so a cross on the first
-// bar has a previous bar to look back to.
-func (p Plan) Warmup() int { return warmup(p.Specs) }
+// slowest indicator's settling time, on its own series or another, and one
+// more so a cross on the first bar has a previous bar to look back to.
+func (p Plan) Warmup() int { return max(warmup(p.Specs), refWarmup(p.entry, p.exit)) }
+
+// References are the other series the rules read — "^VIX", "SPY/TLT" —
+// whose bars at the plan's interval the caller supplies in Others.
+func (p Plan) References() []string { return references(p.entry, p.exit) }
 
 func warmup(specs []indicators.Spec) int {
 	warm := 1
@@ -202,12 +215,52 @@ func warmup(specs []indicators.Spec) int {
 	return warm
 }
 
+// refOperands are the operands reading other series, once each.
+func refOperands(rules ...compiled) []operand {
+	var out []operand
+	seen := map[string]bool{}
+	for _, r := range rules {
+		for _, c := range r.conds {
+			for _, o := range []operand{c.left, c.right} {
+				if o.ref != "" && !seen[o.text] {
+					seen[o.text] = true
+					out = append(out, o)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// references are the other series the rules read, sorted.
+func references(rules ...compiled) []string {
+	var out []string
+	for _, o := range refOperands(rules...) {
+		if !slices.Contains(out, o.ref) {
+			out = append(out, o.ref)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// refWarmup is how many bars the other series need before the window.
+func refWarmup(rules ...compiled) int {
+	var specs []indicators.Spec
+	for _, o := range refOperands(rules...) {
+		if o.spec.Kind != "" {
+			specs = append(specs, o.spec)
+		}
+	}
+	return warmup(specs)
+}
+
 // compileSeries reads what a test runs over: a symbol, normalised, and an
 // interval, daily when unset.
 func compileSeries(symbol, interval string) (string, string, quotes.Interval, error) {
-	symbol = strings.ToUpper(strings.TrimSpace(symbol))
-	if symbol == "" {
-		return symbol, interval, "", errors.New("a symbol is required")
+	symbol, err := CanonicalSymbol(symbol)
+	if err != nil {
+		return symbol, interval, "", err
 	}
 	if interval == "" {
 		interval = string(quotes.Daily)
@@ -259,15 +312,16 @@ func compileRule(name string, r Rule) (compiled, error) {
 	return out, nil
 }
 
-// specsOf is every indicator the rules read, once each, in the order they
-// first appear.
+// specsOf is every indicator the rules read on the traded series, once
+// each, in the order they first appear. One read on another series is
+// computed on that series' bars, so it isn't among them.
 func specsOf(rules ...compiled) []indicators.Spec {
 	var specs []indicators.Spec
 	seen := map[string]bool{}
 	for _, r := range rules {
 		for _, c := range r.conds {
 			for _, o := range []operand{c.left, c.right} {
-				if o.spec.Kind != "" && !seen[o.spec.Key()] {
+				if o.ref == "" && o.spec.Kind != "" && !seen[o.spec.Key()] {
 					seen[o.spec.Key()] = true
 					specs = append(specs, o.spec)
 				}
@@ -317,9 +371,47 @@ var lineNames = map[string]struct {
 	indicators.KindGap:        {map[string]string{"gap": "gap"}, "gap"},
 	indicators.KindRange:      {map[string]string{"range": "range"}, "range"},
 	indicators.KindRVol:       {map[string]string{"rvol": "rvol"}, "rvol"},
+	indicators.KindZScore:     {map[string]string{"zscore": "zscore"}, "zscore"},
 }
 
 func parseOperand(raw string) (operand, error) {
+	body, target, hasRef := strings.Cut(strings.TrimSpace(raw), "@")
+	o, err := parseLocal(body)
+	if err != nil || !hasRef {
+		return o, err
+	}
+	if o.isNum {
+		return o, fmt.Errorf("%q: a number is the same on every series; drop the @", raw)
+	}
+	if o.ref, err = CanonicalSymbol(target); err != nil {
+		return o, fmt.Errorf("%q: %w", raw, err)
+	}
+	o.text += "@" + o.ref
+	return o, nil
+}
+
+// CanonicalSymbol is a series a rule reads or a test runs on, spelt one way:
+// a symbol upper-cased, or a formula — "SPY/TLT", "KO / PEP" — in the
+// composite's canonical key, so the same series is always the same name.
+func CanonicalSymbol(raw string) (string, error) {
+	s := strings.ToUpper(strings.TrimSpace(raw))
+	if s == "" {
+		return "", errors.New("a symbol is required")
+	}
+	if expr.Looks(s) {
+		e, err := expr.Parse(s)
+		if err != nil {
+			return "", fmt.Errorf("%q isn't a formula: %w", raw, err)
+		}
+		return e.Key(), nil
+	}
+	if strings.ContainsAny(s, " \t@:") {
+		return "", fmt.Errorf("%q isn't a symbol", raw)
+	}
+	return s, nil
+}
+
+func parseLocal(raw string) (operand, error) {
 	text := strings.ToLower(strings.TrimSpace(raw))
 	o := operand{text: text}
 	if text == "" {
