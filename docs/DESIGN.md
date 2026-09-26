@@ -1657,6 +1657,34 @@ folder as an archive on its own initiative — only when somebody picks the
 folder in Settings — for the same unmounted-drive reason `Open` never creates
 one.
 
+### Surviving an upgrade
+
+The upgrade rollback snapshots the main database and restores it on a failed
+health check. The archive is never snapshotted — tens of gigabytes on a drive
+the upgrade can't afford to copy — so it has to come through a stop, a kill or
+a rollback on its own, with the collector mid-write:
+
+- **Writes are idempotent and crash-ordered.** `Record` commits bars, then the
+  ledger and cursor, then nothing else; a kill between two commits leaves bars
+  no cursor claims, and the retry rewrites them. A split is marked pending
+  before any file is rescaled, and each file records the rescale in the same
+  transaction. Shutdown gives the collector 30 seconds to finish and close
+  (systemd allows 60); running out is untidy, not harmful.
+- **One writer, enforced.** The split protocol and the ledger assume one
+  writer, and SQLite's locking keeps the files intact but not that story. `Open`
+  takes an `flock` on `tickers-archive.lock` before it migrates or resumes
+  anything; a second writer gets `ErrLocked`, which the archiver shows as
+  *another process is writing* and retries every 5 seconds — the old server
+  finishing up during an upgrade. The kernel drops the lock when a process
+  dies, so it can't go stale. `OpenReadOnly` takes no lock and does none of the
+  writer's startup work, for `tickers coverage` beside a live collector.
+- **Migrations are additive** and a test pins every shipped one's SQL, because
+  a rolled-back binary opens an archive the newer one migrated: new columns
+  are nullable or defaulted, new tables are ones old code never names.
+- **Closing never waits on a count.** Stats run under the open archive's
+  context, which is cancelled before the close, so a shutdown doesn't wait out
+  seconds of counting while the next process waits on the lock.
+
 ### Location, availability and moving
 
 The folder is a setting (`archive_path`, **stored > flag > env**), chosen in

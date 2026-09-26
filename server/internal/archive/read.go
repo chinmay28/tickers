@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -357,8 +358,14 @@ type Stats struct {
 // file; it never scans an intraday partition. Callers on a timer should cache
 // it — on a full archive it is a second or two of work.
 func (a *Archive) Stats() (Stats, error) {
+	return a.StatsContext(context.Background())
+}
+
+// StatsContext is Stats, abandoned when ctx is done — so closing the archive,
+// to shut down or to move it, never waits out a count nobody will read.
+func (a *Archive) StatsContext(ctx context.Context) (Stats, error) {
 	st := Stats{Lists: map[List]int{}, Sources: map[string]int64{}}
-	if err := a.catalog.read.QueryRow(`SELECT
+	if err := a.catalog.read.QueryRowContext(ctx, `SELECT
 		  coalesce(sum(`+activeSQL+`), 0),
 		  coalesce(sum(`+activeSQL+` AND `+priorityExpr+`), 0),
 		  coalesce(sum(excluded = 0 AND (listed + extra + watchlist + user) = 0), 0),
@@ -367,7 +374,7 @@ func (a *Archive) Stats() (Stats, error) {
 		return st, err
 	}
 	var listed, extra, watchlist, user int
-	if err := a.catalog.read.QueryRow(`SELECT coalesce(sum(listed), 0), coalesce(sum(extra), 0),
+	if err := a.catalog.read.QueryRowContext(ctx, `SELECT coalesce(sum(listed), 0), coalesce(sum(extra), 0),
 		  coalesce(sum(watchlist), 0), coalesce(sum(user), 0) FROM symbols WHERE excluded = 0`).
 		Scan(&listed, &extra, &watchlist, &user); err != nil {
 		return st, err
@@ -375,12 +382,12 @@ func (a *Archive) Stats() (Stats, error) {
 	st.Lists[Listed], st.Lists[Extra], st.Lists[Watchlist], st.Lists[User] = listed, extra, watchlist, user
 
 	// Per interval, a symbol's coverage is the union of its sources'.
-	rows, err := a.catalog.read.Query(`SELECT interval, count(newest), coalesce(sum(complete), 0), coalesce(sum(failing), 0),
+	rows, err := a.catalog.read.QueryContext(ctx, `SELECT interval, count(newest), coalesce(sum(complete), 0), coalesce(sum(failing), 0),
 		  min(oldest), max(newest), min(newest)
 		FROM (SELECT c.symbol_id, c.interval, min(c.oldest) AS oldest, max(c.newest) AS newest,
 		        max(c.complete) AS complete, max(c.failures > 0) AS failing
 		      FROM cursors c JOIN symbols s ON s.id = c.symbol_id
-		      WHERE ` + activeSQL + `
+		      WHERE `+activeSQL+`
 		      GROUP BY c.symbol_id, c.interval)
 		GROUP BY interval`)
 	if err != nil {
@@ -404,7 +411,7 @@ func (a *Archive) Stats() (Stats, error) {
 		return st, err
 	}
 
-	counts, err := a.catalog.read.Query(`SELECT interval, sum(bars) FROM days GROUP BY interval`)
+	counts, err := a.catalog.read.QueryContext(ctx, `SELECT interval, sum(bars) FROM days GROUP BY interval`)
 	if err != nil {
 		return st, err
 	}
@@ -425,7 +432,7 @@ func (a *Archive) Stats() (Stats, error) {
 	} else if db != nil {
 		s := byInterval[quotes.Daily]
 		s.Interval = quotes.Daily
-		if err := db.read.QueryRow(`SELECT count(*) FROM bars`).Scan(&s.Bars); err != nil {
+		if err := db.read.QueryRowContext(ctx, `SELECT count(*) FROM bars`).Scan(&s.Bars); err != nil {
 			return st, err
 		}
 		byInterval[quotes.Daily] = s
@@ -440,7 +447,7 @@ func (a *Archive) Stats() (Stats, error) {
 	if err != nil {
 		return st, err
 	}
-	srcRows, err := a.catalog.read.Query(`SELECT source_id, count(*) FROM cursors WHERE newest IS NOT NULL GROUP BY source_id`)
+	srcRows, err := a.catalog.read.QueryContext(ctx, `SELECT source_id, count(*) FROM cursors WHERE newest IS NOT NULL GROUP BY source_id`)
 	if err != nil {
 		return st, err
 	}

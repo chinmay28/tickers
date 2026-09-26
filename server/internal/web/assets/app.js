@@ -2856,6 +2856,12 @@ function archiveBanner(v) {
   if (v.state === 'off') {
     return `<div class="banner">No archive yet. Choose its folder in <a href="#/archive">Settings</a> — an external drive is the right place for it: expect around 60 GB a year with one-minute bars for the whole market.</div>`;
   }
+  if (v.state === 'unavailable' && v.locked) {
+    return `<div class="banner" role="status">
+      <strong>Another Tickers process is writing to <code>${esc(v.path)}</code>.</strong>
+      Only one may at a time, so this server is waiting its turn and reading charts from the quote source meanwhile. Right after an upgrade this is the old version finishing its last write and clears in seconds; otherwise, stop the other process (a <code>tickers collect</code>, or a second server pointed at the same folder).
+    </div>`;
+  }
   if (v.state === 'unavailable') {
     return `<div class="banner banner--warn" role="status">
       <strong>The archive at <code>${esc(v.path)}</code> is unavailable.</strong>

@@ -237,3 +237,58 @@ func TestSwitchingTheArchiveOffClosesItAndOnReopensIt(t *testing.T) {
 	m.Nudge()
 	waitFor(t, m, "open again", isState(StateOpen))
 }
+
+// An upgrade starts the new server as the old one lets go. If the old one is
+// still finishing its last write, the new one must wait its turn — reported as
+// such, not as an unplugged drive — and take over the moment the lock is free,
+// without the half minute a missing drive is given.
+func TestAnArchiveAnotherProcessHoldsIsWaitedFor(t *testing.T) {
+	dir := t.TempDir()
+	if err := archive.Init(dir); err != nil {
+		t.Fatal(err)
+	}
+	old, err := archive.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := newManager(t, dir)
+	st := waitFor(t, m, "the lock noticed", func(s Status) bool { return s.State == StateUnavailable })
+	if !st.Locked || !strings.Contains(st.Error, "another tickers process") {
+		t.Errorf("status = %+v, want it reported as locked by another process", st)
+	}
+
+	old.Close()
+	deadline := time.Now().Add(lockedRetry + 3*time.Second)
+	for st = m.Status(false); st.State != StateOpen; st = m.Status(false) {
+		if time.Now().After(deadline) {
+			t.Fatalf("did not take over a released archive within %s of the retry; status %+v", lockedRetry, st)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st.Locked {
+		t.Error("still reported locked after opening")
+	}
+}
+
+// Closing the archive — for shutdown or a move — must not wait out a stats
+// count: the next process is waiting on the lock this one holds.
+func TestClosingAbandonsAStatsCount(t *testing.T) {
+	m, st := newManager(t, "")
+	dir := t.TempDir()
+	if err := m.Use(dir); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, m, "open", isState(StateOpen))
+	m.Status(true) // starts a count
+	off := false
+	if _, err := st.UpdateArchiveConfig(store.ArchivePatch{Enabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	m.Nudge()
+	waitFor(t, m, "closed", isState(StateDisabled))
+	b, err := archive.Open(dir)
+	if err != nil {
+		t.Fatalf("the lock was not released on close: %v", err)
+	}
+	b.Close()
+}
