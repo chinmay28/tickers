@@ -86,3 +86,43 @@ func TestSQLCannotWriteOrEscape(t *testing.T) {
 		t.Errorf("years with no files attached nothing and shouldn't count against the limit: %v", err)
 	}
 }
+
+func TestMostTradedRanksByDollarVolumeIncludingTheRetired(t *testing.T) {
+	a := newTestArchive(t)
+	track(t, a, Listed, "BIG", "SMALL", "GONE")
+	if err := a.Add(User, Entry{Symbol: "FUND", Kind: KindETF}, t0); err != nil {
+		t.Fatal(err)
+	}
+	daily := func(symbol string, price float64, volume int64) {
+		record(t, a, Batch{SymbolID: idOf(t, a, symbol), Interval: quotes.Daily, Source: "yahoo",
+			Series: quotes.CandleSeries{Candles: []quotes.Candle{candle(day(0), price, volume), candle(day(1), price, volume)}}})
+	}
+	daily("BIG", 100, 1000)
+	daily("SMALL", 1, 10)
+	daily("GONE", 50, 1000)
+	daily("FUND", 10, 100)
+	if err := a.Remove(Listed, "GONE"); err != nil { // delisted since
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	got, err := a.MostTraded(ctx, day(0), day(5), KindStock, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tr := range got {
+		names = append(names, tr.Symbol.Symbol)
+	}
+	if strings.Join(names, ",") != "BIG,GONE,SMALL" {
+		t.Errorf("most traded stocks = %v, want BIG, GONE, SMALL — the delisted GONE included", names)
+	}
+	if got[0].DollarVolume != 100000 || got[0].Days != 2 {
+		t.Errorf("BIG = %+v, want $100,000 a day over 2 days", got[0])
+	}
+	if top, _ := a.MostTraded(ctx, day(0), day(5), "", 1); len(top) != 1 || top[0].Symbol.Symbol != "BIG" {
+		t.Errorf("the top one of any kind = %+v, want BIG", top)
+	}
+	if none, _ := a.MostTraded(ctx, day(10), day(20), "", 0); len(none) != 0 {
+		t.Errorf("a window with no bars = %+v, want nothing", none)
+	}
+}

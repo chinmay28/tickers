@@ -49,50 +49,70 @@ type overfitView struct {
 	Note          string  `json:"note,omitempty"`
 }
 
-// judge records results as trials and says of each how far it can be
-// trusted. defs and results are aligned; a nil result is one that didn't
-// run and is neither recorded nor judged. A failure to record costs the
-// judgement, not the result: it comes back as a warning.
-func (t *tools) judge(origin string, defs []strategy.Definition, results []*strategy.Result) ([]*overfitView, string) {
-	var trials []store.Trial
+// trial is one result to record and judge: what was tested, on which
+// series, and the metrics it came back with. A nil entry in a batch is one
+// that didn't run, and is neither recorded nor judged.
+type trial struct {
+	symbol, interval string
+	definition       any
+	metrics          strategy.Metrics
+	trades           int
+}
+
+// backtestTrials are a batch of backtests as trials, aligned with results.
+func backtestTrials(defs []strategy.Definition, results []*strategy.Result) []*trial {
+	out := make([]*trial, len(results))
 	for i, r := range results {
 		if r == nil {
 			continue
 		}
 		def := defs[i]
 		def.Symbol, def.Interval = r.Symbol, r.Interval
-		raw, _ := json.Marshal(def)
-		trials = append(trials, store.Trial{Symbol: r.Symbol, Interval: r.Interval, Origin: origin, Definition: raw,
-			SharpePerBar: r.Strategy.SharpePerBar, Periods: r.Strategy.Periods, TotalReturn: r.Strategy.TotalReturn, Trades: r.Stats.Trades})
+		out[i] = &trial{symbol: r.Symbol, interval: r.Interval, definition: def, metrics: r.Strategy, trades: r.Stats.Trades}
 	}
-	out := make([]*overfitView, len(results))
-	if err := t.store.RecordTrials(trials); err != nil {
+	return out
+}
+
+// judge records trials and says of each how far it can be trusted, given
+// its family. A failure to record costs the judgement, not the result: it
+// comes back as a warning.
+func (t *tools) judge(origin string, trials []*trial) ([]*overfitView, string) {
+	var rows []store.Trial
+	for _, tr := range trials {
+		if tr == nil {
+			continue
+		}
+		raw, _ := json.Marshal(tr.definition)
+		rows = append(rows, store.Trial{Symbol: tr.symbol, Interval: tr.interval, Origin: origin, Definition: raw,
+			SharpePerBar: tr.metrics.SharpePerBar, Periods: tr.metrics.Periods, TotalReturn: tr.metrics.TotalReturn, Trades: tr.trades})
+	}
+	out := make([]*overfitView, len(trials))
+	if err := t.store.RecordTrials(rows); err != nil {
 		return out, "these results could not be added to the research log, so they are not deflated: " + err.Error()
 	}
 	families := map[[2]string]store.TrialFamily{}
-	for i, r := range results {
-		if r == nil {
+	for i, tr := range trials {
+		if tr == nil {
 			continue
 		}
-		key := [2]string{r.Symbol, r.Interval}
+		key := [2]string{store.NormalizeSymbol(tr.symbol), tr.interval}
 		f, ok := families[key]
 		if !ok {
 			var err error
-			if f, err = t.store.Family(r.Symbol, r.Interval); err != nil {
+			if f, err = t.store.Family(tr.symbol, tr.interval); err != nil {
 				return out, "the research log could not be read, so these results are not deflated: " + err.Error()
 			}
 			families[key] = f
 		}
-		out[i] = deflate(*r, f)
+		out[i] = deflate(tr.metrics, tr.interval, f)
 	}
 	return out, ""
 }
 
-func deflate(r strategy.Result, f store.TrialFamily) *overfitView {
-	m := r.Strategy
+func deflate(m strategy.Metrics, interval string, f store.TrialFamily) *overfitView {
 	v := &overfitView{Trials: f.Trials}
 	perYear := 252.0
-	if i, err := quotes.ParseInterval(r.Interval); err == nil {
+	if i, err := quotes.ParseInterval(interval); err == nil {
 		perYear = strategy.BarsPerYear(i)
 	}
 	v.LuckBenchmark = round(strategy.ExpectedMaxSharpe(f.Trials, f.SharpeVariance)*math.Sqrt(perYear), 3)

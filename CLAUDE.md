@@ -103,6 +103,12 @@ line is settled at the first bar shown, then trims it.
 bars. `Engine.RunStrategy` supplies the bars (archive only), the warm-up and the
 dividend adjustment.
 
+**`internal/xsection`** is cross-sectional research, pure too: a `Panel` of
+many symbols' daily bars on one calendar (NaN where one didn't trade),
+factors, `RunStudy` (IC and quantiles) and `Rotate` (rank-and-hold).
+`Engine.Panel` loads it. Operands and filters come from `strategy`, so there
+is one rule language.
+
 **`internal/mcp`** is the Model Context Protocol, hand-written (JSON-RPC,
 the handshake, tools, resources, Streamable HTTP, and the stdio `Bridge`) and
 knowing nothing about markets. **`internal/mcptools`** is its catalogue, and

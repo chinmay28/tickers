@@ -1657,6 +1657,24 @@ markets, and the tools decode, call `engine` and encode.
   already made rather than make another. A family by symbol undercounts a
   search that hopped between symbols; it is the honest count that can be kept
   without guessing which searches were one.
+- **Cross-sections are a panel.** `internal/xsection` is pure like
+  `strategy`: a `Panel` is many symbols' daily bars on the union of their
+  dates, NaN where one didn't trade, and factors are computed over each
+  symbol's own days (a 20-day average is twenty of its sessions, not twenty
+  calendar slots) and mapped back. Operands come from `strategy.Operand`, and
+  `where` filters from `strategy.Signal`, so there is one rule language. Every
+  ranking uses only its day's data, is traded at the next open, and books are
+  equal-weighted with fees on what is traded. A holding that delists is valued
+  at its last close: without delisting returns, the kindest assumption, and
+  said so. `Engine.Panel` picks a universe by dollar volume over the whole
+  window (`Archive.MostTraded`, one grouped scan of the daily file) — mild
+  look-ahead, warned about, which day-by-day filters avoid — and caps it at a
+  thousand symbols, about 100 MB. A factor study's t-statistic divides the
+  count of rankings by the overlap when rankings are closer than the horizon;
+  otherwise daily rankings of monthly returns would claim twenty times the
+  evidence they have. Rotations are recorded in the research log under their
+  universe (`TOP200-STOCK`, `LIST12-…`), since a universe is the data they
+  compete over.
 - **Studies measure what could have been traded.** `strategy.StudyPlan` finds
   the bars a rule held on and measures from the next bar's open — the
   backtester's fill — to the close N bars on. Every horizon carries the same

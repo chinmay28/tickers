@@ -184,7 +184,7 @@ func TestEveryToolIsListedWithAStrictSchema(t *testing.T) {
 	}
 	json.Unmarshal(h.server.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)), &resp)
 	want := []string{"archive_status", "search_symbols", "symbol_info", "get_bars", "get_indicators",
-		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "list_strategies", "save_strategy", "research_log"}
+		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "screen", "factor_study", "rotation_backtest", "list_strategies", "save_strategy", "research_log"}
 	if len(resp.Result.Tools) != len(want) {
 		t.Fatalf("listed %d tools, want %d", len(resp.Result.Tools), len(want))
 	}
@@ -520,5 +520,89 @@ func TestTheResearchLogDeflatesByWhatWasTried(t *testing.T) {
 	}
 	if other := h.mustCall(t, "research_log", map[string]any{"symbol": "GLD"}); len(other["families"].([]any)) != 0 {
 		t.Errorf("GLD's log = %v, want nothing tried on it", other)
+	}
+}
+
+// addFan records six more symbols over the harness's days, each drifting at
+// its own steady rate plus a wobble, so ranking by past return ranks them
+// by future return too.
+func (h *harness) addFan(t *testing.T) []string {
+	t.Helper()
+	var names []string
+	for k := 0; k < 6; k++ {
+		name := fmt.Sprintf("F%d", k)
+		closes := make([]float64, len(h.days))
+		p := 50.0
+		for i := range closes {
+			p *= 1 + float64(k)/2000 + 0.004*math.Sin(float64(i*(k+2)))
+			closes[i] = p
+		}
+		h.record(t, name, h.days, closes, nil)
+		names = append(names, name)
+	}
+	return names
+}
+
+func TestCrossSectionalTools(t *testing.T) {
+	h := newHarness(t, true)
+	fan := h.addFan(t)
+	universe := map[string]any{"symbols": fan}
+
+	sc := h.mustCall(t, "screen", map[string]any{"universe": universe, "factor": "return:60", "top": 3})
+	rows := sc["rows"].([]any)
+	if sc["eligible"].(float64) != 6 || len(rows) != 3 || rows[0].([]any)[1] != "F5" {
+		t.Errorf("screen = %v, want all six eligible and the fastest, F5, first", sc)
+	}
+	if sc["date"] != h.day(399) {
+		t.Errorf("screened on %v, want the latest day %s", sc["date"], h.day(399))
+	}
+	past := h.mustCall(t, "screen", map[string]any{"universe": universe, "factor": "close", "date": h.day(200), "ascending": true,
+		"where": map[string]any{"conditions": []map[string]string{{"left": "close", "op": ">", "right": "60"}}}})
+	if past["date"] != h.day(200) || past["eligible"].(float64) >= 6 {
+		t.Errorf("a screen on day 200 above $60 = %v, want fewer than six on that day", past)
+	}
+	if out, isErr := h.call(t, "screen", map[string]any{"universe": universe, "factor": "momentum"}); !isErr || !strings.Contains(out["error"].(string), "not a factor") {
+		t.Errorf("an unknown factor = %v, want it named", out)
+	}
+
+	st := h.mustCall(t, "factor_study", map[string]any{"universe": universe, "factor": "return:60", "from": h.day(100), "every": 20, "quantiles": 3, "points": 2})
+	ic := st["ic"].(map[string]any)
+	if st["rankings"].(float64) < 10 || ic["mean"].(float64) < 0.5 {
+		t.Errorf("study = %v, want a strong positive IC over at least ten rankings", st)
+	}
+	q := st["quantiles"].([]any)
+	if len(q) != 3 || q[2].([]any)[1].(float64) <= q[0].([]any)[1].(float64) || len(st["recentPoints"].([]any)) != 2 {
+		t.Errorf("quantiles %v, points %v: want the top third ahead and the 2 points asked for", q, st["recentPoints"])
+	}
+	if out, isErr := h.call(t, "factor_study", map[string]any{"universe": universe, "factor": "return:60"}); !isErr || !strings.Contains(out["error"].(string), "from is required") {
+		t.Errorf("a study without a start = %v", out)
+	}
+
+	rot := h.mustCall(t, "rotation_backtest", map[string]any{"universe": universe, "factor": "return:60", "from": h.day(100), "hold": 2,
+		"benchmark": "VTI", "picks": 1, "equityPoints": 5})
+	picks := rot["recentPicks"].([]any)
+	if len(picks) != 1 || fmt.Sprint(picks[0].(map[string]any)["symbols"]) != "[F5 F4]" {
+		t.Errorf("the last picks = %v, want the two fastest — and never the benchmark", picks)
+	}
+	if rot["benchmarkIs"] != "VTI, bought and held" || len(rot["equity"].([]any)) != 5 {
+		t.Errorf("rotation = %v, want VTI as the benchmark and 5 equity points", rot)
+	}
+	if of := rot["overfitting"].(map[string]any); of["trials"].(float64) != 1 {
+		t.Errorf("overfitting = %v, want the rotation recorded as one trial", of)
+	}
+	log := h.mustCall(t, "research_log", map[string]any{"interval": "1d"})
+	found := false
+	for _, f := range log["families"].([]any) {
+		if strings.HasPrefix(f.(map[string]any)["symbol"].(string), "LIST6-") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("families = %v, want the rotation under its universe", log["families"])
+	}
+	// A benchmark inside the universe is still ranked.
+	own := h.mustCall(t, "rotation_backtest", map[string]any{"universe": universe, "factor": "return:60", "from": h.day(100), "hold": 1, "benchmark": "F5", "picks": 1})
+	if fmt.Sprint(own["recentPicks"].([]any)[0].(map[string]any)["symbols"]) != "[F5]" {
+		t.Errorf("with F5 as benchmark and in the universe the rotation held %v, want F5 still", own["recentPicks"])
 	}
 }

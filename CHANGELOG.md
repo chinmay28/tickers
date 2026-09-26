@@ -29,6 +29,13 @@ carries a deflated Sharpe ratio: the probability its edge is real after
 allowing for everything tried on the same symbol and interval. Backtest metrics
 gain the per-bar Sharpe, skew and kurtosis it is computed from.
 
+Research across many symbols: `screen` ranks a universe by a factor on a day,
+`factor_study` measures whether a factor's ranking predicted the returns that
+followed, and `rotation_backtest` holds the top-ranked on a schedule. Factors
+include momentum, volatility, liquidity, drawdown and distance from any
+indicator; universes are lists or the most-traded stocks or ETFs, delisted
+ones included.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,

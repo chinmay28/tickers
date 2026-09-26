@@ -223,7 +223,7 @@ func (t *tools) backtest(_ context.Context, in backtestArgs) (any, error) {
 		trades = min(max(*in.Trades, 0), maxTradesShown)
 	}
 	v := viewBacktest(res)
-	judged, warning := t.judge("run_backtest", []strategy.Definition{in.Strategy}, []*strategy.Result{&res})
+	judged, warning := t.judge("run_backtest", backtestTrials([]strategy.Definition{in.Strategy}, []*strategy.Result{&res}))
 	if v.Overfitting = judged[0]; warning != "" {
 		v.Warnings = append(v.Warnings, warning)
 	}
@@ -367,7 +367,7 @@ func (t *tools) sweep(_ context.Context, in sweepArgs) (any, error) {
 	}
 	// Every variant that ran is a trial, ranked or not: the ones that lost
 	// were tried all the same, and are what the winner is deflated by.
-	judged, judgeWarning := t.judge("sweep_strategy", defs, results)
+	judged, judgeWarning := t.judge("sweep_strategy", backtestTrials(defs, results))
 	if judgeWarning != "" {
 		warnings = append(warnings, judgeWarning)
 	}
