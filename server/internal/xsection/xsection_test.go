@@ -123,6 +123,10 @@ func TestAStudyOfAFactorThatPredictsPerfectly(t *testing.T) {
 	if inv.IC.Mean > 0.99 {
 		t.Errorf("drawdown on steadily rising series has IC %v; every symbol is at its high, so it ranks nothing", inv.IC.Mean)
 	}
+	few, _ := RunStudy(fan(3, 60), StudySpec{Factor: mustFactor(t, "return:5"), From: 10, Every: 5, Horizon: 5, Quantiles: 2})
+	if few.Rankings != 0 || len(few.Quantiles) != 0 {
+		t.Errorf("three symbols in two quantiles = %+v, want no rankings and no quantiles reported as zeros", few)
+	}
 	if _, err := RunStudy(p, StudySpec{Factor: mustFactor(t, "return:5"), Every: 5, Horizon: 5, Quantiles: 1}); !strategy.IsInvalid(err) {
 		t.Errorf("one quantile gave %v, want refused", err)
 	}
