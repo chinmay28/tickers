@@ -36,6 +36,11 @@ include momentum, volatility, liquidity, drawdown and distance from any
 indicator; universes are lists or the most-traded stocks or ETFs, delisted
 ones included.
 
+Patterns: `seasonality` groups returns by weekday, month, day of the month,
+turn of the month or time of day; `compare_symbols` lines symbols' risk and
+return up with betas and correlations. Rules, charts and factors gain
+`change:N`, `gap`, `range` and `rvol:N`.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,

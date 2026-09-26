@@ -181,3 +181,23 @@ func TestComputeAndTrimKeepTheLinesAlignedWithTheBars(t *testing.T) {
 		t.Errorf("MACD warm-up = %d", specs[1].Warmup())
 	}
 }
+
+func TestChangeGapRangeAndRelativeVolume(t *testing.T) {
+	ch := Change([]float64{100, 110, 121}, 2)
+	near(t, "change:2", ch[2], 21)
+	if !math.IsNaN(ch[1]) {
+		t.Error("change:2 defined before it had two bars behind it")
+	}
+	g := Gap([]float64{10, 11, 9}, []float64{10, 10, 10})
+	near(t, "gap up", g[1], 10)
+	near(t, "gap down", g[2], -10)
+	near(t, "range", Range([]float64{11}, []float64{9}, []float64{10})[0], 20)
+	// The yardstick is the bars before, so a spike is measured against the
+	// quiet that preceded it: 400 against an average of 100 is 4.
+	rv := RelativeVolume([]float64{100, 100, 400, 100}, 2)
+	if !math.IsNaN(rv[1]) {
+		t.Error("rvol:2 defined without two bars before it")
+	}
+	near(t, "the spike", rv[2], 4)
+	near(t, "after the spike", rv[3], 100/250.0)
+}

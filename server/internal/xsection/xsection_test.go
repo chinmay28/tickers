@@ -258,3 +258,32 @@ func TestScreenRanksTheEligibleOnADay(t *testing.T) {
 		t.Error("a day before the factor is defined ranked something")
 	}
 }
+
+func TestCompareMeasuresAndCorrelates(t *testing.T) {
+	// B moves exactly twice A's daily move; C moves against A.
+	var a, b, c []quotes.Candle
+	pa, pb, pc := 100.0, 100.0, 100.0
+	for i := 0; i < 60; i++ {
+		move := 0.01 * math.Sin(float64(i))
+		pa, pb, pc = pa*(1+move), pb*(1+2*move), pc*(1-move)
+		d := t0.AddDate(0, 0, i)
+		a = append(a, quotes.Candle{Time: d, Open: pa, High: pa, Low: pa, Close: pa})
+		b = append(b, quotes.Candle{Time: d, Open: pb, High: pb, Low: pb, Close: pb})
+		c = append(c, quotes.Candle{Time: d, Open: pc, High: pc, Low: pc, Close: pc})
+	}
+	p := NewPanel(map[string][]quotes.Candle{"A": a, "B": b, "C": c, "SHORT": a[:10]})
+	cmp := Compare(p, 0, []string{"A", "B", "C", "SHORT", "MISSING"})
+	if len(cmp.Stats) != 4 || cmp.Stats[0].Symbol != "A" {
+		t.Fatalf("stats = %+v, want A, B, C and SHORT in the order asked", cmp.Stats)
+	}
+	near(t, "B's beta to A", cmp.Stats[1].Beta, 2)
+	near(t, "B's correlation to A", cmp.Stats[1].Correlation, 1)
+	near(t, "C against A", cmp.Correlation[2][0], -1)
+	if !math.IsNaN(cmp.Stats[0].Beta) || !math.IsNaN(cmp.Stats[3].Correlation) {
+		t.Error("A has a beta to itself, or SHORT a correlation from nine returns")
+	}
+	near(t, "B's volatility over A's", cmp.Stats[1].Volatility/cmp.Stats[0].Volatility, 2)
+	if cmp.Stats[0].Days != 60 || cmp.Stats[0].Metrics.TotalReturn == 0 {
+		t.Errorf("A = %+v, want 60 days measured", cmp.Stats[0])
+	}
+}

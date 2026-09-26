@@ -49,7 +49,7 @@ const strategySchema = `{"type":"object","properties":{
 const ruleSchema = `{"type":"object","properties":{
 	"match":{"type":"string","enum":["all","any"],"description":"all (default): every condition must hold; any: one is enough."},
 	"conditions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{
-		"left":{"type":"string","description":"An operand: open, high, low, close (or price), volume, a number, or an indicator spec with an optional line, e.g. sma:50, rsi:14, bb:20:2.lower, macd:12:26:9.signal, stoch:14:3.k."},
+		"left":{"type":"string","description":"An operand: open, high, low, close (or price), volume, a number, or an indicator spec with an optional line, e.g. sma:50, rsi:14, bb:20:2.lower, macd:12:26:9.signal, stoch:14:3.k; also change:N (% over N bars), gap (% open vs previous close), range (% high-low), rvol:N (volume vs its N-bar average)."},
 		"op":{"type":"string","enum":[">","<",">=","<=","crosses_above","crosses_below"]},
 		"right":{"type":"string","description":"An operand, as for left. Numbers are written as strings: \"70\"."}
 	},"required":["left","op","right"],"additionalProperties":false}}

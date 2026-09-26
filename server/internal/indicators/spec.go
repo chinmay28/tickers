@@ -21,6 +21,10 @@ const (
 	KindStochastic = "stoch"
 	KindATR        = "atr"
 	KindOBV        = "obv"
+	KindChange     = "change"
+	KindGap        = "gap"
+	KindRange      = "range"
+	KindRVol       = "rvol"
 )
 
 // Panes an indicator draws in.
@@ -100,6 +104,26 @@ var kinds = map[string]kind{
 		compute: func(_ []float64, b bars) []Line {
 			return []Line{line("OBV", OBV(b.close, b.volume))}
 		}},
+	KindChange: {label: "Change %", pane: PaneLower, defaults: []float64{1}, integer: []bool{true},
+		warmup: func(p []float64) int { return int(p[0]) },
+		compute: func(p []float64, b bars) []Line {
+			return []Line{line("change", Change(b.close, int(p[0])))}
+		}},
+	KindGap: {label: "Gap %", pane: PaneLower,
+		warmup: func([]float64) int { return 1 },
+		compute: func(_ []float64, b bars) []Line {
+			return []Line{histogram("gap", Gap(b.open, b.close))}
+		}},
+	KindRange: {label: "Range %", pane: PaneLower,
+		warmup: func([]float64) int { return 0 },
+		compute: func(_ []float64, b bars) []Line {
+			return []Line{line("range", Range(b.high, b.low, b.close))}
+		}},
+	KindRVol: {label: "Relative volume", pane: PaneLower, defaults: []float64{20}, integer: []bool{true},
+		warmup: func(p []float64) int { return int(p[0]) },
+		compute: func(p []float64, b bars) []Line {
+			return []Line{line("rvol", RelativeVolume(b.volume, int(p[0])))}
+		}},
 }
 
 // Bounds on what a request can ask for.
@@ -150,7 +174,7 @@ func Parse(raw string) (Spec, error) {
 	parts := strings.Split(strings.ToLower(strings.TrimSpace(raw)), ":")
 	k, ok := kinds[parts[0]]
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown indicator %q (want one of sma, ema, bb, vwap, rsi, macd, stoch, atr, obv)", parts[0])
+		return Spec{}, fmt.Errorf("unknown indicator %q (want one of sma, ema, bb, vwap, rsi, macd, stoch, atr, obv, change, gap, range, rvol)", parts[0])
 	}
 	if len(parts)-1 > len(k.defaults) {
 		return Spec{}, fmt.Errorf("%s takes at most %d parameters", k.label, len(k.defaults))
@@ -234,18 +258,19 @@ type Result struct {
 
 // bars is a candle series split into the columns the formulas take.
 type bars struct {
-	high, low, close, volume, vwap []float64
-	day                            []int64
+	open, high, low, close, volume, vwap []float64
+	day                                  []int64
 }
 
 func columns(candles []quotes.Candle) bars {
 	b := bars{
+		open: make([]float64, len(candles)),
 		high: make([]float64, len(candles)), low: make([]float64, len(candles)),
 		close: make([]float64, len(candles)), volume: make([]float64, len(candles)),
 		vwap: make([]float64, len(candles)), day: make([]int64, len(candles)),
 	}
 	for i, c := range candles {
-		b.high[i], b.low[i], b.close[i] = c.High, c.Low, c.Close
+		b.open[i], b.high[i], b.low[i], b.close[i] = c.Open, c.High, c.Low, c.Close
 		b.volume[i], b.vwap[i] = float64(c.Volume), c.VWAP
 		b.day[i] = c.Time.Unix() / 86400
 	}

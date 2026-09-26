@@ -184,7 +184,7 @@ func TestEveryToolIsListedWithAStrictSchema(t *testing.T) {
 	}
 	json.Unmarshal(h.server.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)), &resp)
 	want := []string{"archive_status", "search_symbols", "symbol_info", "get_bars", "get_indicators",
-		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "screen", "factor_study", "rotation_backtest", "list_strategies", "save_strategy", "research_log"}
+		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "screen", "factor_study", "rotation_backtest", "seasonality", "compare_symbols", "list_strategies", "save_strategy", "research_log"}
 	if len(resp.Result.Tools) != len(want) {
 		t.Fatalf("listed %d tools, want %d", len(resp.Result.Tools), len(want))
 	}
@@ -604,5 +604,46 @@ func TestCrossSectionalTools(t *testing.T) {
 	own := h.mustCall(t, "rotation_backtest", map[string]any{"universe": universe, "factor": "return:60", "from": h.day(100), "hold": 1, "benchmark": "F5", "picks": 1})
 	if fmt.Sprint(own["recentPicks"].([]any)[0].(map[string]any)["symbols"]) != "[F5]" {
 		t.Errorf("with F5 as benchmark and in the universe the rotation held %v, want F5 still", own["recentPicks"])
+	}
+}
+
+func TestPatternTools(t *testing.T) {
+	h := newHarness(t, true)
+	fan := h.addFan(t)
+
+	wk := h.mustCall(t, "seasonality", map[string]any{"symbols": []string{"VTI", "GLD", "NOPE"}, "groupBy": "weekday", "from": h.day(10)})
+	groups := wk["groups"].([]any)
+	// The harness's bars run every calendar day, weekends too.
+	if len(groups) != 7 || groups[0].([]any)[0] != "Monday" {
+		t.Errorf("weekday groups = %v, want seven, Monday first", groups)
+	}
+	if all := wk["all"].([]any); all[1].(float64) != 390+299 {
+		t.Errorf("all = %v, want every return from day 10 on: VTI's 390 and GLD's 299", all)
+	}
+	if errs := wk["errors"].([]any); len(errs) != 1 {
+		t.Errorf("errors = %v, want NOPE", errs)
+	}
+	if out, isErr := h.call(t, "seasonality", map[string]any{"symbols": []string{"VTI"}, "groupBy": "timeOfDay", "interval": "1d", "from": h.day(10)}); !isErr || !strings.Contains(out["error"].(string), "intraday") {
+		t.Errorf("timeOfDay on daily bars = %v, want refused", out)
+	}
+
+	cmp := h.mustCall(t, "compare_symbols", map[string]any{"symbols": append([]string{"F0"}, fan[1:]...), "from": h.day(100)})
+	rows := cmp["rows"].([]any)
+	if len(rows) != 6 || rows[0].([]any)[0] != "F0" || rows[0].([]any)[11] != nil {
+		t.Errorf("rows = %v, want the six in order and no beta for the reference", rows)
+	}
+	corr := cmp["correlation"].([]any)
+	if len(corr) != 6 || corr[0].([]any)[0].(float64) != 1 {
+		t.Errorf("correlation = %v, want a 6×6 matrix with ones on the diagonal", corr)
+	}
+	if out, isErr := h.call(t, "compare_symbols", map[string]any{"symbols": []string{"VTI", "vti"}, "from": h.day(10)}); !isErr {
+		t.Errorf("comparing a symbol with itself = %v, want refused", out)
+	}
+
+	// The new operands in a study: a gap up of more than a point.
+	sig := h.mustCall(t, "find_signals", map[string]any{"symbols": fan, "from": h.day(50), "horizons": []int{1},
+		"signal": map[string]any{"conditions": []map[string]string{{"left": "gap", "op": ">", "right": "0.3"}, {"left": "rvol:10", "op": ">=", "right": "0"}}}})
+	if len(sig["symbols"].([]any)) != 6 {
+		t.Errorf("a gap signal = %v, want every fan symbol studied", sig)
 	}
 }

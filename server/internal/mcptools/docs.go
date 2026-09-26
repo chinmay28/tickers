@@ -71,8 +71,12 @@ A cross holds on the one bar it happens. A level comparison holds on every bar i
 | stoch:K:D | stochastic oscillator, 0–100 | k, d |
 | atr:N | average true range (Wilder) | atr |
 | obv | on-balance volume | obv |
+| change:N | percent change of the close over N bars | change |
+| gap | the open against the previous bar's close, in percent (the overnight gap on daily bars) | gap |
+| range | the bar's high-to-low range over its close, in percent | range |
+| rvol:N | volume over the average of the N bars before it (3 is three times the usual) | rvol |
 
-Parameters default when left off: sma and ema 20, bb 20:2, rsi 14, macd 12:26:9, stoch 14:3, atr 14. Periods are whole bars, 1–1000. A strategy can use at most 12 distinct indicators.
+Parameters default when left off: sma and ema 20, bb 20:2, rsi 14, macd 12:26:9, stoch 14:3, atr 14, change 1, rvol 20. Periods are whole bars, 1–1000. A strategy can use at most 12 distinct indicators.
 
 Every indicator is computed from bars before the test window as well, so it is settled on the first bar tested. An indicator not yet defined (not enough history) makes any condition reading it false.
 
@@ -83,6 +87,8 @@ Examples:
 - Band touch: close < bb:20:2.lower
 - Momentum turn: macd:12:26:9.histogram crosses_above "0"
 - Quiet market: atr:14 < "2"
+- Gap and go: gap > "2" and rvol:20 > "3"
+- A big down day: change:1 < "-3"
 
 ## How a backtest trades
 
