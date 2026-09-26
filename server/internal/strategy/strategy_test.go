@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -215,5 +216,40 @@ func TestOverlaysAreThePriceIndicatorsTheRulesUse(t *testing.T) {
 	}
 	if r.Lines[0].Label != "Bollinger 5, 2 lower" || len(r.Lines[0].Values) != len(r.Prices) {
 		t.Errorf("first line = %s with %d values against %d prices", r.Lines[0].Label, len(r.Lines[0].Values), len(r.Prices))
+	}
+}
+
+func TestAnOperandOnItsOwn(t *testing.T) {
+	bars := ohlc(flat(1), flat(2), flat(3), flat(4))
+	op, err := ParseOperand("sma:2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := op.Series(bars)
+	if !math.IsNaN(got[0]) || got[1] != 1.5 || got[3] != 3.5 {
+		t.Errorf("sma:2 = %v, want undefined then the running mean", got)
+	}
+	if op.Warmup() != 2 {
+		t.Errorf("warm-up = %d, want 2", op.Warmup())
+	}
+	if c, _ := ParseOperand("close"); c.Series(bars)[2] != 3 || c.Warmup() != 0 {
+		t.Error("close isn't the close")
+	}
+	if _, err := ParseOperand("70"); !IsInvalid(err) {
+		t.Errorf("a number as a factor gave %v, want refused", err)
+	}
+}
+
+func TestASignalHoldsWhereItsRuleDoes(t *testing.T) {
+	sig, err := CompileSignal(rule(Condition{"close", "crosses_above", "10"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sig.Holds(ohlc(flat(9), flat(11), flat(12), flat(9), flat(11)))
+	if fmt.Sprint(got) != "[false true false false true]" {
+		t.Errorf("holds = %v, want the two crossings", got)
+	}
+	if _, err := CompileSignal(Rule{}); !IsInvalid(err) {
+		t.Errorf("an empty filter gave %v, want refused", err)
 	}
 }

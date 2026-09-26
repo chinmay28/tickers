@@ -11,6 +11,7 @@ A productive order of work:
 3. research_log to see what has already been tried, so a search builds on it rather than repeating it.
 4. find_signals to learn whether a condition carries information — the return after it versus the baseline from every bar — before trading on it. Pool across several symbols for more occurrences.
 5. run_backtest to trade a rule; sweep_strategy to tune its parameters, with holdoutFrom so the ranking is checked on data it wasn't chosen on.
+   Across many symbols: screen ranks a universe on a day; factor_study asks whether ranking by a factor predicted the next period's returns (information coefficient, quantile spread); rotation_backtest holds the top-ranked, rebalanced on a schedule.
 6. save_strategy to hand a finding to the person, who sees it on the app's Strategies page.
 
 Facts that matter:

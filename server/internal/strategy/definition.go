@@ -127,6 +127,13 @@ func (e *InvalidError) Error() string {
 	return e.msg
 }
 
+// Invalid is an InvalidError for a package that validates in the rule
+// language's terms — a cross-sectional factor, say — so its callers map one
+// kind of refusal, not two.
+func Invalid(format string, args ...any) error {
+	return &InvalidError{msg: fmt.Sprintf(format, args...)}
+}
+
 // IsInvalid reports whether err is a definition's fault rather than the
 // server's.
 func IsInvalid(err error) bool {

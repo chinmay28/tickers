@@ -735,6 +735,9 @@ The tools:
 | `sweep_strategy` | every combination of a parameter grid, ranked — with a hold-out period so the winner is tested on data it wasn't picked on |
 | `find_signals` | every time a condition held, on up to 25 symbols, and the return after it compared with the return from any day |
 | `backtest_portfolio` | the Portfolios page's allocation backtest |
+| `screen` | rank a universe — a list, or the most-traded stocks or ETFs — by a factor on a day |
+| `factor_study` | whether ranking by a factor predicted what followed: its information coefficient and the return of each quantile |
+| `rotation_backtest` | hold the top-ranked few, rebalanced every N days, against a benchmark or the whole universe |
 | `list_strategies`, `save_strategy` | the saved strategies; saving puts one on the Strategies page |
 | `research_log` | every strategy agents have tested, by symbol and interval |
 
@@ -757,6 +760,15 @@ tickers research --archive ~/tickers-archive                  # MCP at http://12
 
 It keeps its own small database (`./data/research.sqlite`) for what agents save
 and try, and can't queue symbols the archive lacks.
+
+**Factors** rank symbols by anything a rule can read (`rsi:14`), or by
+`return:N[:S]` (12-1 momentum is `return:252:21`), `volatility:N`,
+`dollarvolume:N`, `drawdown:N` and `distance:X` (how far the close is above
+`X`, as in `distance:sma:200`). Filters — a minimum price, a minimum dollar
+volume, a rule like `close > sma:200` — are judged on each day's own data.
+Delisted symbols stay in a universe for as long as the archive holds their
+bars, though a symbol that delisted before the archive began was never
+collected.
 
 Everything but `save_strategy` only reads (asking about a symbol the archive
 doesn't collect queues it, as the Strategies page does). Answers are shaped for
