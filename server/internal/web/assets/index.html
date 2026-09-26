@@ -126,7 +126,7 @@
         <form id="add-form" autocomplete="off">
           <div class="field">
             <label class="field__label" for="add-symbol">Symbol or formula</label>
-            <input class="input input--mono" id="add-symbol" name="symbol"
+            <input class="input input--mono input--symbol" id="add-symbol" name="symbol"
                    placeholder="AAPL, BTC-USD, VTI/GLD" required />
             <span class="field__hint">
               A formula makes a <strong>composite</strong> — a row priced from
@@ -246,7 +246,7 @@
             </div>
             <div class="field">
               <label class="field__label" for="portfolio-benchmark">Benchmark <span style="text-transform:none">(optional)</span></label>
-              <input class="input input--mono" id="portfolio-benchmark" name="benchmark" placeholder="VFINX" />
+              <input class="input input--mono input--symbol" id="portfolio-benchmark" name="benchmark" placeholder="VFINX" />
               <span class="field__hint">
                 One symbol, run at 100% over the same months. Both sides are cut
                 to the period they share, so the two curves can be read against

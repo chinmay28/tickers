@@ -7,6 +7,14 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Logo URLs that say `{ticker}`
+
+**The logo URL accepts the placeholder however it was written.** `{ticker}`,
+`{SYMBOL}` and a pasted `%7Bsymbol%7D` are saved as `{symbol}` instead of being
+refused as having no placeholder. URLs, paths and keys are no longer shown in
+capitals — only fields that hold symbols are — which is what made a lower-case
+placeholder look like it had to be typed upper case.
+
 ### Upgrades that leave a collecting archive intact
 
 **Upgrading while the archive is collecting is now safe by construction, not

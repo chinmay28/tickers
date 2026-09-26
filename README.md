@@ -431,7 +431,9 @@ The sections, in the order the page shows them:
   daily refresh.
 
   **Logo URL** is where the pictures come from, with `{symbol}` standing in for
-  the ticker (`{symbol_lower}` for the lower-case form). Left blank it uses
+  the ticker (`{symbol_lower}` for the lower-case form). `{ticker}`, any
+  capitalisation, and braces a browser percent-encoded (`%7Bsymbol%7D`) are
+  all understood and saved as `{symbol}`. Left blank it uses
   whatever the quote source itself offers, which for Yahoo is a logo on *some*
   search results and nothing at all for most symbols — so if you want logos on
   everything, point this at a source that answers by ticker. Changing it clears

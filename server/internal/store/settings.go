@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -323,7 +324,7 @@ func (s *Store) UpdateConfig(patch ConfigPatch) (Config, error) {
 		cfg.PinnedSymbols = pinned
 	}
 	if patch.LogoURLTemplate != nil {
-		v := strings.TrimSpace(*patch.LogoURLTemplate)
+		v := canonicalLogoURLTemplate(strings.TrimSpace(*patch.LogoURLTemplate))
 		if err := validateLogoURLTemplate(v); err != nil {
 			return cfg, err
 		}
@@ -398,6 +399,33 @@ const (
 	logoKeyToken         = "{key}"
 )
 
+// logoPlaceholder matches the spellings of a placeholder people actually type
+// or paste: any case, `{ticker}` for `{symbol}` since that is what several logo
+// services call it in their own docs, and braces percent-encoded because a
+// template copied out of a browser's address bar arrives as `%7Bsymbol%7D`.
+var logoPlaceholder = regexp.MustCompile(`(?i)(?:\{|%7B)(symbol|ticker|key)(_lower)?(?:\}|%7D)`)
+
+// canonicalLogoURLTemplate rewrites every recognised placeholder to the one
+// spelling `quotes` expands, so the variants are resolved once, on the way in,
+// and nothing downstream — nor an older binary rolled back onto this database
+// — has to know they exist. `{key_lower}` means nothing and is left as typed.
+func canonicalLogoURLTemplate(raw string) string {
+	return logoPlaceholder.ReplaceAllStringFunc(raw, func(m string) string {
+		sub := logoPlaceholder.FindStringSubmatch(m)
+		name, lower := strings.ToLower(sub[1]), sub[2] != ""
+		switch {
+		case name == "key" && lower:
+			return m
+		case name == "key":
+			return logoKeyToken
+		case lower:
+			return logoSymbolLowerToken
+		default:
+			return logoSymbolToken
+		}
+	})
+}
+
 // validateLogoURLTemplate accepts an empty value (meaning "let the provider
 // decide") or an http/https URL carrying a symbol placeholder.
 //
@@ -416,7 +444,8 @@ func validateLogoURLTemplate(raw string) error {
 		return errors.New("the logo URL cannot contain line breaks")
 	}
 	if !strings.Contains(raw, logoSymbolToken) && !strings.Contains(raw, logoSymbolLowerToken) {
-		return fmt.Errorf("the logo URL has to contain %s (or %s), or every symbol gets the same picture",
+		return fmt.Errorf("the logo URL has to contain %s (or %s) where the ticker goes — "+
+			"a URL with a real ticker in it gives every symbol the same picture",
 			logoSymbolToken, logoSymbolLowerToken)
 	}
 	// Checked as it will actually be used. A template is only a URL once the

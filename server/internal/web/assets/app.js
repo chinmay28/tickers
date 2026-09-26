@@ -903,8 +903,8 @@ function renderQuote(t) {
                         // which of the two this row is; the server re-derives
                         // the symbol from the formula either way.
                         composite
-                          ? `<input class="input input--mono" name="expression" value="${esc(t.expression)}" required />`
-                          : `<input class="input input--mono" name="symbol" value="${esc(t.symbol)}" required />`
+                          ? `<input class="input input--mono input--symbol" name="expression" value="${esc(t.expression)}" required />`
+                          : `<input class="input input--mono input--symbol" name="symbol" value="${esc(t.symbol)}" required />`
                       }
                     </div>`
               }
@@ -3048,7 +3048,7 @@ function archiveSymbols() {
 
         <h3 class="card__subtitle">Add a symbol</h3>
         <form class="archive-search" id="archive-add" autocomplete="off">
-          <input class="input input--mono" name="symbol" placeholder="GC=F, ^TNX, BRK-A" required aria-label="Symbol to add" />
+          <input class="input input--mono input--symbol" name="symbol" placeholder="GC=F, ^TNX, BRK-A" required aria-label="Symbol to add" />
           <button class="btn btn--primary" type="submit">Add</button>
         </form>
         <p class="field__hint">Anything Yahoo prices, spelled the way Yahoo spells it — futures, foreign listings, indices. A symbol added here goes first in line and is never retired by the exchange lists changing. Everything on the watchlist, every composite's legs and every portfolio's holdings are added for you.</p>
@@ -3119,7 +3119,7 @@ function archiveSettings(v) {
           </div>
           <div class="field">
             <label class="field__label" for="archive-extras">Extras</label>
-            <input class="input input--mono" id="archive-extras" name="extras" value="${esc((s.extras ?? []).join(', '))}" />
+            <input class="input input--mono input--symbol" id="archive-extras" name="extras" value="${esc((s.extras ?? []).join(', '))}" />
             <span class="field__hint">Collected alongside the lists: crypto, indices, anything no US exchange lists.</span>
           </div>
           <div class="field">
@@ -3686,7 +3686,7 @@ function strategyEditor(d) {
           </div>
           <div class="field">
             <label class="field__label" for="strategy-symbol">Symbol</label>
-            <input class="input input--mono" id="strategy-symbol" name="symbol" value="${esc(def.symbol)}" autocapitalize="characters" spellcheck="false" />
+            <input class="input input--mono input--symbol" id="strategy-symbol" name="symbol" value="${esc(def.symbol)}" autocapitalize="characters" spellcheck="false" />
           </div>
           <div class="field">
             <label class="field__label" for="strategy-interval">Bars</label>
@@ -4112,7 +4112,8 @@ function renderSettings(data) {
             <span class="field__hint">
               Where a logo comes from, with <code>{symbol}</code> standing in for
               the ticker (<code>{symbol_lower}</code> for the lower-case form,
-              <code>{key}</code> for the key below). Leave it blank to use
+              <code>{key}</code> for the key below; <code>{ticker}</code> works
+              too). Leave it blank to use
               whatever the quote source itself offers — which for Yahoo is a
               logo on some search results and nothing at all for most symbols.
               Changing this clears the cache, so the next few refreshes ask the
@@ -4152,7 +4153,7 @@ function renderSettings(data) {
         <div class="form-grid">
           <div class="field">
             <label class="field__label" for="pinnedSymbols">Pinned symbols</label>
-            <input class="input input--mono" id="pinnedSymbols" name="pinnedSymbols"
+            <input class="input input--mono input--symbol" id="pinnedSymbols" name="pinnedSymbols"
                    value="${esc((s.pinnedSymbols ?? []).join(', '))}"
                    placeholder="VTI, BTC-USD" />
             <span class="field__hint">
@@ -4841,7 +4842,7 @@ function paintAllocation(holdings) {
     .map(
       (h, i) => `
       <div class="allocation-row" data-row="${i}">
-        <input class="input input--mono allocation-row__symbol" name="symbol"
+        <input class="input input--mono input--symbol allocation-row__symbol" name="symbol"
                value="${esc(h.symbol ?? '')}" placeholder="VTSMX" aria-label="Symbol" />
         <div class="allocation-row__weight">
           <input class="input" name="weight" type="number" min="0" max="100" step="any"
@@ -4850,7 +4851,7 @@ function paintAllocation(holdings) {
         </div>
         <button class="btn btn--ghost allocation-row__drop" type="button" data-drop-row="${i}"
                 aria-label="Remove this holding">×</button>
-        <input class="input input--mono allocation-row__stand" name="replacement"
+        <input class="input input--mono input--symbol allocation-row__stand" name="replacement"
                value="${esc(h.replacement ?? '')}" placeholder="replacement (optional)"
                aria-label="Replacement for historical data" />
       </div>`,

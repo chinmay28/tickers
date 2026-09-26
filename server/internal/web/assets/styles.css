@@ -384,6 +384,11 @@ svg {
 .input--mono {
   font-family: var(--mono);
   letter-spacing: 0.04em;
+}
+/* Capitals only where the field holds symbols, because a symbol is upper case.
+   Anything else in the mono face — a URL, a path, a key — is case-sensitive,
+   and showing it shouted makes people type it back the way it looks. */
+.input--symbol {
   text-transform: uppercase;
 }
 
@@ -1852,11 +1857,6 @@ thead .sectors__col {
 .select--inline {
   width: auto;
   padding-block: 0.2rem;
-}
-/* Specs are lower case on the server; the mono field's capitals would make
-   "sma:50" read as a ticker. */
-.condition .input {
-  text-transform: none;
 }
 .condition {
   display: grid;

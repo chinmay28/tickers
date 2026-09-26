@@ -164,6 +164,41 @@ func TestLogoURLTemplateIsChecked(t *testing.T) {
 	}
 }
 
+func TestLogoURLPlaceholdersAreCanonicalised(t *testing.T) {
+	st := newTestStore(t)
+
+	cases := map[string]string{
+		"upper case":        "https://logos.test/{SYMBOL}.png",
+		"mixed case":        "https://logos.test/{Symbol}.png",
+		"ticker":            "https://logos.test/{ticker}.png",
+		"ticker upper":      "https://logos.test/{TICKER}.png",
+		"ticker lower form": "https://logos.test/{ticker_lower}.png?t={KEY}",
+		"pasted, encoded":   "https://logos.test/%7Bsymbol%7D.png",
+		"encoded, lower":    "https://logos.test/%7bSymbol_Lower%7d.png?t=%7Bkey%7D",
+	}
+	want := map[string]string{
+		"upper case":        "https://logos.test/{symbol}.png",
+		"mixed case":        "https://logos.test/{symbol}.png",
+		"ticker":            "https://logos.test/{symbol}.png",
+		"ticker upper":      "https://logos.test/{symbol}.png",
+		"ticker lower form": "https://logos.test/{symbol_lower}.png?t={key}",
+		"pasted, encoded":   "https://logos.test/{symbol}.png",
+		"encoded, lower":    "https://logos.test/{symbol_lower}.png?t={key}",
+	}
+	for name, template := range cases {
+		v := template
+		cfg, err := st.UpdateConfig(ConfigPatch{LogoURLTemplate: &v})
+		if err != nil {
+			t.Errorf("%s (%q) was rejected, but it names the ticker: %v", name, template, err)
+			continue
+		}
+		if cfg.LogoURLTemplate != want[name] {
+			t.Errorf("%s: stored as %q, want %q — quotes only expands the canonical spelling",
+				name, cfg.LogoURLTemplate, want[name])
+		}
+	}
+}
+
 func TestChangingTheLogoURLEmptiesTheCache(t *testing.T) {
 	st := newTestStore(t)
 
