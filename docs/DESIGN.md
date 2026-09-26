@@ -1700,6 +1700,16 @@ markets, and the tools decode, call `engine` and encode.
   a ratio's intrabar range isn't knowable from the legs'. Factors refuse `@`
   (a ranking compares each symbol's own data), and cross-sectional `where`
   rules take symbols but not formulas, because a panel holds symbols.
+- **A forward test is a date and the rules.** `watch_strategy` (and the
+  editor's *Watch forward*) freezes a definition with its window replaced by
+  tomorrow-onwards and stores it (migration 013). `Engine.Forward` reruns
+  every watch through `RunStrategies` whenever asked — nothing about its
+  trades is kept, because the archive has the bars and the result is a pure
+  function of them — and `Result.Next` says what the rules asked of the last
+  bar, which is the live signal. The Strategies page reads it at most once a
+  minute rather than on every ten-second poll, since each read reruns them
+  all. Orders are deliberately absent: a signal found by a search, however
+  well tested, should go through a person.
 - **Studies measure what could have been traded.** `strategy.StudyPlan` finds
   the bars a rule held on and measures from the next bar's open — the
   backtester's fill — to the close N bars on. Every horizon carries the same

@@ -752,6 +752,17 @@ The tools:
 | `compare_symbols` | several symbols' returns, risk and drawdowns side by side, with betas and a correlation matrix |
 | `list_strategies`, `save_strategy` | the saved strategies; saving puts one on the Strategies page |
 | `research_log` | every strategy agents have tested, by symbol and interval |
+| `save_report`, `list_reports` | a written finding for you, read on the Strategies page |
+| `watch_strategy`, `forward_tests` | freeze a strategy and judge it on bars that arrive afterwards |
+
+**What agents hand back** appears on the Strategies page under *From your
+agents*: their reports, and the strategies they are *watching*. A watched
+strategy's rules are frozen on the day, and it is judged only on bars that
+arrive after — a forward test, the one test no search can have fitted — with
+its return against holding, whether it holds a position, and what its rules
+say to do at the next open. **Watch forward** in the editor does the same for
+a strategy of your own. Nothing places orders: a signal is for you to act on
+or not.
 
 **Keeping agents honest.** An agent can test a thousand variants in an
 afternoon, and the best of a thousand looks good whether or not anything works.

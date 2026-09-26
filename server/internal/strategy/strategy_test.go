@@ -307,3 +307,16 @@ func TestAStaleReferenceIsUndefined(t *testing.T) {
 		t.Errorf("holds = %v, want REF's day-0 close carried a week and no further", got)
 	}
 }
+
+func TestNextSaysWhatTheLastBarAsksFor(t *testing.T) {
+	p := plan(t, Definition{Entry: rule(Condition{"close", ">", "10"}), Exit: rule(Condition{"close", "<", "10"})})
+	if r := Simulate(p, ohlc(flat(9), flat(9), flat(11)), 0); r.Next != NextEnter || len(r.Trades) != 0 {
+		t.Errorf("flat with the entry rule holding on the last close: next %q, trades %d; want enter and none yet", r.Next, len(r.Trades))
+	}
+	if r := Simulate(p, ohlc(flat(11), flat(11), flat(9)), 0); r.Next != NextExit {
+		t.Errorf("holding with the exit rule holding on the last close: next %q, want exit", r.Next)
+	}
+	if r := Simulate(p, ohlc(flat(11), flat(11), flat(12)), 0); r.Next != "" {
+		t.Errorf("holding with nothing to do: next %q, want none", r.Next)
+	}
+}

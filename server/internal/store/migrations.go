@@ -294,4 +294,29 @@ CREATE TABLE research_trials (
 CREATE INDEX research_trials_family ON research_trials (symbol, interval);
 `,
 	},
+	{
+		// What agents hand back. A report is a finding written up; a watch
+		// is a strategy frozen on a date so it can be judged on the bars
+		// that came after — a forward test, recomputed from the archive
+		// whenever it is asked for, so nothing but the rules and the date
+		// need keeping. New tables; an older binary never reads them.
+		ID: "013_research_reports_and_watches",
+		SQL: `
+CREATE TABLE research_reports (
+  id         TEXT PRIMARY KEY,
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  author     TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE watches (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  definition TEXT NOT NULL,
+  since      TEXT NOT NULL,
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+`,
+	},
 }

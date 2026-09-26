@@ -102,7 +102,17 @@ type Result struct {
 	// Warnings are things the reader should know before trusting the
 	// numbers: a window the data didn't cover, a strategy that never traded.
 	Warnings []string `json:"warnings"`
+	// Next is what the rules say on the last bar, for the next open:
+	// NextEnter, NextExit, or empty to do nothing — holding or waiting.
+	// It is the strategy as a live signal.
+	Next string `json:"next,omitempty"`
 }
+
+// What a strategy says to do at the next open.
+const (
+	NextEnter = "enter"
+	NextExit  = "exit"
+)
 
 // OverlayLine is a price-pane indicator a rule uses, thinned like Prices and
 // aligned with it, for drawing on the price chart.
@@ -220,6 +230,14 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 		case inPos && f.holds(p.exit, i):
 			wantOut = true
 		}
+	}
+	// The loop stops before judging the last bar, since there is no next
+	// open to fill at — which is exactly what a live signal is about.
+	switch {
+	case !inPos && f.holds(p.entry, n-1):
+		res.Next = NextEnter
+	case inPos && f.holds(p.exit, n-1):
+		res.Next = NextExit
 	}
 	if inPos {
 		last := bars[n-1]

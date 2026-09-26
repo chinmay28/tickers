@@ -3634,6 +3634,10 @@ state.strategy = {
   /** The last run: the definition it ran, and what came back or why not. */
   result: null,
   running: false,
+  /** What agents handed back: reports, and watched strategies with their
+   *  forward tests. Null until first loaded. */
+  research: null,
+  researchAt: 0,
 };
 
 async function loadStrategies() {
@@ -3642,6 +3646,20 @@ async function loadStrategies() {
     state.strategy.error = '';
   } catch (err) {
     state.strategy.error = err.message;
+  }
+  await loadResearch();
+}
+
+/** Every watched strategy's forward test is rerun on the server for this, so
+ *  the ten-second poll reads it at most once a minute; an action forces it. */
+async function loadResearch(force = false) {
+  const s = state.strategy;
+  if (!force && s.research && Date.now() - s.researchAt < 60_000) return;
+  try {
+    s.research = await api('/research');
+    s.researchAt = Date.now();
+  } catch {
+    // The rest of the page works without it; the card just doesn't draw.
   }
 }
 
@@ -3665,7 +3683,52 @@ function renderStrategies() {
       <button class="btn btn--sm btn--ghost" type="button" data-action="strategy-new">+ New</button>
     </div>
     ${strategyEditor(d)}
-    ${strategyResult()}`;
+    ${strategyResult()}
+    ${researchCard()}`;
+}
+
+const NEXT_ACTIONS = { enter: 'Buy at the next open', exit: 'Sell at the next open' };
+
+/** What agents handed back. Forward tests first: they are the only numbers
+ *  here that no search could have fitted, because the bars didn't exist yet. */
+function researchCard() {
+  const r = state.strategy.research;
+  if (!r || (!r.watches?.length && !r.reports?.length)) return '';
+  const watches = r.watches.map((w) => {
+    const res = w.result;
+    let status;
+    if (w.waiting) status = `<span class="field__hint">Waiting for its first bar</span>`;
+    else if (w.error) status = `<span class="field__hint">${esc(w.error)}</span>`;
+    else status = `<span class="perf-change perf-change--${direction(res.strategy.totalReturn)}">${esc(percent(res.strategy.totalReturn))}</span>
+      <span class="field__hint">vs ${esc(percent(res.hold.totalReturn))} holding · ${count(res.stats.trades)} trades</span>`;
+    const open = res?.trades?.length && res.trades[res.trades.length - 1].reason === 'open';
+    const next = res?.next ? `<strong>${esc(NEXT_ACTIONS[res.next] ?? res.next)}</strong>` : (res ? (open ? 'Holding' : 'Out') : '');
+    return `<tr>
+      <td>${esc(w.name)}<br><span class="field__hint">${esc(w.definition?.symbol ?? '')}${w.note ? ` · ${esc(w.note)}` : ''}</span></td>
+      <td>${esc(w.since)}</td>
+      <td>${status}</td>
+      <td>${next}</td>
+      <td class="num"><button class="btn btn--sm btn--ghost" type="button" data-action="strategy-unwatch" data-id="${esc(w.id)}">Stop</button></td>
+    </tr>`;
+  }).join('');
+  const reports = r.reports.map((rep) => `
+    <details class="report">
+      <summary>${esc(rep.title)} <span class="field__hint">${esc(rep.author ? `${rep.author} · ` : '')}${esc(ago(rep.createdAt))}</span></summary>
+      <div class="report__body">${esc(rep.body)}</div>
+      <button class="btn btn--sm btn--ghost btn--danger" type="button" data-action="strategy-report-delete" data-id="${esc(rep.id)}">Delete report</button>
+    </details>`).join('');
+  return `
+    <section class="card">
+      <div class="card__head"><h2 class="card__title">From your agents</h2></div>
+      <div class="card__body">
+        ${r.watches.length ? `
+          <p class="field__hint">Watched strategies are judged only on bars that arrived after they were frozen — the one test a search can’t have fitted.</p>
+          <div class="table-scroll"><table class="table">
+            <thead><tr><th>Strategy</th><th>Since</th><th>Since then</th><th>Now</th><th></th></tr></thead>
+            <tbody>${watches}</tbody></table></div>` : ''}
+        ${reports}
+      </div>
+    </section>`;
 }
 
 function strategyEditor(d) {
@@ -3736,6 +3799,7 @@ function strategyEditor(d) {
       <div class="form-actions strategy__actions">
         <button class="btn btn--primary" type="submit" ${state.strategy.running ? 'disabled' : ''}>${state.strategy.running ? 'Running…' : 'Run backtest'}</button>
         <button class="btn btn--outline" type="button" data-action="strategy-save">${d.id ? 'Save' : 'Save strategy'}</button>
+        <button class="btn btn--ghost" type="button" data-action="strategy-watch" title="Freeze these rules and judge them on the bars that arrive from tomorrow">Watch forward</button>
         ${d.id ? `<button class="btn btn--ghost" type="button" data-action="strategy-copy">Save as new</button>
           <button class="btn btn--ghost btn--danger" type="button" data-action="strategy-delete">Delete</button>` : ''}
       </div>
@@ -4025,6 +4089,26 @@ $('#view').addEventListener('click', (event) => {
       }, { success: copy ? 'Saved as a new strategy' : 'Strategy saved' });
       break;
     }
+    case 'strategy-watch':
+      act(async () => {
+        await post('/watches', { name: d.name || d.def.symbol, definition: d.def });
+        await loadResearch(true);
+      }, { success: 'Watching from tomorrow' });
+      break;
+    case 'strategy-unwatch':
+      if (!confirm('Stop watching this strategy? Its forward test goes with it.')) return;
+      act(async () => {
+        await del(`/watches/${encodeURIComponent(button.dataset.id)}`);
+        await loadResearch(true);
+      }, { success: 'Stopped watching' });
+      break;
+    case 'strategy-report-delete':
+      if (!confirm('Delete this report?')) return;
+      act(async () => {
+        await del(`/reports/${encodeURIComponent(button.dataset.id)}`);
+        await loadResearch(true);
+      }, { success: 'Report deleted' });
+      break;
     case 'strategy-delete':
       if (!confirm(`Delete “${d.name}”?`)) return;
       act(async () => {
