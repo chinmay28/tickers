@@ -2,9 +2,11 @@ package xsection
 
 import (
 	"math"
+	"slices"
 	"sort"
 	"time"
 
+	"github.com/chinmay28/tickers/server/internal/quotes"
 	"github.com/chinmay28/tickers/server/internal/strategy"
 )
 
@@ -21,9 +23,9 @@ type Filter struct {
 	// Where, when set, keeps only symbols its rule holds for that day:
 	// "close > sma:200", ranked only among stocks in an uptrend.
 	Where *strategy.Signal
-	// Exclude is a symbol never ranked: a benchmark loaded to be compared
-	// with, not held.
-	Exclude string
+	// Exclude are symbols never ranked: a benchmark loaded to be compared
+	// with, or a series a Where rule reads, not held.
+	Exclude []string
 }
 
 // Warmup is how many days before the first ranking the filter needs.
@@ -46,17 +48,25 @@ func (p *Panel) eligible(f Filter) func(s, i int) bool {
 	}
 	var where [][]bool
 	if f.Where != nil {
+		// A rule reading another series — a regime filter on SPY — reads
+		// it from the panel, where the caller loaded it.
+		others := map[string][]quotes.Candle{}
+		for _, ref := range f.Where.References() {
+			if s := sort.SearchStrings(p.Symbols, ref); s < len(p.Symbols) && p.Symbols[s] == ref {
+				others[ref], _ = p.bars(s)
+			}
+		}
 		where = make([][]bool, len(p.Symbols))
 		for s := range p.Symbols {
 			where[s] = make([]bool, len(p.Dates))
 			bars, at := p.bars(s)
-			for k, ok := range f.Where.Holds(bars) {
+			for k, ok := range f.Where.Holds(bars, others) {
 				where[s][at[k]] = ok
 			}
 		}
 	}
 	return func(s, i int) bool {
-		if f.Exclude != "" && p.Symbols[s] == f.Exclude {
+		if slices.Contains(f.Exclude, p.Symbols[s]) {
 			return false
 		}
 		c := p.Close[s][i]

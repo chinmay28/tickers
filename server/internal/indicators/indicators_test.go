@@ -201,3 +201,16 @@ func TestChangeGapRangeAndRelativeVolume(t *testing.T) {
 	near(t, "the spike", rv[2], 4)
 	near(t, "after the spike", rv[3], 100/250.0)
 }
+
+func TestZScoreIsDistanceInBollingerDeviations(t *testing.T) {
+	close := []float64{1, 3, 1, 3, 5}
+	z := ZScore(close, 4)
+	// The last four: 3, 1, 3, 5 — mean 3, population deviation √2.
+	near(t, "z-score", z[4], 2/math.Sqrt(2))
+	if !math.IsNaN(z[2]) {
+		t.Error("zscore:4 defined before four bars")
+	}
+	if flat := ZScore([]float64{2, 2, 2}, 2); !math.IsNaN(flat[2]) {
+		t.Error("a flat series has a z-score; it has no deviation to measure in")
+	}
+}

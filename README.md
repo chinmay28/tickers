@@ -654,7 +654,13 @@ volume under them, and indicators you switch on with a tap:
 - **By name, in rules and the URL below:** `change:N` (percent change over N
   bars), `gap` (the open against the previous close), `range` (the bar's
   high-to-low range) and `rvol:N` (volume against its N-bar average), so a
-  rule can say *gap up 2% on three times the usual volume*.
+  rule can say *gap up 2% on three times the usual volume*; and `zscore:N`,
+  how many deviations the close is from its average.
+- **Of another series:** end any of them with `@` and a symbol or a formula
+  — `close@^VIX`, `sma:200@SPY`, `zscore:20@KO/PEP` — to trade one thing on
+  another's signal, or only in a regime: *buy QQQ on an RSI dip, but only
+  while the VIX is under 20.* A strategy's symbol can be a formula too
+  (`SPY/TLT`); its backtest says that a ratio isn't something you can buy.
 - **Custom periods:** *Add* takes any parameters, such as `SMA 100`, `MACD 8,
   21, 5` or `Bollinger 20, 2.5`. Your choice is remembered in this browser.
 

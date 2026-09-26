@@ -647,3 +647,57 @@ func TestPatternTools(t *testing.T) {
 		t.Errorf("a gap signal = %v, want every fan symbol studied", sig)
 	}
 }
+
+func TestRelativeValueAndRegimes(t *testing.T) {
+	h := newHarness(t, true)
+	fan := h.addFan(t)
+
+	// A ratio charted like any symbol.
+	ind := h.mustCall(t, "get_indicators", map[string]any{"symbol": "f5 / f0", "indicators": []string{"zscore:20"}, "from": h.day(300)})
+	if ind["symbol"] != "F5/F0" || ind["count"].(float64) == 0 || fmt.Sprint(ind["columns"]) != "[time close zscore:20]" {
+		t.Errorf("indicators on a ratio = %v, want F5/F0's z-score", ind)
+	}
+	bars := h.mustCall(t, "get_bars", map[string]any{"symbol": "F5/F0", "from": h.day(390), "to": h.day(391)})
+	if bars["count"].(float64) != 2 {
+		t.Errorf("a ratio's bars = %v, want the two days asked for", bars)
+	}
+
+	// A regime filter: rank the fan only while VTI is above its 50-day
+	// average. VTI is read, never held.
+	regime := map[string]any{"conditions": []map[string]string{{"left": "close@VTI", "op": ">", "right": "sma:50@VTI"}}}
+	rot := h.mustCall(t, "rotation_backtest", map[string]any{"universe": map[string]any{"symbols": fan}, "factor": "return:20",
+		"from": h.day(100), "hold": 2, "where": regime, "picks": 100})
+	empty, held := 0, 0
+	for _, pk := range rot["recentPicks"].([]any) {
+		syms := pk.(map[string]any)["symbols"].([]any)
+		if len(syms) == 0 {
+			empty++
+		}
+		for _, s := range syms {
+			if s == "VTI" {
+				t.Fatalf("the regime's own symbol was held: %v", pk)
+			}
+			held++
+		}
+	}
+	if empty == 0 || held == 0 {
+		t.Errorf("%d rebalances in cash and %d holdings: want VTI's swings to turn the book on and off", empty, held)
+	}
+	bad := map[string]any{"conditions": []map[string]string{{"left": "close@F1/F0", "op": ">", "right": "1"}}}
+	if out, isErr := h.call(t, "screen", map[string]any{"universe": map[string]any{"symbols": fan}, "factor": "close", "where": bad}); !isErr || !strings.Contains(out["error"].(string), "formula") {
+		t.Errorf("a formula in a where rule = %v, want it refused", out)
+	}
+
+	// A pairs study on the ratio's z-score, and a backtest reading another
+	// symbol.
+	sig := h.mustCall(t, "find_signals", map[string]any{"symbols": []string{"F5/F0"}, "from": h.day(100),
+		"signal": map[string]any{"conditions": []map[string]string{{"left": "zscore:20", "op": "<", "right": "-1"}}}})
+	if sig["symbols"].([]any)[0].(map[string]any)["symbol"] != "F5/F0" {
+		t.Errorf("a ratio study = %v", sig)
+	}
+	bt := h.mustCall(t, "run_backtest", map[string]any{"strategy": map[string]any{"symbol": "F5", "from": h.day(100),
+		"entry": regime, "exit": map[string]any{"conditions": []map[string]string{{"left": "close@VTI", "op": "<", "right": "sma:50@VTI"}}}}})
+	if bt["stats"].(map[string]any)["trades"].(float64) < 2 {
+		t.Errorf("a backtest timed by VTI's trend = %v, want it in and out", bt["stats"])
+	}
+}

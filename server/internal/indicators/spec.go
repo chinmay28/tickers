@@ -25,6 +25,7 @@ const (
 	KindGap        = "gap"
 	KindRange      = "range"
 	KindRVol       = "rvol"
+	KindZScore     = "zscore"
 )
 
 // Panes an indicator draws in.
@@ -119,6 +120,11 @@ var kinds = map[string]kind{
 		compute: func(_ []float64, b bars) []Line {
 			return []Line{line("range", Range(b.high, b.low, b.close))}
 		}},
+	KindZScore: {label: "Z-score", pane: PaneLower, defaults: []float64{20}, integer: []bool{true},
+		warmup: func(p []float64) int { return int(p[0]) },
+		compute: func(p []float64, b bars) []Line {
+			return []Line{line("zscore", ZScore(b.close, int(p[0])))}
+		}},
 	KindRVol: {label: "Relative volume", pane: PaneLower, defaults: []float64{20}, integer: []bool{true},
 		warmup: func(p []float64) int { return int(p[0]) },
 		compute: func(p []float64, b bars) []Line {
@@ -174,7 +180,7 @@ func Parse(raw string) (Spec, error) {
 	parts := strings.Split(strings.ToLower(strings.TrimSpace(raw)), ":")
 	k, ok := kinds[parts[0]]
 	if !ok {
-		return Spec{}, fmt.Errorf("unknown indicator %q (want one of sma, ema, bb, vwap, rsi, macd, stoch, atr, obv, change, gap, range, rvol)", parts[0])
+		return Spec{}, fmt.Errorf("unknown indicator %q (want one of sma, ema, bb, vwap, rsi, macd, stoch, atr, obv, change, gap, range, rvol, zscore)", parts[0])
 	}
 	if len(parts)-1 > len(k.defaults) {
 		return Spec{}, fmt.Errorf("%s takes at most %d parameters", k.label, len(k.defaults))

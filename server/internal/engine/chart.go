@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/chinmay28/tickers/server/internal/archive"
+	"github.com/chinmay28/tickers/server/internal/expr"
 	"github.com/chinmay28/tickers/server/internal/indicators"
 	"github.com/chinmay28/tickers/server/internal/quotes"
 )
@@ -42,7 +43,7 @@ func (e *Engine) Chart(q archive.Query, specs []indicators.Spec) (Chart, error) 
 	var bars []quotes.Candle
 	err := r.Read(func(a *archive.Archive) error {
 		var err error
-		bars, err = a.Best(lead)
+		bars, err = best(a, lead, false)
 		return err
 	})
 	if err != nil {
@@ -93,7 +94,12 @@ func (e *Engine) Bars(symbol string, interval quotes.Interval, from, to time.Tim
 	var bars []quotes.Candle
 	err := r.Read(func(a *archive.Archive) error {
 		var err error
-		if bars, err = a.Best(archive.Query{Symbol: symbol, Interval: interval, From: from, To: to}); err != nil || !dividends || interval.Intraday() {
+		q := archive.Query{Symbol: symbol, Interval: interval, From: from, To: to}
+		if expr.Looks(symbol) || !dividends || interval.Intraday() {
+			bars, err = best(a, q, dividends && !interval.Intraday())
+			return err
+		}
+		if bars, err = a.Best(q); err != nil {
 			return err
 		}
 		divs, err := a.Dividends(symbol, from, to)
@@ -103,4 +109,37 @@ func (e *Engine) Bars(symbol string, interval quotes.Interval, from, to time.Tim
 		return err
 	})
 	return bars, err
+}
+
+// best is Archive.Best that also reads a formula — "SPY/TLT" — by combining
+// its legs, each adjusted for its own dividends when asked. It never adds a
+// symbol to the archive: a chart is looking, not asking for collection.
+func best(a *archive.Archive, q archive.Query, dividends bool) ([]quotes.Candle, error) {
+	if !expr.Looks(q.Symbol) {
+		return a.Best(q)
+	}
+	f, err := expr.Parse(q.Symbol)
+	if err != nil {
+		return nil, err
+	}
+	legs := map[string][]quotes.Candle{}
+	for _, sym := range f.Symbols() {
+		lq := q
+		lq.Symbol = sym
+		bars, err := a.Best(lq)
+		if err != nil {
+			return nil, err
+		}
+		if dividends {
+			divs, err := a.Dividends(sym, q.From, q.To)
+			if err != nil {
+				return nil, err
+			}
+			if len(divs) > 0 {
+				bars = adjustCandles(bars, divs)
+			}
+		}
+		legs[sym] = bars
+	}
+	return combine(f, legs), nil
 }

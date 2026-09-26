@@ -41,6 +41,11 @@ turn of the month or time of day; `compare_symbols` lines symbols' risk and
 return up with betas and correlations. Rules, charts and factors gain
 `change:N`, `gap`, `range` and `rvol:N`.
 
+Relative value and regimes: any operand can read another series with `@` —
+`close@^VIX < 20`, `sma:200@SPY`, `zscore:20@KO/PEP` — in strategies, studies
+and cross-sectional filters, and a strategy or study can run on a formula such
+as `SPY/TLT`. A `zscore:N` indicator joins the rest.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,

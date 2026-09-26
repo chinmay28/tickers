@@ -10,9 +10,11 @@ import (
 
 	"github.com/chinmay28/tickers/server/internal/archive"
 	"github.com/chinmay28/tickers/server/internal/archiver"
+	"github.com/chinmay28/tickers/server/internal/expr"
 	"github.com/chinmay28/tickers/server/internal/indicators"
 	"github.com/chinmay28/tickers/server/internal/mcp"
 	"github.com/chinmay28/tickers/server/internal/quotes"
+	"github.com/chinmay28/tickers/server/internal/strategy"
 )
 
 // Bounds on the archive tools' output.
@@ -305,9 +307,9 @@ type seriesView struct {
 }
 
 func (t *tools) query(symbol, rawInterval, from, to string, extended bool) (archive.Query, error) {
-	symbol = archive.NormalizeSymbol(symbol)
-	if symbol == "" {
-		return archive.Query{}, fmt.Errorf("a symbol is required")
+	symbol, err := strategy.CanonicalSymbol(symbol)
+	if err != nil {
+		return archive.Query{}, err
 	}
 	interval, err := parseInterval(rawInterval)
 	if err != nil {
@@ -333,13 +335,22 @@ func (t *tools) bars(_ context.Context, in barsArgs) (any, error) {
 	}
 	var bars []quotes.Candle
 	var dividends []quotes.Dividend
-	err = t.read(func(a *archive.Archive) (err error) {
-		if bars, err = a.Best(q); err != nil {
-			return err
+	if expr.Looks(q.Symbol) {
+		// A formula has no dividends or sessions of its own; its legs'
+		// regular sessions, combined, are the series.
+		if t.archive == nil {
+			return nil, errNoArchive
 		}
-		dividends, err = a.Dividends(q.Symbol, q.From, q.To)
-		return err
-	})
+		bars, err = t.engine.Bars(q.Symbol, q.Interval, q.From, q.To, false)
+	} else {
+		err = t.read(func(a *archive.Archive) (err error) {
+			if bars, err = a.Best(q); err != nil {
+				return err
+			}
+			dividends, err = a.Dividends(q.Symbol, q.From, q.To)
+			return err
+		})
+	}
 	if err != nil {
 		return nil, err
 	}

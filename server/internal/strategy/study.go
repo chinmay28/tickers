@@ -52,7 +52,9 @@ type StudyPlan struct {
 	From, To time.Time
 	Specs    []indicators.Spec
 	Horizons []int
-	signal   compiled
+	// Others are the bars of the series in References; see Plan.Others.
+	Others map[string][]quotes.Candle
+	signal compiled
 }
 
 // CompileStudy validates a study. Every refusal is an InvalidError.
@@ -97,7 +99,10 @@ func CompileStudy(d StudyDefinition, now time.Time) (p StudyPlan, err error) {
 
 // Warmup is how many bars before the window the signal needs; see
 // Plan.Warmup.
-func (p StudyPlan) Warmup() int { return warmup(p.Specs) }
+func (p StudyPlan) Warmup() int { return max(warmup(p.Specs), refWarmup(p.signal)) }
+
+// References are the other series the signal reads; see Plan.References.
+func (p StudyPlan) References() []string { return references(p.signal) }
 
 // Occurrence is one bar the signal fired on, and what followed.
 type Occurrence struct {
@@ -169,6 +174,7 @@ func (p StudyPlan) Run(bars []quotes.Candle, start int) Study {
 	st.From, st.To, st.Bars = bars[start].Time, bars[n-1].Time, n-start
 
 	f := newFrame(p.Specs, bars)
+	f.attach(refOperands(p.signal), p.Others, p.Interval)
 	fired := make([]bool, n)
 	for i := range bars {
 		fired[i] = f.holds(p.signal, i)
