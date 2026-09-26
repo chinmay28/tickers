@@ -60,7 +60,12 @@ to the previous binary if the new one fails its health check.
 2. **Migrations are append-only and additive.** Never edit or reorder a shipped
    migration in `internal/store/migrations.go`; never drop or rename a column an
    older binary reads. A rolled-back binary sees the newer schema and only keeps
-   working if the new schema is a superset.
+   working if the new schema is a superset. The same goes for
+   `internal/archive/migrations.go`, with more at stake: the rollback restores a
+   snapshot of the main database but never of the archive, so a rolled-back
+   binary always opens whatever the newer one left. New archive columns must be
+   nullable or defaulted. `TestShippedArchiveMigrationsAreNeverEdited` pins the
+   shipped ones; pin a new one there once it ships.
 3. **One static binary, no runtime dependencies.** `CGO_ENABLED=0` with a pure-Go
    SQLite driver is what makes cross-compiling to a Pi work.
 4. **No front-end build step.** The client is hand-written HTML/CSS/ES modules
@@ -175,6 +180,11 @@ survives its drive being unplugged. The collector's pure parts (`next`,
   reader in the app relies on the default. `Stored`/`Best` also merge a
   renamed symbol's former rows (`aliases`) — go through them, not `candles`,
   for anything user-facing.
+- **One process writes an archive, enforced by an `flock`** on
+  `tickers-archive.lock` that `archive.Open` takes before migrating or resuming
+  a split. Anything that only reads from outside the server (`tickers coverage`)
+  uses `archive.OpenReadOnly`, which takes no lock and does no startup writes.
+  An upgrade relies on this: the new server waits out the old one's last write.
 - **A second source only fills gaps.** The `days` ledger says which days are
   held; a bar is overwritten only by its own source or on an explicit replace.
 - **The archive never creates its folder** and refuses one without

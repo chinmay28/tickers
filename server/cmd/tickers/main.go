@@ -257,15 +257,25 @@ func serve(args []string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err := server.Shutdown(shutdownCtx)
-		// Let the collector finish the write it is in before the deferred
-		// Close pulls the archive out from under it.
+		// Let the collector finish the write it is in and close the archive,
+		// which checkpoints its WALs and releases the writer lock the next
+		// process (the upgraded binary) is waiting on. Its own budget, not
+		// what the HTTP drain left over, and well inside systemd's stop
+		// timeout. Running out of it is not corruption — every write is one
+		// SQLite transaction and a re-fetch rewrites the same bars — only a
+		// less tidy handover.
 		select {
 		case <-archived:
-		case <-shutdownCtx.Done():
+		case <-time.After(archiveCloseBudget):
+			log.Warn("the archive did not close in time; it will recover on the next start",
+				"waited", archiveCloseBudget)
 		}
 		return err
 	}
 }
+
+// archiveCloseBudget is how long shutdown waits for the archive to close.
+const archiveCloseBudget = 30 * time.Second
 
 // publishOnce is the original script, preserved as a subcommand: fetch every
 // enabled symbol, publish the snapshot, exit. Useful from cron on a host that
@@ -314,8 +324,9 @@ func publishOnce(args []string) error {
 
 // collect runs the archive on its own, until interrupted: the collector with
 // no web server and no watchlist refresh. It reads the same database as
-// serve, so the Data page's settings apply — which is also why the two must
-// not run at once against one archive.
+// serve, so the Data page's settings apply. Only one of the two can write an
+// archive at a time; the writer lock makes the second wait rather than
+// collect into it beside the first.
 func collect(args []string) error {
 	var cfg config
 	var acfg archiveConfig
@@ -345,8 +356,9 @@ func collect(args []string) error {
 	return nil
 }
 
-// coverage prints how far the archive has got. It only reads, so it is safe to
-// run against an archive a live collector is writing.
+// coverage prints how far the archive has got. It opens the archive
+// read-only — no lock, no migrations, no resumed splits — so it is safe to run
+// against an archive a live collector is writing.
 func coverage(args []string) error {
 	var cfg config
 	var acfg archiveConfig
@@ -368,7 +380,7 @@ func coverage(args []string) error {
 	if path == "" {
 		return errors.New("no archive: pass --archive, or choose a folder on the Data page")
 	}
-	a, err := archive.Open(path)
+	a, err := archive.OpenReadOnly(path)
 	if err != nil {
 		return err
 	}

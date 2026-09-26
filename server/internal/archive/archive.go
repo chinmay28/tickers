@@ -42,6 +42,17 @@ import (
 // MarkerFile names the file that makes a folder an archive.
 const MarkerFile = "tickers-archive.json"
 
+// LockFile is the writer lock. One process writes an archive at a time: the
+// split protocol and the day ledger are only consistent under one writer, and
+// SQLite's own locking keeps the files intact but not the story they tell. An
+// upgrade whose old process has not quite exited, `tickers collect` started
+// beside the server, a second server pointed at the same drive — each of those
+// opens the archive and is refused, instead of collecting into it at once.
+const LockFile = "tickers-archive.lock"
+
+// ErrLocked means another process has the archive open for writing.
+var ErrLocked = errors.New("another tickers process is collecting into this archive")
+
 // ErrUnavailable means there is no archive at the path: the folder is missing,
 // or it has no marker. It is what an unplugged drive looks like — the mount
 // point is still there, empty — and it is why Open never creates anything.
@@ -95,6 +106,9 @@ func IsArchive(root string) bool {
 type Archive struct {
 	root    string
 	catalog *file
+	// unlock releases the writer lock; nil for a read-only handle.
+	unlock   func() error
+	readOnly bool
 
 	mu         sync.Mutex
 	partitions map[string]*file
@@ -118,6 +132,9 @@ type file struct {
 // Close closes the readers first: the last connection to close checkpoints
 // the WAL into the main file, and that should be the writer.
 func (f *file) Close() error {
+	if f.write == f.read {
+		return f.read.Close()
+	}
 	rerr := f.read.Close()
 	if err := f.write.Close(); err != nil {
 		return err
@@ -125,26 +142,54 @@ func (f *file) Close() error {
 	return rerr
 }
 
-// Open opens the archive at root, applying any pending migrations and
-// finishing any split rescale a crash interrupted.
+// Open opens the archive at root for writing: it takes the writer lock,
+// applies any pending migrations and finishes any split rescale a crash
+// interrupted. It fails with ErrLocked while another process has it open.
 func Open(root string) (*Archive, error) {
 	root = filepath.Clean(root)
 	if !IsArchive(root) {
 		return nil, fmt.Errorf("%w: %s is not an archive folder (is the drive mounted?)", ErrUnavailable, root)
 	}
+	// The lock comes before anything is written — a migration or a resumed
+	// split is exactly the kind of write two processes must not both do.
+	unlock, err := lockFolder(root)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Join(root, "bars"), 0o750); err != nil {
+		unlock()
 		return nil, fmt.Errorf("archive: %w", err)
 	}
 	db, err := openDB(filepath.Join(root, "catalog.sqlite"), catalogMigrations)
 	if err != nil {
+		unlock()
 		return nil, err
 	}
-	a := &Archive{root: root, catalog: db, partitions: map[string]*file{}, sources: map[string]int64{}}
+	a := &Archive{root: root, catalog: db, unlock: unlock, partitions: map[string]*file{}, sources: map[string]int64{}}
 	if err := a.resumeSplits(); err != nil {
 		a.Close()
 		return nil, err
 	}
 	return a, nil
+}
+
+// OpenReadOnly opens the archive for reading alongside whatever process is
+// writing it: no lock, no migrations, no resumed splits, and every write
+// refused. It reads the schema as the writer left it.
+func OpenReadOnly(root string) (*Archive, error) {
+	root = filepath.Clean(root)
+	if !IsArchive(root) {
+		return nil, fmt.Errorf("%w: %s is not an archive folder (is the drive mounted?)", ErrUnavailable, root)
+	}
+	path := filepath.Join(root, "catalog.sqlite")
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("%w: %s has never been opened by a collector", ErrUnavailable, root)
+	}
+	db, err := openReader(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Archive{root: root, catalog: db, readOnly: true, partitions: map[string]*file{}, sources: map[string]int64{}}, nil
 }
 
 // Root is the folder the archive lives in.
@@ -163,6 +208,14 @@ func (a *Archive) Close() error {
 	}
 	if err := a.catalog.Close(); err != nil && first == nil {
 		first = err
+	}
+	// Released last, once every file is closed and checkpointed: the next
+	// writer must not open a file this one is still finishing.
+	if a.unlock != nil {
+		if err := a.unlock(); err != nil && first == nil {
+			first = err
+		}
+		a.unlock = nil
 	}
 	return first
 }
@@ -204,17 +257,40 @@ func openDB(path string, migrations []migration) (*file, error) {
 		return nil, fmt.Errorf("archive: %s: %w", filepath.Base(path), err)
 	}
 	// Opened after the writer has put the file in WAL mode and migrated it,
-	// so a reader never sees a half-built schema. query_only makes a write
-	// that strayed onto this pool an error rather than a second writer.
-	r, err := sql.Open("sqlite", path+"?"+pragmaCommon+"&_pragma=query_only(1)")
+	// so a reader never sees a half-built schema.
+	r, err := openPool(path)
 	if err != nil {
 		w.Close()
+		return nil, err
+	}
+	return &file{write: w, read: r}, nil
+}
+
+// openReader opens a file with no writer at all, for a read-only archive:
+// both handles are the query_only pool, so a write fails loudly.
+func openReader(path string) (*file, error) {
+	r, err := openPool(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Ping(); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("archive: open %s: %w", path, err)
+	}
+	return &file{write: r, read: r}, nil
+}
+
+// openPool is the read pool. query_only makes a write that strayed onto it an
+// error rather than a second writer.
+func openPool(path string) (*sql.DB, error) {
+	r, err := sql.Open("sqlite", path+"?"+pragmaCommon+"&_pragma=query_only(1)")
+	if err != nil {
 		return nil, fmt.Errorf("archive: open %s: %w", path, err)
 	}
 	r.SetMaxOpenConns(readers)
 	r.SetMaxIdleConns(1)
 	r.SetConnMaxIdleTime(readerIdle)
-	return &file{write: w, read: r}, nil
+	return r, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -260,11 +336,18 @@ func (a *Archive) partition(key string, create bool) (*file, error) {
 		if !create {
 			return nil, nil
 		}
+		if a.readOnly {
+			return nil, errors.New("archive: opened read-only")
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return nil, fmt.Errorf("archive: %w", err)
 		}
 	}
-	db, err := openDB(path, partitionMigrations)
+	open := func() (*file, error) { return openDB(path, partitionMigrations) }
+	if a.readOnly {
+		open = func() (*file, error) { return openReader(path) }
+	}
+	db, err := open()
 	if err != nil {
 		return nil, err
 	}

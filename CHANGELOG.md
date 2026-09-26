@@ -7,6 +7,20 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### Upgrades that leave a collecting archive intact
+
+**Upgrading while the archive is collecting is now safe by construction, not
+by timing.** One process writes an archive at a time: a new server that finds
+the old one still finishing waits for it (the Data page says so) and takes over
+within seconds, instead of both collecting into it at once. A stop lets the
+collector finish its write and close cleanly — the unit now allows 60 seconds
+for it — and never waits on a stats count. `tickers coverage` opens the archive
+read-only, where it used to run the writer's startup work beside a live
+collector. Archive migrations are pinned by a test so a rolled-back binary can
+always open an archive a newer one touched. Rehearsed against a stub source: an
+overlapping upgrade and five `SIGKILL`s mid-collection left every file passing
+SQLite's integrity check and the day ledger matching the stored bars exactly.
+
 ### A quick Data page again
 
 **Opening the Data page, and the app around a busy archive, is fast again.**

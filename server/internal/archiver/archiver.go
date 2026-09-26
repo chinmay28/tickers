@@ -37,7 +37,8 @@ const (
 	// StateDisabled: switched off in Settings.
 	StateDisabled = "disabled"
 	// StateUnavailable: one is configured and can't be opened — the drive is
-	// unplugged, the folder was deleted, the files are unreadable.
+	// unplugged, the folder was deleted, the files are unreadable, or another
+	// process is writing to it (Status.Locked).
 	StateUnavailable = "unavailable"
 	// StateOpen: the archive is open and the collector is running over it
 	// (which includes it being paused).
@@ -49,6 +50,9 @@ const (
 // retryEvery is how often an unavailable archive is tried again. A drive
 // plugged back in is picked up within this, or at once from the Data page.
 const retryEvery = 30 * time.Second
+
+// lockedRetry is how often a folder another process is writing is tried.
+const lockedRetry = 5 * time.Second
 
 // Options wires a manager.
 type Options struct {
@@ -82,9 +86,13 @@ type Manager struct {
 	state     string
 	path      string
 	err       string
+	locked    bool
 	coll      *collector.Collector
 	last      collector.Status
 	cancelRun context.CancelFunc
+	// runCtx is the open archive's lifetime: done as soon as it starts
+	// closing, which is what a stats count is abandoned on.
+	runCtx    context.Context
 	move      *Move
 	polygon   *quotes.Polygon
 	polyKey   string
@@ -140,6 +148,16 @@ func (m *Manager) Run(ctx context.Context) {
 				m.log.Warn("market-data archive unavailable", "path", path, "error", err)
 			}
 			m.set(StateUnavailable, path, err.Error())
+			if errors.Is(err, archive.ErrLocked) {
+				m.mu.Lock()
+				m.locked = true
+				m.mu.Unlock()
+				// Usually the previous server finishing its last write
+				// during an upgrade: seconds, not the half minute a drive
+				// is given to come back.
+				m.wait(ctx, lockedRetry)
+				continue
+			}
 			m.wait(ctx, retryEvery)
 			continue
 		}
@@ -172,16 +190,19 @@ func (m *Manager) runArchive(ctx context.Context, a *archive.Archive, path strin
 	m.arch = a
 	m.open.Unlock()
 	m.mu.Lock()
-	m.coll, m.cancelRun, m.stats = coll, cancel, nil
+	m.coll, m.cancelRun, m.runCtx, m.stats = coll, cancel, runCtx, nil
 	m.opened++
 	m.mu.Unlock()
 	m.set(StateOpen, path, "")
 	m.log.Info("market-data archive open", "path", path)
 
 	err = coll.Run(runCtx)
+	// Cancelled before the close waits for readers, so a stats count in
+	// flight gives up rather than holding the close — and a shutdown — up.
+	cancel()
 
 	m.mu.Lock()
-	m.last, m.coll, m.cancelRun = coll.Status(), nil, nil
+	m.last, m.coll, m.cancelRun, m.runCtx = coll.Status(), nil, nil, nil
 	m.mu.Unlock()
 	m.open.Lock()
 	m.arch = nil
@@ -227,7 +248,7 @@ func (m *Manager) Nudge() {
 func (m *Manager) set(state, path, err string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state, m.path, m.err = state, path, err
+	m.state, m.path, m.err, m.locked = state, path, err, false
 }
 
 func (m *Manager) moving() bool {
@@ -362,8 +383,12 @@ type Status struct {
 	Path    string `json:"path"`
 	// FromFlag says the folder came from the startup flag rather than the
 	// Data page.
-	FromFlag  bool              `json:"fromFlag"`
-	Error     string            `json:"error"`
+	FromFlag bool   `json:"fromFlag"`
+	Error    string `json:"error"`
+	// Locked says the folder is unavailable because another process holds
+	// its writer lock — the old server still exiting during an upgrade, or a
+	// `tickers collect` left running — rather than because it has gone.
+	Locked    bool              `json:"locked"`
 	Collector *collector.Status `json:"collector"`
 	// Stats is the last count, nil until the first one finishes; StatsAt
 	// says when it was taken.
@@ -386,7 +411,7 @@ const statsEvery = time.Minute
 // the Data page take as long as the count did.
 func (m *Manager) Status(fresh bool) Status {
 	m.mu.Lock()
-	st := Status{State: m.state, Path: m.path, Error: m.err}
+	st := Status{State: m.state, Path: m.path, Error: m.err, Locked: m.locked}
 	if m.coll != nil {
 		cs := m.coll.Status()
 		st.Collector = &cs
@@ -423,12 +448,12 @@ func (m *Manager) Status(fresh bool) Status {
 // recount starts a stats count unless one is already running.
 func (m *Manager) recount() {
 	m.mu.Lock()
-	if m.counting {
+	if m.counting || m.runCtx == nil {
 		m.mu.Unlock()
 		return
 	}
 	m.counting = true
-	opened := m.opened
+	opened, ctx := m.opened, m.runCtx
 	m.mu.Unlock()
 
 	go func() {
@@ -439,7 +464,7 @@ func (m *Manager) recount() {
 		// files out from under it.
 		err := m.Read(func(a *archive.Archive) error {
 			var err error
-			if stats, err = a.Stats(); err != nil {
+			if stats, err = a.StatsContext(ctx); err != nil {
 				return err
 			}
 			size, _ = a.Size()
@@ -449,7 +474,7 @@ func (m *Manager) recount() {
 		defer m.mu.Unlock()
 		m.counting = false
 		if err != nil {
-			if !errors.Is(err, ErrNotOpen) {
+			if !errors.Is(err, ErrNotOpen) && ctx.Err() == nil {
 				m.log.Warn("could not count the archive", "error", err)
 			}
 			return
@@ -661,7 +686,9 @@ func (m *Manager) copyArchive(mv *Move) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || filepath.Base(path) == archive.MarkerFile {
+		// The marker goes last, below; the lock belongs to whoever opens the
+		// new folder, which creates its own.
+		if d.IsDir() || filepath.Base(path) == archive.MarkerFile || filepath.Base(path) == archive.LockFile {
 			return nil
 		}
 		info, err := d.Info()

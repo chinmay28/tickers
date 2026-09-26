@@ -493,6 +493,10 @@ ExecStart=$SERVER_BIN serve --db $DB_PATH --port $PORT --host $HOST
 $ARCHIVE_ENV
 Restart=on-failure
 RestartSec=3
+# A stop drains HTTP (up to 10s), then lets the archive finish its write and
+# close (up to 30s) so the upgraded binary finds it checkpointed and unlocked.
+# Pinned rather than left to the distro's default, which can be shorter.
+TimeoutStopSec=60
 
 # Hardening — safe on a trusted LAN, defensive if exposure ever widens.
 NoNewPrivileges=true

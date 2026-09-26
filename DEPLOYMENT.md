@@ -98,6 +98,28 @@ Schema changes are applied on startup by an append-only, idempotent migration
 runner. Every migration is additive, which is what makes step 7 safe: the older
 binary can still read a database the newer one has already migrated.
 
+**Upgrading while the archive is collecting is safe.** It is too big to
+snapshot, so it is made safe in place instead:
+
+- **The stop is graceful.** On `systemctl stop` the collector finishes the write
+  it is in and closes the archive, which folds every WAL into its file. The
+  unit allows 60 seconds; a busy archive on a Pi usually takes a second or two.
+- **A cut-off write is harmless.** Every write is one SQLite transaction, and a
+  fetch that was interrupted is simply fetched again and rewrites the same bars.
+  This holds for a power cut or a `SIGKILL` too, not only a clean stop.
+- **One process writes at a time.** The archive holds a lock
+  (`tickers-archive.lock`). A new server that starts while the old one is still
+  exiting waits, shows *Another Tickers process is writing* on the Data page,
+  and takes over within 5 seconds of the old one letting go. The lock is the
+  kernel's, so a crashed server never leaves a stale one behind.
+- **A rolled-back binary can read an archive the new one migrated.** Archive
+  migrations are additive, like the database's, and a test pins every shipped
+  one against being edited.
+
+The lock arrives with this release: a server from before it neither takes nor
+checks it. The quick start never runs two at once, but don't start a second
+server by hand during the upgrade to this version.
+
 **Nothing is re-seeded on an upgrade.** Placeholders you replaced stay replaced,
 symbols you deleted stay deleted, and your destinations and settings are
 untouched.
@@ -263,7 +285,10 @@ How it behaves once it is running:
   delete.
 - **Progress.** The journal gets an `archive progress` line every 15 minutes;
   add `--verbose` for one line per request. `tickers coverage --db
-  /var/lib/tickers/tickers.sqlite` prints a summary from the shell.
+  /var/lib/tickers/tickers.sqlite` prints a summary from the shell; it opens
+  the archive read-only, so it is safe beside the running service.
+- **One collector per archive.** `tickers collect` and the service can't both
+  write the same folder; whichever starts second waits for the first.
 - **Switching it off** in Settings closes the archive and stops every request.
   Nothing stored is deleted. The folder can be deleted by hand afterwards if
   the space is wanted back.
