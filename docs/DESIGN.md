@@ -1644,6 +1644,19 @@ markets, and the tools decode, call `engine` and encode.
 - **Hold-out, because the best of many flatters itself.** With `holdoutFrom`,
   variants are ranked before the date and the leaders rerun after it. Without
   one, the answer says it was chosen on the data it is reported on.
+- **A record, because an agent can't be trusted to count.** Every backtest
+  and sweep variant run through the tools goes into `research_trials`, one row
+  per fingerprint (symbol, interval and the canonical definition), so a rerun
+  is not a new trial. Each result is judged against its *family* — the trials
+  on the same symbol and interval, the ones that competed over the same data —
+  with the deflated Sharpe ratio (Bailey and López de Prado): the per-bar
+  Sharpe is compared with the best that as many edgeless trials would be
+  expected to reach, given how widely the family's Sharpes spread, and widened
+  for skew and fat tails. `strategy.Metrics` carries the per-bar Sharpe and
+  moments it needs. Hold-out reruns are not recorded: they check a choice
+  already made rather than make another. A family by symbol undercounts a
+  search that hopped between symbols; it is the honest count that can be kept
+  without guessing which searches were one.
 - **Studies measure what could have been traded.** `strategy.StudyPlan` finds
   the bars a rule held on and measures from the next bar's open — the
   backtester's fill — to the close N bars on. Every horizon carries the same

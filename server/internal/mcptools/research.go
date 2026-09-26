@@ -201,7 +201,10 @@ type backtestView struct {
 	Stats      statsView    `json:"stats"`
 	Trades     []tradeView  `json:"trades,omitempty"`
 	Equity     []equityView `json:"equity,omitempty"`
-	Warnings   []string     `json:"warnings,omitempty"`
+	// Overfitting says how far the result can be trusted given everything
+	// tried on the same series; see research_log.
+	Overfitting *overfitView `json:"overfitting,omitempty"`
+	Warnings    []string     `json:"warnings,omitempty"`
 }
 
 type backtestArgs struct {
@@ -220,6 +223,10 @@ func (t *tools) backtest(_ context.Context, in backtestArgs) (any, error) {
 		trades = min(max(*in.Trades, 0), maxTradesShown)
 	}
 	v := viewBacktest(res)
+	judged, warning := t.judge("run_backtest", []strategy.Definition{in.Strategy}, []*strategy.Result{&res})
+	if v.Overfitting = judged[0]; warning != "" {
+		v.Warnings = append(v.Warnings, warning)
+	}
 	shown := res.Trades[max(0, len(res.Trades)-trades):]
 	for _, tr := range shown {
 		v.Trades = append(v.Trades, tradeView{Entry: stampString(tr.EntryTime, res.Interval), EntryPrice: round(tr.EntryPrice, 4),
@@ -284,9 +291,10 @@ type sweepRow struct {
 	Strategy metricsView        `json:"strategy"`
 	Stats    statsView          `json:"stats"`
 	// Excess is the strategy's total return over buy-and-hold's.
-	Excess  float64      `json:"excessReturn"`
-	Holdout *holdoutView `json:"holdout,omitempty"`
-	variant int
+	Excess      float64      `json:"excessReturn"`
+	Overfitting *overfitView `json:"overfitting,omitempty"`
+	Holdout     *holdoutView `json:"holdout,omitempty"`
+	variant     int
 }
 
 type holdoutView struct {
@@ -351,6 +359,18 @@ func (t *tools) sweep(_ context.Context, in sweepArgs) (any, error) {
 	var rows []sweepRow
 	var warnings []string
 	var firstErr error
+	results := make([]*strategy.Result, len(runs))
+	for i, run := range runs {
+		if run.Err == nil {
+			results[i] = &runs[i].Result
+		}
+	}
+	// Every variant that ran is a trial, ranked or not: the ones that lost
+	// were tried all the same, and are what the winner is deflated by.
+	judged, judgeWarning := t.judge("sweep_strategy", defs, results)
+	if judgeWarning != "" {
+		warnings = append(warnings, judgeWarning)
+	}
 	for i, run := range runs {
 		if run.Err != nil {
 			if firstErr == nil {
@@ -384,7 +404,7 @@ func (t *tools) sweep(_ context.Context, in sweepArgs) (any, error) {
 			continue
 		}
 		rows = append(rows, sweepRow{Params: variants[i].Params, Score: round(score, 3), Strategy: viewMetrics(res.Strategy),
-			Stats: viewStats(res.Stats), Excess: round(res.Strategy.TotalReturn-res.Hold.TotalReturn, 2), variant: i})
+			Stats: viewStats(res.Stats), Excess: round(res.Strategy.TotalReturn-res.Hold.TotalReturn, 2), Overfitting: judged[i], variant: i})
 	}
 	if out.Failed == len(variants) {
 		// Every variant failed: almost always one reason — no bars yet, or
