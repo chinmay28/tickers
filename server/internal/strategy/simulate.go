@@ -59,6 +59,13 @@ type Metrics struct {
 	// the number to compare against the same strategy's buy-and-hold, not
 	// against a figure quoted with a rate taken out.
 	Sharpe float64 `json:"sharpe"`
+	// Periods, SharpePerBar, Skew and Kurtosis describe the per-bar returns
+	// the Sharpe came from — what deciding whether it could be luck needs.
+	// Kurtosis is plain, not excess: a normal distribution's is 3.
+	Periods      int     `json:"periods"`
+	SharpePerBar float64 `json:"sharpePerBar"`
+	Skew         float64 `json:"skew"`
+	Kurtosis     float64 `json:"kurtosis"`
 }
 
 // Stats is the strategy's trading record.
@@ -112,9 +119,9 @@ const maxPoints = 1500
 // bar for a year has made its point long before its ten-thousandth trade.
 const maxTrades = 5000
 
-// barsPerYear annualises per-bar statistics: trading days, times the regular
+// BarsPerYear annualises per-bar statistics: trading days, times the regular
 // session's bars at each width.
-func barsPerYear(i quotes.Interval) float64 {
+func BarsPerYear(i quotes.Interval) float64 {
 	switch i {
 	case quotes.Hourly:
 		return 252 * 7
@@ -223,7 +230,7 @@ func Simulate(p Plan, bars []quotes.Candle, start int) Result {
 
 	first, last := bars[start].Time, bars[n-1].Time
 	res.From, res.To, res.Bars = first, last, n-start
-	perYear := barsPerYear(p.Interval)
+	perYear := BarsPerYear(p.Interval)
 	res.Strategy = metrics(p.Def.Initial, equity, first, last, perYear)
 	res.Hold = metrics(p.Def.Initial, hold, first, last, perYear)
 	res.Stats = stats(res.Trades, held, n-start)
@@ -350,8 +357,9 @@ func metrics(initial float64, curve []float64, first, last time.Time, perYear fl
 		m.CAGR = (math.Pow(m.Final/initial, 1/years) - 1) * 100
 	}
 	peak, prev := initial, initial
-	var sum, sumSq float64
-	for _, v := range curve {
+	returns := make([]float64, len(curve))
+	var sum float64
+	for i, v := range curve {
 		peak = math.Max(peak, v)
 		if peak > 0 {
 			m.MaxDrawdown = math.Min(m.MaxDrawdown, (v/peak-1)*100)
@@ -360,14 +368,26 @@ func metrics(initial float64, curve []float64, first, last time.Time, perYear fl
 		if prev > 0 {
 			r = v/prev - 1
 		}
+		returns[i] = r
 		sum += r
-		sumSq += r * r
 		prev = v
 	}
 	n := float64(len(curve))
 	mean := sum / n
-	if variance := sumSq/n - mean*mean; variance > 1e-18 {
-		m.Sharpe = mean / math.Sqrt(variance) * math.Sqrt(perYear)
+	var m2, m3, m4 float64
+	for _, r := range returns {
+		d := r - mean
+		m2 += d * d
+		m3 += d * d * d
+		m4 += d * d * d * d
+	}
+	m2, m3, m4 = m2/n, m3/n, m4/n
+	m.Periods = len(curve)
+	if m2 > 1e-18 {
+		m.SharpePerBar = mean / math.Sqrt(m2)
+		m.Sharpe = m.SharpePerBar * math.Sqrt(perYear)
+		m.Skew = m3 / math.Pow(m2, 1.5)
+		m.Kurtosis = m4 / (m2 * m2)
 	}
 	return m
 }

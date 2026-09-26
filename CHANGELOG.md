@@ -24,6 +24,11 @@ query over bars, dividends, splits and every symbol ever listed, bounded in
 rows and time), and `tickers research` serves the tools alone over an archive
 opened read-only — beside the collector, or against a copy on a bigger machine.
 
+Every backtest an agent runs is recorded (`research_log`), and each result now
+carries a deflated Sharpe ratio: the probability its edge is real after
+allowing for everything tried on the same symbol and interval. Backtest metrics
+gain the per-bar Sharpe, skew and kurtosis it is computed from.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,

@@ -269,4 +269,29 @@ CREATE TABLE strategies (
 );
 `,
 	},
+	{
+		// The record of every strategy an agent has tested: one row per
+		// distinct definition, keyed by a hash of it, so rerunning one
+		// doesn't count as trying another. The per-bar Sharpe ratio and
+		// its bar count are what the deflated Sharpe needs of every trial
+		// in a family. A new table; an older binary never reads it.
+		ID: "012_research_trials",
+		SQL: `
+CREATE TABLE research_trials (
+  fingerprint    TEXT PRIMARY KEY,
+  symbol         TEXT NOT NULL,
+  interval       TEXT NOT NULL,
+  origin         TEXT NOT NULL,
+  definition     TEXT NOT NULL,
+  sharpe_per_bar REAL NOT NULL,
+  periods        INTEGER NOT NULL,
+  total_return   REAL NOT NULL,
+  trades         INTEGER NOT NULL,
+  runs           INTEGER NOT NULL DEFAULT 1,
+  first_at       TEXT NOT NULL,
+  last_at        TEXT NOT NULL
+);
+CREATE INDEX research_trials_family ON research_trials (symbol, interval);
+`,
+	},
 }

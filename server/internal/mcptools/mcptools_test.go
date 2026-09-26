@@ -184,7 +184,7 @@ func TestEveryToolIsListedWithAStrictSchema(t *testing.T) {
 	}
 	json.Unmarshal(h.server.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)), &resp)
 	want := []string{"archive_status", "search_symbols", "symbol_info", "get_bars", "get_indicators",
-		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "list_strategies", "save_strategy"}
+		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "list_strategies", "save_strategy", "research_log"}
 	if len(resp.Result.Tools) != len(want) {
 		t.Fatalf("listed %d tools, want %d", len(resp.Result.Tools), len(want))
 	}
@@ -470,5 +470,55 @@ func TestSampleSpreadsEvenlyAndKeepsTheLast(t *testing.T) {
 		if got := fmt.Sprint(sample(tc.total, tc.n)); got != tc.want {
 			t.Errorf("sample(%d, %d) = %s, want %s", tc.total, tc.n, got, tc.want)
 		}
+	}
+}
+
+func TestTheResearchLogDeflatesByWhatWasTried(t *testing.T) {
+	h := newHarness(t, true)
+	first := h.mustCall(t, "run_backtest", map[string]any{"strategy": golden(h.day(100)), "trades": 0})
+	of := first["overfitting"].(map[string]any)
+	if of["trials"].(float64) != 1 || of["luckBenchmark"].(float64) != 0 || of["deflatedSharpe"] == nil {
+		t.Fatalf("a first trial = %v, want one trial, no luck to discount and a probability", of)
+	}
+	alone := of["deflatedSharpe"].(float64)
+	// Running it again is not trying something new.
+	again := h.mustCall(t, "run_backtest", map[string]any{"strategy": golden(h.day(100))})["overfitting"].(map[string]any)
+	if again["trials"].(float64) != 1 {
+		t.Errorf("a rerun = %v, want it still one trial", again)
+	}
+
+	template := golden(h.day(100))
+	template["entry"] = map[string]any{"conditions": []map[string]string{{"left": "ema:{fast}", "op": "crosses_above", "right": "sma:{slow}"}}}
+	template["exit"] = map[string]any{"conditions": []map[string]string{{"left": "ema:{fast}", "op": "crosses_below", "right": "sma:{slow}"}}}
+	sweep := h.mustCall(t, "sweep_strategy", map[string]any{"template": template, "params": map[string][]float64{"fast": {2, 3, 4, 6, 8}, "slow": {15, 20, 25, 30}}})
+	top := sweep["top"].([]any)[0].(map[string]any)["overfitting"].(map[string]any)
+	// None of the sweep's 20 is the first strategy (ema:5 over sma:30), so
+	// all are new trials on top of it.
+	if top["trials"].(float64) != 21 {
+		t.Errorf("the sweep's leader = %v, want it judged against all 21 trials", top)
+	}
+	if top["luckBenchmark"].(float64) <= 0 {
+		t.Errorf("after 21 trials the luck benchmark is %v, want above zero", top["luckBenchmark"])
+	}
+	// A sine wave is too easy for any of these to look like luck, so the
+	// probability may round to 1 either way; the bar it is measured
+	// against is what must have risen (strategy's deflation tests pin the
+	// probability falling).
+	after := h.mustCall(t, "run_backtest", map[string]any{"strategy": golden(h.day(100))})["overfitting"].(map[string]any)
+	if after["deflatedSharpe"].(float64) > alone || after["luckBenchmark"].(float64) <= 0 {
+		t.Errorf("after the sweep the first strategy = %v, before %v — trying more must count against it", after, alone)
+	}
+
+	log := h.mustCall(t, "research_log", map[string]any{"symbol": "vti", "limit": 3})
+	fams := log["families"].([]any)
+	if len(fams) != 1 || fams[0].(map[string]any)["trials"].(float64) != 21 {
+		t.Errorf("families = %v, want VTI's 21", fams)
+	}
+	recent := log["recentTrials"].([]any)
+	if len(recent) != 3 || recent[0].(map[string]any)["definition"] == nil {
+		t.Errorf("recent trials = %v, want the 3 asked for, with their definitions", recent)
+	}
+	if other := h.mustCall(t, "research_log", map[string]any{"symbol": "GLD"}); len(other["families"].([]any)) != 0 {
+		t.Errorf("GLD's log = %v, want nothing tried on it", other)
 	}
 }

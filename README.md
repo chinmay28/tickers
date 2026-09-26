@@ -736,6 +736,14 @@ The tools:
 | `find_signals` | every time a condition held, on up to 25 symbols, and the return after it compared with the return from any day |
 | `backtest_portfolio` | the Portfolios page's allocation backtest |
 | `list_strategies`, `save_strategy` | the saved strategies; saving puts one on the Strategies page |
+| `research_log` | every strategy agents have tested, by symbol and interval |
+
+**Keeping agents honest.** An agent can test a thousand variants in an
+afternoon, and the best of a thousand looks good whether or not anything works.
+So every backtest an agent runs is recorded, and each result carries a
+*deflated Sharpe ratio*: the probability its true Sharpe is above zero, after
+allowing for every strategy tried on the same symbol and interval and for
+returns that aren't normal. The more that was tried, the higher the bar.
 
 **Research somewhere else.** Heavy research doesn't have to run in the server
 that collects. `tickers research` serves the same tools, and nothing else, over

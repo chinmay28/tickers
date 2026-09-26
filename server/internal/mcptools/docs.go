@@ -7,12 +7,14 @@ const instructions = `Tickers is a self-hosted market-data archive with a backte
 
 A productive order of work:
 1. archive_status: what is collected and how far back. search_symbols and symbol_info for a particular symbol's coverage.
-2. get_bars and get_indicators to look at the data.
-3. find_signals to learn whether a condition carries information — the return after it versus the baseline from every bar — before trading on it. Pool across several symbols for more occurrences.
-4. run_backtest to trade a rule; sweep_strategy to tune its parameters, with holdoutFrom so the ranking is checked on data it wasn't chosen on.
-5. save_strategy to hand a finding to the person, who sees it on the app's Strategies page.
+2. get_bars and get_indicators to look at the data; query_sql for anything they don't answer (aggregate in SQL — rows are limited).
+3. research_log to see what has already been tried, so a search builds on it rather than repeating it.
+4. find_signals to learn whether a condition carries information — the return after it versus the baseline from every bar — before trading on it. Pool across several symbols for more occurrences.
+5. run_backtest to trade a rule; sweep_strategy to tune its parameters, with holdoutFrom so the ranking is checked on data it wasn't chosen on.
+6. save_strategy to hand a finding to the person, who sees it on the app's Strategies page.
 
 Facts that matter:
+- Every backtest is recorded. Each result's overfitting.deflatedSharpe is the probability its true Sharpe is above zero after allowing for every strategy tried on the same symbol and interval; below 0.95, treat it as possibly luck however good it looks. Trying many variants raises the bar for all of them — search deliberately, not exhaustively.
 - Prices are split-adjusted, not dividend-adjusted, unless a tool's dividends flag is set (daily bars only).
 - Daily history usually reaches back to the listing. Yahoo serves only two years of hourly bars, 60 days of 5-minute and 30 of 1-minute; the archive keeps them from then on, so intraday history is as deep as the archive is old (deeper with Polygon configured). symbol_info says exactly what is held.
 - Intraday bars are the regular session unless asked otherwise. Times are UTC.
