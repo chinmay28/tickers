@@ -195,6 +195,10 @@ func OpenReadOnly(root string) (*Archive, error) {
 // Root is the folder the archive lives in.
 func (a *Archive) Root() string { return a.root }
 
+// ReadOnly says the archive was opened with OpenReadOnly, so anything that
+// would add to it — queueing a symbol somebody asked about — must not try.
+func (a *Archive) ReadOnly() bool { return a.readOnly }
+
 // Close releases every file handle.
 func (a *Archive) Close() error {
 	a.mu.Lock()

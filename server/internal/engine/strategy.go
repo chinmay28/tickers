@@ -166,7 +166,11 @@ func (e *Engine) readSeries(r ArchiveReader, rd *seriesRead) (archived, error) {
 		// Known is not the same as collected: with the exchange lists off,
 		// the catalog still names every listed symbol. One nobody excluded
 		// is put on the user's list either way.
-		if unknown || (!sym.Active && !sym.Excluded) {
+		// A read-only copy can't queue anything; it holds what it holds.
+		if a.ReadOnly() && unknown {
+			return fmt.Errorf("%w: %s isn't in this copy of the archive", ErrNoBars, symbol)
+		}
+		if !a.ReadOnly() && (unknown || (!sym.Active && !sym.Excluded)) {
 			if err := a.Add(archive.User, archive.Entry{Symbol: symbol}, time.Now()); err != nil {
 				return err
 			}

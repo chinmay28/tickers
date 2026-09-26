@@ -184,7 +184,7 @@ func TestEveryToolIsListedWithAStrictSchema(t *testing.T) {
 	}
 	json.Unmarshal(h.server.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)), &resp)
 	want := []string{"archive_status", "search_symbols", "symbol_info", "get_bars", "get_indicators",
-		"run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "list_strategies", "save_strategy"}
+		"query_sql", "run_backtest", "sweep_strategy", "find_signals", "backtest_portfolio", "list_strategies", "save_strategy"}
 	if len(resp.Result.Tools) != len(want) {
 		t.Fatalf("listed %d tools, want %d", len(resp.Result.Tools), len(want))
 	}
@@ -285,6 +285,16 @@ func TestArchiveTools(t *testing.T) {
 		if v == nil {
 			t.Errorf("column %d is empty on the first row — the warm-up should have settled it", i)
 		}
+	}
+	q := h.mustCall(t, "query_sql", map[string]any{"sql": "SELECT symbol, count(*) AS n, avg(close) AS mean FROM bars GROUP BY symbol ORDER BY symbol"})
+	if fmt.Sprint(q["columns"]) != "[symbol n mean]" || len(q["rows"].([]any)) != 2 {
+		t.Fatalf("query_sql = %v, want a row per symbol", q)
+	}
+	if row := q["rows"].([]any)[1].([]any); row[0] != "VTI" || row[1].(float64) != 400 || row[2].(float64) != math.Round(row[2].(float64)*1e6)/1e6 {
+		t.Errorf("VTI's row = %v, want 400 bars and a mean rounded to 6 places", row)
+	}
+	if out, isErr := h.call(t, "query_sql", map[string]any{"sql": "DELETE FROM symbols"}); !isErr || !strings.Contains(out["error"].(string), "SELECT") {
+		t.Errorf("a write = %v, want it refused", out)
 	}
 	if out, isErr := h.call(t, "get_indicators", map[string]any{"symbol": "VTI", "indicators": []string{"sma:0"}}); !isErr {
 		t.Errorf("an invalid indicator = %v, want an error", out)

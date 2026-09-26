@@ -730,11 +730,25 @@ The tools:
 | `archive_status` | what the archive holds, per bar width |
 | `search_symbols`, `symbol_info` | find symbols; one symbol's coverage, splits and dividends |
 | `get_bars`, `get_indicators` | OHLCV rows, and any indicator the chart knows, settled from the first row |
+| `query_sql` | one read-only SQL query over the archive — bars, dividends, splits and every symbol ever listed — for any question the other tools don't ask |
 | `run_backtest` | the Strategies page's backtester |
 | `sweep_strategy` | every combination of a parameter grid, ranked — with a hold-out period so the winner is tested on data it wasn't picked on |
 | `find_signals` | every time a condition held, on up to 25 symbols, and the return after it compared with the return from any day |
 | `backtest_portfolio` | the Portfolios page's allocation backtest |
 | `list_strategies`, `save_strategy` | the saved strategies; saving puts one on the Strategies page |
+
+**Research somewhere else.** Heavy research doesn't have to run in the server
+that collects. `tickers research` serves the same tools, and nothing else, over
+an archive opened read-only — the live one on the Pi, as a second process that
+never touches the collector, or a copy on a bigger machine:
+
+```bash
+rsync -a pi:/mnt/usb/tickers-archive/ ~/tickers-archive/     # or a network share
+tickers research --archive ~/tickers-archive                  # MCP at http://127.0.0.1:8798/mcp
+```
+
+It keeps its own small database (`./data/research.sqlite`) for what agents save
+and try, and can't queue symbols the archive lacks.
 
 Everything but `save_strategy` only reads (asking about a symbol the archive
 doesn't collect queues it, as the Strategies page does). Answers are shaped for

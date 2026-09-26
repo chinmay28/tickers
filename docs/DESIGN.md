@@ -1612,6 +1612,19 @@ markets, and the tools decode, call `engine` and encode.
   running server's `/mcp` instead of opening the database and archive itself.
   The archive has one writer, a backtest of an uncollected symbol writes (it
   queues it), and a laptop's client can't open a Pi's files anyway.
+- **Research can run elsewhere.** `tickers research` serves the tools alone
+  over an `archiver.Fixed`: the archive opened read-only, without the writer
+  lock, so it runs beside the collector or against a copy. The engine asks
+  `Archive.ReadOnly` before queueing an unknown symbol, and says the copy
+  lacks it instead. Its own store holds what agents save and try, which is why
+  it is a separate database rather than the collecting server's.
+- **SQL, for the questions no tool asks.** `Archive.SQL` gives one statement a
+  connection of its own: the catalog and the interval's year files ATTACHed
+  read-only, temp views that put symbols back on bars, dividends and splits,
+  then `query_only`. The SELECT-only keyword check is a courtesy that turns
+  mistakes into sentences; the read-only files and `query_only` are the guard.
+  The context interrupts SQLite at 30 seconds, and SQLite's ten-attachment
+  limit is why a query reads at most nine years of an intraday interval.
 - **Shaped for a model.** Answers are rows under named columns rather than
   parallel arrays, rounded (Yahoo's float32 prices carry a dozen meaningless
   digits, and every one is read), and bounded — the most recent bars of a long

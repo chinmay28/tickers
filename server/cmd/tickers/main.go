@@ -8,6 +8,7 @@
 //	tickers collect        # the market-data archive collector on its own
 //	tickers coverage       # how far the archive has got
 //	tickers mcp            # connect an MCP client over stdio to a server's /mcp
+//	tickers research       # the MCP tools alone, over a read-only archive
 package main
 
 import (
@@ -71,6 +72,8 @@ func run(args []string) error {
 		return archiveInit(args[1:])
 	case "mcp":
 		return mcpBridge(args[1:])
+	case "research":
+		return research(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println(version.String())
 		return nil
@@ -93,6 +96,7 @@ Usage:
   tickers coverage [flags]  report how far the archive has got
   tickers archive-init DIR  make an existing, empty folder a market-data archive
   tickers mcp [--url URL]   connect an MCP client over stdio to a running server
+  tickers research [flags]  serve the MCP tools alone, over a read-only archive
   tickers version           print the version
   tickers help              show this message
 
@@ -433,6 +437,72 @@ func archiveInit(args []string) error {
 	}
 	fmt.Printf("%s is now a market-data archive\n", dir)
 	return nil
+}
+
+// research serves the agent tools and nothing else, over an archive opened
+// read-only. It is how research runs somewhere other than the server that
+// collects: a desktop reading a copy of the Pi's archive, or a second process
+// on the Pi that can be niced and restarted without touching the collector.
+//
+// Read-only, it can't queue a symbol it lacks, and it keeps its own database:
+// saved strategies and the record of what has been tested live there, not in
+// the collecting server's.
+func research(args []string) error {
+	fs := flag.NewFlagSet("research", flag.ContinueOnError)
+	archivePath := fs.String("archive", envOr("TICKERS_ARCHIVE", ""), "the market-data archive folder (or a copy of it) to read")
+	dbPath := fs.String("db", envOr("TICKERS_RESEARCH_DB", "./data/research.sqlite"),
+		"this research server's own database: saved strategies and the record of tests")
+	host := fs.String("host", envOr("HOST", "127.0.0.1"), "address to bind")
+	port := fs.Int("port", envInt("TICKERS_RESEARCH_PORT", 8798), "port to listen on")
+	verbose := fs.Bool("verbose", false, "log every request")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *archivePath == "" {
+		return errors.New("--archive is required: the folder of a market-data archive, or a copy of one")
+	}
+	log := newLogger(*verbose)
+	arch, err := archiver.OpenFixed(*archivePath)
+	if err != nil {
+		return err
+	}
+	defer arch.Close()
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	eng := engine.New(st, newProvider(config{}), publish.New(), log)
+	eng.UseArchive(arch)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcptools.New(mcptools.Options{Store: st, Engine: eng, Archive: arch}))
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		if err := st.DB().PingContext(r.Context()); err != nil {
+			http.Error(w, "database unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintf(w, `{"status":"ok","version":%q}`+"\n", version.String())
+	})
+	server := &http.Server{Addr: net.JoinHostPort(*host, strconv.Itoa(*port)), Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	errs := make(chan error, 1)
+	go func() {
+		log.Info("research server listening", "version", version.String(), "addr", server.Addr, "archive", *archivePath, "db", *dbPath)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs <- err
+		}
+	}()
+	select {
+	case err := <-errs:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	}
 }
 
 // mcpBridge connects an MCP client that launches commands — rather than

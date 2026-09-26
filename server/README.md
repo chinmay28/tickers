@@ -42,6 +42,7 @@ is what makes `CGO_ENABLED=0` and cross-compilation work.
 tickers serve [flags]     run the API, the web client and the refresh loop
 tickers publish [flags]   run one refresh + publish cycle, then exit
 tickers mcp [--url URL]   relay an MCP client over stdio to a server's /mcp
+tickers research [flags]  the MCP tools alone, over a read-only archive (port 8798)
 tickers version           print the version
 tickers help
 ```

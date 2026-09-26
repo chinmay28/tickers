@@ -31,16 +31,24 @@ import (
 type Options struct {
 	Store  *store.Store
 	Engine *engine.Engine
-	// Archive is the market-data archive's manager. Nil, the archive tools
-	// say there is no archive rather than failing to register.
-	Archive *archiver.Manager
+	// Archive is where bars are read. Nil, the archive tools say there is
+	// no archive rather than failing to register.
+	Archive ArchiveSource
+}
+
+// ArchiveSource is what the tools need of an archive: the server's
+// archiver.Manager, or an archiver.Fixed that a research server opens
+// read-only.
+type ArchiveSource interface {
+	Read(fn func(a *archive.Archive) error) error
+	Status(fresh bool) archiver.Status
 }
 
 // tools holds the dependencies every handler shares.
 type tools struct {
 	store   *store.Store
 	engine  *engine.Engine
-	archive *archiver.Manager
+	archive ArchiveSource
 	// now is the clock the default windows are measured back from.
 	now func() time.Time
 }
@@ -55,6 +63,7 @@ func New(opts Options) *mcp.Server {
 		Instructions: instructions,
 	})
 	t.registerArchive(s)
+	t.registerSQL(s)
 	t.registerResearch(s)
 	t.registerStrategies(s)
 	s.AddResource(mcp.Resource{

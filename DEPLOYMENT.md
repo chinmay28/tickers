@@ -340,6 +340,13 @@ up to 250 backtests: on a Pi that is real work, so leave it to agents you run.
 If a proxy with authentication is in front, point the agent at the proxy's
 `/mcp` with whatever credentials the proxy wants.
 
+To keep agents' work off the collecting server, run `tickers research
+--archive <folder>` instead: the same tools over the archive opened read-only,
+listening on `127.0.0.1:8798` by default. On the Pi it runs beside `serve`
+without taking the archive's writer lock (give it `nice` if sweeps compete with
+collection); elsewhere, point it at a copy. It keeps its own database, so back
+up `research.sqlite` if agents' saved strategies matter to you.
+
 ## 6. Uninstalling
 
 ```bash
