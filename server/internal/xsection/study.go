@@ -180,6 +180,7 @@ func RunStudy(p *Panel, spec StudySpec) (Study, error) {
 	}
 	st.Rankings = len(ics)
 	if st.Rankings == 0 {
+		st.Quantiles = []Quantile{}
 		return st, nil
 	}
 	st.AvgSymbols = float64(symbols) / float64(st.Rankings)
