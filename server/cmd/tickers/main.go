@@ -35,6 +35,7 @@ import (
 	"github.com/chinmay28/tickers/server/internal/mcptools"
 	"github.com/chinmay28/tickers/server/internal/publish"
 	"github.com/chinmay28/tickers/server/internal/quotes"
+	"github.com/chinmay28/tickers/server/internal/remote"
 	"github.com/chinmay28/tickers/server/internal/store"
 	"github.com/chinmay28/tickers/server/internal/universe"
 	"github.com/chinmay28/tickers/server/internal/version"
@@ -444,9 +445,11 @@ func archiveInit(args []string) error {
 // collects: a desktop reading a copy of the Pi's archive, or a second process
 // on the Pi that can be niced and restarted without touching the collector.
 //
-// Read-only, it can't queue a symbol it lacks, and it keeps its own database:
-// saved strategies and the record of what has been tested live there, not in
-// the collecting server's.
+// Read-only, it can't queue a symbol it lacks. It keeps its own database for
+// the record of what has been tested; what agents hand back — strategies,
+// reports, watches — goes to the collecting server named by --home, where the
+// person reads it and where forward tests run on today's bars, or stays in
+// that database without one.
 func research(args []string) error {
 	fs := flag.NewFlagSet("research", flag.ContinueOnError)
 	archivePath := fs.String("archive", envOr("TICKERS_ARCHIVE", ""), "the market-data archive folder (or a copy of it) to read")
@@ -454,6 +457,8 @@ func research(args []string) error {
 		"this research server's own database: saved strategies and the record of tests")
 	host := fs.String("host", envOr("HOST", "127.0.0.1"), "address to bind")
 	port := fs.Int("port", envInt("TICKERS_RESEARCH_PORT", 8798), "port to listen on")
+	homeURL := fs.String("home", envOr("TICKERS_HOME_URL", ""),
+		"the collecting server (e.g. http://raspberrypi.local:8797) to keep saved strategies, reports and watches on; empty keeps them here")
 	verbose := fs.Bool("verbose", false, "log every request")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -475,8 +480,22 @@ func research(args []string) error {
 	eng := engine.New(st, newProvider(config{}), publish.New(), log)
 	eng.UseArchive(arch)
 
+	opts := mcptools.Options{Store: st, Engine: eng, Archive: arch}
+	homeName := "this database"
+	if *homeURL != "" {
+		home, err := remote.New(*homeURL)
+		if err != nil {
+			return err
+		}
+		// Not fatal: a Pi that is down now may be up by the time an agent
+		// has something to hand back, and each call says so if it isn't.
+		if err := home.Ping(); err != nil {
+			log.Warn("the home server isn't answering yet", "error", err)
+		}
+		opts.Home, homeName = home, home.String()
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", mcptools.New(mcptools.Options{Store: st, Engine: eng, Archive: arch}))
+	mux.Handle("/mcp", mcptools.New(opts))
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		if err := st.DB().PingContext(r.Context()); err != nil {
 			http.Error(w, "database unavailable: "+err.Error(), http.StatusServiceUnavailable)
@@ -490,7 +509,7 @@ func research(args []string) error {
 	defer stop()
 	errs := make(chan error, 1)
 	go func() {
-		log.Info("research server listening", "version", version.String(), "addr", server.Addr, "archive", *archivePath, "db", *dbPath)
+		log.Info("research server listening", "version", version.String(), "addr", server.Addr, "archive", *archivePath, "db", *dbPath, "home", homeName)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- err
 		}

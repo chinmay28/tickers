@@ -7,8 +7,11 @@ import (
 
 func TestTheResearchEndpoints(t *testing.T) {
 	h, _ := newArchiveHarness(t)
-	if _, err := h.store.CreateReport("Momentum", "It held up.", "agent"); err != nil {
-		t.Fatal(err)
+	if code, body := h.call(t, http.MethodPost, "/api/reports", map[string]any{"title": "Momentum", "body": "It held up.", "author": "agent"}); code != http.StatusCreated || body["id"] == "" {
+		t.Fatalf("posting a report = %d %v, want 201 with an id", code, body)
+	}
+	if code, body := h.call(t, http.MethodPost, "/api/reports", map[string]any{"title": "", "body": "x"}); code != http.StatusBadRequest {
+		t.Errorf("a report without a title = %d %v, want 400", code, body)
 	}
 	code, watch := h.call(t, http.MethodPost, "/api/watches", map[string]any{"name": "Golden cross", "definition": goldenCross("SPY"), "note": "from the editor"})
 	if code != http.StatusCreated || watch["since"] == "" {

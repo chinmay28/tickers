@@ -13,6 +13,7 @@ import (
 // what came after — shown on the Strategies page.
 func (s *Server) routeResearch(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/research", s.handleResearch)
+	mux.HandleFunc("POST /api/reports", s.handleCreateReport)
 	mux.HandleFunc("DELETE /api/reports/{id}", s.handleDeleteReport)
 	mux.HandleFunc("POST /api/watches", s.handleCreateWatch)
 	mux.HandleFunc("DELETE /api/watches/{id}", s.handleDeleteWatch)
@@ -46,6 +47,26 @@ func (s *Server) handleResearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reports": reports, "watches": watches})
+}
+
+// handleCreateReport takes a report from a research server working on a copy
+// of the archive elsewhere, so what it found is read here, where the person
+// looks.
+func (s *Server) handleCreateReport(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Author string `json:"author"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	report, err := s.store.CreateReport(body.Title, body.Body, body.Author)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, report)
 }
 
 func (s *Server) handleDeleteReport(w http.ResponseWriter, r *http.Request) {

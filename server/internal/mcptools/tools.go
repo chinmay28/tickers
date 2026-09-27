@@ -34,7 +34,44 @@ type Options struct {
 	// Archive is where bars are read. Nil, the archive tools say there is
 	// no archive rather than failing to register.
 	Archive ArchiveSource
+	// Home is where what agents hand back is kept. Nil is this server's
+	// own database; a research server sets the collecting server's.
+	Home Home
 }
+
+// Home keeps what agents hand back — saved strategies, reports, watched
+// strategies and their forward tests — where the person will look for it.
+// On the collecting server that is its own database; a research server
+// working on a copy of the archive sends them to the collecting server's
+// API instead (see the remote package), which also runs the forward tests,
+// since it is the one with today's bars.
+type Home interface {
+	Strategies() ([]store.Strategy, error)
+	SaveStrategy(id, name string, def json.RawMessage) (store.Strategy, error)
+	CreateReport(title, body, author string) (store.Report, error)
+	Reports() ([]store.Report, error)
+	WatchStrategy(name string, def json.RawMessage, note string) (store.Watch, error)
+	Forward() ([]engine.Forward, error)
+}
+
+// localHome is Home in this server's own database.
+type localHome struct {
+	store  *store.Store
+	engine *engine.Engine
+}
+
+func (h localHome) Strategies() ([]store.Strategy, error) { return h.store.Strategies() }
+func (h localHome) SaveStrategy(id, name string, def json.RawMessage) (store.Strategy, error) {
+	return h.engine.SaveStrategy(id, name, def)
+}
+func (h localHome) CreateReport(title, body, author string) (store.Report, error) {
+	return h.store.CreateReport(title, body, author)
+}
+func (h localHome) Reports() ([]store.Report, error) { return h.store.Reports() }
+func (h localHome) WatchStrategy(name string, def json.RawMessage, note string) (store.Watch, error) {
+	return h.engine.WatchStrategy(name, def, note, time.Now())
+}
+func (h localHome) Forward() ([]engine.Forward, error) { return h.engine.Forward() }
 
 // ArchiveSource is what the tools need of an archive: the server's
 // archiver.Manager, or an archiver.Fixed that a research server opens
@@ -49,13 +86,17 @@ type tools struct {
 	store   *store.Store
 	engine  *engine.Engine
 	archive ArchiveSource
+	home    Home
 	// now is the clock the default windows are measured back from.
 	now func() time.Time
 }
 
 // New builds the MCP server with every tool and document registered.
 func New(opts Options) *mcp.Server {
-	t := &tools{store: opts.Store, engine: opts.Engine, archive: opts.Archive, now: time.Now}
+	t := &tools{store: opts.Store, engine: opts.Engine, archive: opts.Archive, home: opts.Home, now: time.Now}
+	if t.home == nil {
+		t.home = localHome{store: opts.Store, engine: opts.Engine}
+	}
 	s := mcp.NewServer(mcp.Info{
 		Name:         "tickers",
 		Title:        "Tickers market-data archive",
