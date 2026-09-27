@@ -356,10 +356,35 @@ save says so until it is back.
 ## 6. Uninstalling
 
 ```bash
-sudo systemctl disable --now tickers
-sudo rm /etc/systemd/system/tickers.service && sudo systemctl daemon-reload
-sudo rm -rf /opt/tickers
-sudo userdel tickers
-# the data survives on purpose — delete it deliberately:
-sudo rm -rf /var/lib/tickers
+curl -fsSL https://raw.githubusercontent.com/chinmay28/tickers/main/scripts/quickstart.sh | sudo bash -s -- --uninstall
+```
+
+(or, from a checkout: `sudo ./scripts/quickstart.sh --uninstall`)
+
+It reads the same `TICKERS_*` variables the install did, so an install placed
+with `TICKERS_PREFIX`, `TICKERS_DATA_DIR` or `TICKERS_USER` is removed by
+passing them again. It stops and disables `tickers.service`, removes the unit
+(and any `tickers.service.d` drop-ins), reloads systemd, deletes the prefix
+(`/opt/tickers`: the source tree, or the release binary and its `.prev`) and
+the `safe.directory` line a source install added to root's git config. A
+checkout you installed from with `sudo ./scripts/quickstart.sh` is left where
+it is. It is idempotent: a second run, or a run on a machine where nothing is
+installed, succeeds.
+
+It deliberately keeps:
+
+- **the data directory** (`/var/lib/tickers`: the database and its pre-upgrade
+  backups), and the `tickers` service user whose home it is;
+- **the market-data archive**, wherever it is. It may be on an external drive,
+  or moved from Settings to a folder the installer never knew about, and it is
+  the one thing a re-install cannot bring back quickly;
+- **Go in `/usr/local/go`**, if the installer put it there — something else may
+  build with it.
+
+Re-running the install picks all of it back up. To delete it for good:
+
+```bash
+sudo rm -rf /var/lib/tickers && sudo userdel tickers
+# an archive outside the data directory, if you moved it:
+sudo rm -rf /media/<drive>/tickers-archive
 ```

@@ -6,6 +6,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/chinmay28/tickers/main/scripts/quickstart.sh | sudo bash
 #
+# and the same line with a flag takes it away again, keeping the data:
+#
+#   curl -fsSL https://raw.githubusercontent.com/chinmay28/tickers/main/scripts/quickstart.sh | sudo bash -s -- --uninstall
+#
 # Two ways to get the binary — TICKERS_INSTALL picks one:
 #
 #   source   (default) clone the repo and build it here. Needs Go at build time
@@ -61,6 +65,9 @@
 #   INSTALL_GO        auto | never            install Go if missing/old (default: auto; build-time only)
 #   BACKUP_KEEP       pre-upgrade backups kept (default: 10)
 #
+# --uninstall reads the same variables, so an install placed with them is found
+# and removed with them.
+#
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -85,6 +92,14 @@ if [ "$(id -u)" -ne 0 ]; then
   die "Run as root: curl -fsSL .../quickstart.sh | sudo bash   (or: sudo ./scripts/quickstart.sh)"
 fi
 command -v systemctl >/dev/null 2>&1 || die "systemd is required (no systemctl found)."
+
+# Decided before anything else happens, so an uninstall never installs a
+# toolchain, clones or downloads anything on its way to removing the service.
+case "${1:-}" in
+  --uninstall) UNINSTALL=1 ;;
+  "")          UNINSTALL=0 ;;
+  *)           die "Unknown option: $1 (only --uninstall is supported)" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -126,6 +141,66 @@ UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 # server/go.mod pins the real toolchain, which Go fetches automatically.
 GO_MIN_MINOR=21
 GO_INSTALL_VERSION="1.25.0"
+
+# ---------------------------------------------------------------------------
+# --uninstall: undo what an install put on the system, and nothing it didn't
+# ---------------------------------------------------------------------------
+# The database, its backups and the archive stay. The archive especially: it
+# may be on an external drive, it may have been moved from Settings to a folder
+# this script never knew about, and it is years of paced downloads that no
+# re-install can bring back quickly. Each step tolerates its target already
+# being gone, so a second run (or a run on a machine with nothing installed)
+# succeeds.
+if [ "$UNINSTALL" -eq 1 ]; then
+  log "Stopping and removing the Tickers service"
+  # Read before the unit goes: an install run from a checkout serves from that
+  # checkout, which is the user's own clone and is left exactly where it is.
+  RAN_FROM="$(sed -n 's/^WorkingDirectory=//p' "$UNIT_PATH" 2>/dev/null || true)"
+  systemctl disable --now "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+  rm -f "$UNIT_PATH"
+  rm -rf "${UNIT_PATH}.d"
+  systemctl daemon-reload
+  systemctl reset-failed "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+  ok "service removed"
+
+  # The prefix holds only code (the source tree, or a release binary and its
+  # .prev), so it goes whole — unless someone put the data under it, in which
+  # case only the code inside it does.
+  under_prefix() { case "$1/" in "${PREFIX%/}"/*) return 0 ;; esac; return 1; }
+  if under_prefix "$DATA_DIR" || { [ -n "$ARCHIVE_DIR" ] && under_prefix "$ARCHIVE_DIR"; }; then
+    rm -rf "${PREFIX:?}/src" "${PREFIX:?}/bin"
+    warn "data lives under $PREFIX, so only its src/ and bin/ were removed."
+  elif [ "$PREFIX" != / ]; then
+    rm -rf "${PREFIX:?}"
+    ok "removed $PREFIX"
+  fi
+  # The safe.directory line a source install adds to root's git config.
+  if command -v git >/dev/null 2>&1; then
+    for d in "$PREFIX/src" "$RAN_FROM"; do
+      [ -n "$d" ] && git config --global --fixed-value --unset-all safe.directory "$d" >/dev/null 2>&1 || true
+    done
+  fi
+  if [ -n "$RAN_FROM" ] && ! under_prefix "$RAN_FROM"; then
+    ok "left your checkout at $RAN_FROM as it is"
+  fi
+
+  cat <<GONE
+
+${C_GREEN}Tickers is uninstalled.${C_OFF} Your data was kept:
+
+  Database:    $DB_PATH
+  Backups:     $BACKUP_DIR
+  Archive:     ${ARCHIVE_DIR:-none at install} (or wherever Settings moved it — never touched)
+
+  Re-running the install picks all of it back up. To delete it for good:
+    sudo rm -rf $DATA_DIR && sudo userdel $SVC_USER
+${C_DIM}
+  An archive outside $DATA_DIR is deleted separately, by hand. Go in
+  /usr/local/go, if this script installed it, is left for anything else that
+  builds with it; sudo rm -rf /usr/local/go removes it.${C_OFF}
+GONE
+  exit 0
+fi
 
 # If this script is being run from inside an existing checkout (sudo ./scripts/
 # quickstart.sh) rather than piped from curl, build that checkout in place.
