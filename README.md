@@ -26,7 +26,8 @@ This is that script as a proper application — built the same way as
   client is embedded with `go:embed`, so `go build` is the whole build.
 - **Non-disruptive upgrades.** Re-run one command: it snapshots the database,
   swaps code in, health-checks the result, and rolls back — data and all — if
-  the new version is unhealthy.
+  the new version is unhealthy. The same command with `--uninstall` removes
+  it and keeps the data.
 - **No accounts, no auth.** Meant to run on a trusted network (your LAN, a
   Tailscale tailnet, a VPN). Anyone who can reach the server can use it.
 
