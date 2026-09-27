@@ -117,7 +117,9 @@ stands to it as `api` stands to `net/http`: decode arguments strictly, call
 `engine`, shape the answer for a model (rows, rounded, limited). Rule-language
 work — studies (`strategy.StudyPlan`), grids (`strategy.Grid`), rankings —
 belongs in `strategy`, not here. `Engine.RunStrategies` batches backtests over
-one archive read per series; each result must equal `RunStrategy`'s alone.
+one archive read per series; each result must equal `RunStrategy`'s alone. What agents
+hand back goes through `mcptools.Home`: the local store, or `internal/remote`
+(the collecting server's REST API) for `tickers research --home`.
 
 **`internal/archive` / `collector` / `archiver` / `universe`** are the
 market-data archive: a *folder* of SQLite files (catalog + one bar file per

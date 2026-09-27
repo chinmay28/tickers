@@ -345,7 +345,13 @@ To keep agents' work off the collecting server, run `tickers research
 listening on `127.0.0.1:8798` by default. On the Pi it runs beside `serve`
 without taking the archive's writer lock (give it `nice` if sweeps compete with
 collection); elsewhere, point it at a copy. It keeps its own database, so back
-up `research.sqlite` if agents' saved strategies matter to you.
+up `research.sqlite` if agents' saved strategies matter to you. With `--home
+http://pi:8797` (or `TICKERS_HOME_URL`) it sends saved strategies, reports and
+watches to that server's API instead, and reads forward tests back from it; if
+a proxy with basic authentication is in front, put the credentials in the URL
+(`http://user:pass@pi:8797`) — they are masked in logs and errors. A home
+server that is down when the research server starts is only a warning; each
+save says so until it is back.
 
 ## 6. Uninstalling
 

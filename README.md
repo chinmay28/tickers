@@ -781,8 +781,18 @@ rsync -a pi:/mnt/usb/tickers-archive/ ~/tickers-archive/     # or a network shar
 tickers research --archive ~/tickers-archive                  # MCP at http://127.0.0.1:8798/mcp
 ```
 
-It keeps its own small database (`./data/research.sqlite`) for what agents save
-and try, and can't queue symbols the archive lacks.
+Point it at the Pi with `--home` and what agents hand back — saved strategies,
+reports, watched strategies — goes to the Pi, where you read it in the app and
+where forward tests run on the bars that arrive each day:
+
+```bash
+tickers research --archive ~/tickers-archive --home http://raspberrypi.local:8797
+```
+
+Its own small database (`./data/research.sqlite`) keeps the record of what
+agents have tested, since that is about the searching, which happened there;
+without `--home` it keeps everything. Either way it can't queue symbols the
+archive lacks.
 
 **Factors** rank symbols by anything a rule can read (`rsi:14`), or by
 `return:N[:S]` (12-1 momentum is `return:252:21`), `volatility:N`,

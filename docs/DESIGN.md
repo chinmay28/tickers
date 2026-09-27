@@ -1618,6 +1618,14 @@ markets, and the tools decode, call `engine` and encode.
   `Archive.ReadOnly` before queueing an unknown symbol, and says the copy
   lacks it instead. Its own store holds what agents save and try, which is why
   it is a separate database rather than the collecting server's.
+- **What agents hand back goes home.** `mcptools.Home` is where saved
+  strategies, reports and watches are kept: the server's own store, or, for a
+  research server started with `--home`, the collecting server's API through
+  `internal/remote` — the same endpoints the web client uses, plus `POST
+  /api/reports`. Forward tests are read back from there too, because the
+  collecting server is the one with today's bars. The research log stays with
+  the research server: it counts the searching, and the searching happened
+  there.
 - **SQL, for the questions no tool asks.** `Archive.SQL` gives one statement a
   connection of its own: the catalog and the interval's year files ATTACHed
   read-only, temp views that put symbols back on bars, dividends and splits,

@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -40,25 +39,36 @@ const (
 	MaxWatchNote   = 1000
 )
 
+// invalidResearch is a refusal of a report or a watch: a sentence for the
+// person, wrapping ErrInvalidResearch for the API.
+func invalidResearch(format string, args ...any) error {
+	return &researchError{msg: fmt.Sprintf(format, args...)}
+}
+
+type researchError struct{ msg string }
+
+func (e *researchError) Error() string { return e.msg }
+func (e *researchError) Unwrap() error { return ErrInvalidResearch }
+
 // CreateReport saves a report.
 func (s *Store) CreateReport(title, body, author string) (Report, error) {
 	title, body = strings.TrimSpace(title), strings.TrimSpace(body)
 	switch {
 	case title == "":
-		return Report{}, errors.New("a report needs a title")
+		return Report{}, invalidResearch("a report needs a title")
 	case len(title) > MaxReportTitle:
-		return Report{}, fmt.Errorf("a report title cannot be longer than %d characters", MaxReportTitle)
+		return Report{}, invalidResearch("a report title cannot be longer than %d characters", MaxReportTitle)
 	case body == "":
-		return Report{}, errors.New("a report needs a body")
+		return Report{}, invalidResearch("a report needs a body")
 	case len(body) > MaxReportBody:
-		return Report{}, fmt.Errorf("a report cannot be longer than %d KB", MaxReportBody>>10)
+		return Report{}, invalidResearch("a report cannot be longer than %d KB", MaxReportBody>>10)
 	}
 	var n int
 	if err := s.db.QueryRow(`SELECT count(*) FROM research_reports`).Scan(&n); err != nil {
 		return Report{}, err
 	}
 	if n >= MaxReports {
-		return Report{}, fmt.Errorf("there cannot be more than %d reports; delete some in the app first", MaxReports)
+		return Report{}, invalidResearch("there cannot be more than %d reports; delete some in the app first", MaxReports)
 	}
 	now := nowRFC3339()
 	r := Report{ID: newID(), Title: title, Body: body, Author: strings.TrimSpace(author), CreatedAt: parseTime(now)}
@@ -95,20 +105,20 @@ func (s *Store) DeleteReport(id string) error { return s.deleteRow(`research_rep
 func (s *Store) CreateWatch(name string, def json.RawMessage, since, note string) (Watch, error) {
 	name, note = strings.TrimSpace(name), strings.TrimSpace(note)
 	if err := validStrategy(name, def); err != nil {
-		return Watch{}, err
+		return Watch{}, invalidResearch("%s", err.Error())
 	}
 	if _, err := time.Parse(time.DateOnly, since); err != nil {
-		return Watch{}, errors.New("a watch starts on a date like 2026-01-31")
+		return Watch{}, invalidResearch("a watch starts on a date like 2026-01-31")
 	}
 	if len(note) > MaxWatchNote {
-		return Watch{}, fmt.Errorf("a watch's note cannot be longer than %d characters", MaxWatchNote)
+		return Watch{}, invalidResearch("a watch's note cannot be longer than %d characters", MaxWatchNote)
 	}
 	var n int
 	if err := s.db.QueryRow(`SELECT count(*) FROM watches`).Scan(&n); err != nil {
 		return Watch{}, err
 	}
 	if n >= MaxWatches {
-		return Watch{}, fmt.Errorf("there cannot be more than %d watched strategies; stop watching some in the app first", MaxWatches)
+		return Watch{}, invalidResearch("there cannot be more than %d watched strategies; stop watching some in the app first", MaxWatches)
 	}
 	now := nowRFC3339()
 	w := Watch{ID: newID(), Name: name, Definition: compact(def), Since: since, Note: note, CreatedAt: parseTime(now)}

@@ -33,7 +33,7 @@ func (t *tools) registerStrategies(s *mcp.Server) {
 }
 
 func (t *tools) listStrategies(_ context.Context, _ struct{}) (any, error) {
-	all, err := t.store.Strategies()
+	all, err := t.home.Strategies()
 	if err != nil {
 		return nil, err
 	}
@@ -47,5 +47,5 @@ type saveArgs struct {
 }
 
 func (t *tools) saveStrategy(_ context.Context, in saveArgs) (any, error) {
-	return t.engine.SaveStrategy(in.ID, in.Name, in.Definition)
+	return t.home.SaveStrategy(in.ID, in.Name, in.Definition)
 }

@@ -1210,7 +1210,7 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrInvalidExpression):
 		writeError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, store.ErrInvalidPortfolio):
+	case errors.Is(err, store.ErrInvalidPortfolio), errors.Is(err, store.ErrInvalidResearch):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case isValidationError(err):
 		writeError(w, http.StatusBadRequest, err.Error())

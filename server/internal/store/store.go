@@ -40,6 +40,10 @@ var ErrInvalidExpression = errors.New("invalid composite formula")
 // them while each message stays a sentence written for the person who typed it.
 var ErrInvalidPortfolio = errors.New("invalid portfolio")
 
+// ErrInvalidResearch wraps every refusal of a report or a watch, for the
+// same reason: the API answers 400 for all of them, and a sentence for each.
+var ErrInvalidResearch = errors.New("invalid research")
+
 // Store is a handle on the database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB

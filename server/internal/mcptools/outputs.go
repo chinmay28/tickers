@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/chinmay28/tickers/server/internal/engine"
 	"github.com/chinmay28/tickers/server/internal/mcp"
 	"github.com/chinmay28/tickers/server/internal/strategy"
 )
@@ -68,7 +67,7 @@ type reportArgs struct {
 }
 
 func (t *tools) saveReport(_ context.Context, in reportArgs) (any, error) {
-	r, err := t.store.CreateReport(in.Title, in.Body, in.Author)
+	r, err := t.home.CreateReport(in.Title, in.Body, in.Author)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +77,7 @@ func (t *tools) saveReport(_ context.Context, in reportArgs) (any, error) {
 func (t *tools) listReports(_ context.Context, in struct {
 	Full bool `json:"full"`
 }) (any, error) {
-	all, err := t.store.Reports()
+	all, err := t.home.Reports()
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +96,7 @@ type watchArgs struct {
 }
 
 func (t *tools) watch(_ context.Context, in watchArgs) (any, error) {
-	w, err := t.engine.WatchStrategy(in.Name, in.Definition, in.Note, t.now())
+	w, err := t.home.WatchStrategy(in.Name, in.Definition, in.Note)
 	if err != nil {
 		return nil, err
 	}
@@ -130,8 +129,8 @@ const (
 )
 
 // forwardViews is every watch's forward test, shaped for a model.
-func forwardViews(eng *engine.Engine) ([]forwardView, error) {
-	fw, err := eng.Forward()
+func forwardViews(home Home) ([]forwardView, error) {
+	fw, err := home.Forward()
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +158,7 @@ func forwardViews(eng *engine.Engine) ([]forwardView, error) {
 }
 
 func (t *tools) forward(context.Context, struct{}) (any, error) {
-	views, err := forwardViews(t.engine)
+	views, err := forwardViews(t.home)
 	if err != nil {
 		return nil, err
 	}

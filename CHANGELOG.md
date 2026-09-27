@@ -52,6 +52,10 @@ the day and judged only on the bars that arrive after, with what their rules
 say to do at the next open. **Watch forward** in the editor starts one for a
 strategy of your own.
 
+`tickers research --home http://pi:8797` sends what agents save — strategies,
+reports, watches — to the collecting server, where they show in the app and
+forward tests run on each day's bars.
+
 ### Logo URLs that say `{ticker}`
 
 **The logo URL accepts the placeholder however it was written.** `{ticker}`,
