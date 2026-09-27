@@ -7,6 +7,14 @@ each heading must be `## <tag> — <title>`.
 
 ## Unreleased
 
+### A one-line uninstall
+
+**`quickstart.sh --uninstall` takes Tickers off a machine.** The install
+one-liner with `| sudo bash -s -- --uninstall` stops and removes the service,
+its unit and the installed code, and keeps the database, its backups and the
+market-data archive, printing the command that deletes them. It is safe to run
+twice, and never installs or downloads anything on the way.
+
 ### An MCP server for agents
 
 **Agents can now research the archive directly.** The server answers the

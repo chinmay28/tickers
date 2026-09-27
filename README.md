@@ -91,6 +91,17 @@ curl -fsSL https://raw.githubusercontent.com/chinmay28/tickers/main/scripts/quic
 
 (or, from a checkout: `sudo ./scripts/quickstart.sh`)
 
+The same line with `--uninstall` takes it away again:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chinmay28/tickers/main/scripts/quickstart.sh | sudo bash -s -- --uninstall
+```
+
+That stops and removes the service, its unit and the installed code under
+`/opt/tickers`, and keeps your data — the database, its backups and the
+market-data archive are never touched, and it ends by printing the command that
+deletes them for good. Running it again, or with nothing installed, is harmless.
+
 It installs Go if needed (build-time only), creates a dedicated `tickers`
 system user, compiles the static binary, and runs it under systemd serving the
 API + web client on `http://<host>:8797`.
